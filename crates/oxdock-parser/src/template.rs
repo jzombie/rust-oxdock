@@ -14,6 +14,8 @@
 //!   ASCII, so no multibyte character can match, and every cut lands
 //!   on an ASCII boundary.
 
+use crate::diagnostics as template_diag;
+
 /// One raw segment of template text: literal bytes, or one unescaped
 /// `{{ ... }}` with its trimmed key plus the verbatim raw slice.
 /// Escapes are NOT processed here; consumers apply them to
@@ -412,13 +414,17 @@ fn parse_quoted_literal(src: &str, quote: char) -> anyhow::Result<String> {
         }
         if bytes[i] == quote as u8 {
             if i + 1 != src.len() {
-                anyhow::bail!("unexpected text after string literal: {src:?}");
+                return Err(anyhow::Error::new(
+                    template_diag::template_string_trailing_text(src),
+                ));
             }
             return unescape_literal(&src[1..i], quote);
         }
         i += 1;
     }
-    anyhow::bail!("unterminated string literal: {src:?}")
+    Err(anyhow::Error::new(
+        template_diag::template_string_unterminated(src),
+    ))
 }
 
 /// Match one `"""..."""` block from its opener to its first unescaped
@@ -435,13 +441,17 @@ fn parse_block_literal(src: &str) -> anyhow::Result<String> {
         }
         if bytes[i] == b'"' && bytes.get(i + 1) == Some(&b'"') && bytes.get(i + 2) == Some(&b'"') {
             if i + 3 != src.len() {
-                anyhow::bail!("unexpected text after block string literal: {src:?}");
+                return Err(anyhow::Error::new(
+                    template_diag::template_block_trailing_text(src),
+                ));
             }
             return Ok(crate::command::lower_block_string(src));
         }
         i += 1;
     }
-    anyhow::bail!("unterminated block string literal: {src:?}")
+    Err(anyhow::Error::new(
+        template_diag::template_block_unterminated(src),
+    ))
 }
 
 /// Unescape a quoted literal: `\\` and the enclosing quote only.
@@ -461,7 +471,11 @@ fn unescape_literal(src: &str, quote: char) -> anyhow::Result<String> {
                 out.push('\\');
                 out.push(other);
             }
-            None => anyhow::bail!("unterminated escape in placeholder string literal"),
+            None => {
+                return Err(anyhow::Error::new(
+                    template_diag::template_string_unterminated_escape(),
+                ));
+            }
         }
     }
     Ok(out)
@@ -852,12 +866,14 @@ pub fn split_map_entry(entry: &str) -> Option<(String, String)> {
 /// resolution, which report identical diagnostics.
 pub fn parse_map_key(src: &str) -> anyhow::Result<String> {
     if let Some(literal) = parse_string_literal(src) {
-        return literal.map_err(|err| anyhow::anyhow!("{err:#}"));
+        return literal;
     }
     if !src.is_empty() && src.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Ok(src.to_string());
     }
-    anyhow::bail!("invalid map literal key '{src}': use a bare name or any string spelling")
+    Err(anyhow::Error::new(template_diag::template_map_key_invalid(
+        src,
+    )))
 }
 
 fn parse_dollar_path(rest: &str) -> Option<TemplateVar> {

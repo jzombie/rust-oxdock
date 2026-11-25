@@ -304,7 +304,14 @@ Remaining:
   zero fmt drift).
   `fs_ops.rs` and `pipeline.rs` verified clean (no inline
   failures; `fs_ops` only re-exports `Result`).
-- Parser: `markdown.rs`, `template.rs`, `macro_input.rs`.
+- Parser: `markdown.rs` done 2026-11-25 (10 `dsl.markdown.*`
+  ctors: unclosed fence + 9 metadata shapes, line-prefixed
+  byte-identical), `template.rs` done (6 `dsl.template.*` ctors:
+  quoted/block trailing/unterminated, escape, map-key),
+  `macro_input.rs` done (1 `dsl.macro_input.*` ctor); zero inline
+  `bail!`/`anyhow!` left in all three; parser lib 266 +
+  integration 301 green; core lib 408 + integration 629 green;
+  clippy/doc clean; zero fmt drift.
 - Plugins and sys crates last.
 
 ### Phase D — retire `anyhow` as the carrier

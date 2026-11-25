@@ -1,4 +1,5 @@
-use anyhow::{Result, bail};
+use super::diagnostics as markdown_diag;
+use anyhow::Result;
 use line_ending::LineEnding;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
@@ -70,7 +71,9 @@ pub fn extract_fenced_blocks(markdown: &str, lang: &str) -> Result<Vec<FencedBlo
                 // range terminates with an explicit fence closer.
                 let block_slice = markdown[range.start..range.end].trim_end();
                 if !block_slice.ends_with("```") && !block_slice.ends_with("~~~") {
-                    bail!("markdown:{current_line_no}: code fence is never closed");
+                    return Err(anyhow::Error::new(markdown_diag::markdown_unclosed_fence(
+                        current_line_no,
+                    )));
                 }
                 let metadata = parse_metadata(&current_info, current_line_no)?;
                 // Trim trailing newline that pulldown-cmark includes from the last line.
@@ -87,7 +90,9 @@ pub fn extract_fenced_blocks(markdown: &str, lang: &str) -> Result<Vec<FencedBlo
     }
 
     if in_block {
-        bail!("markdown:{current_line_no}: code fence is never closed");
+        return Err(anyhow::Error::new(markdown_diag::markdown_unclosed_fence(
+            current_line_no,
+        )));
     }
     Ok(blocks)
 }
@@ -106,7 +111,7 @@ fn skip_token(info: &str) -> &str {
 }
 
 fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
-    let fail = |msg: String| anyhow::anyhow!("markdown:{line_no}: {msg}");
+    let fail = |diag: oxdock_diagnostics::Diagnostic| anyhow::Error::new(diag);
 
     let rest = skip_token(info);
     let mut metadata = BlockMetadata::default();
@@ -120,8 +125,8 @@ fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
             break;
         };
         if !first_char.is_ascii_alphanumeric() && first_char != '_' {
-            return Err(fail(format!(
-                "unexpected character '{first_char}' in fence metadata"
+            return Err(fail(markdown_diag::markdown_metadata_unexpected_char(
+                line_no, first_char,
             )));
         }
         let mut key = String::new();
@@ -143,14 +148,14 @@ fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
             }
             other => {
                 let _ = other;
-                return Err(fail(format!(
-                    "fence metadata item '{key}' is missing ':' after its key"
+                return Err(fail(markdown_diag::markdown_metadata_missing_colon(
+                    line_no, &key,
                 )));
             }
         }
         if saw_equals {
-            return Err(fail(format!(
-                "fence metadata item '{key}' must use 'key:value' syntax"
+            return Err(fail(markdown_diag::markdown_metadata_equals_syntax(
+                line_no, &key,
             )));
         }
 
@@ -165,9 +170,9 @@ fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
                     Some('"') => break,
                     Some(c) => value.push(c),
                     None => {
-                        return Err(fail(
-                            "unterminated double quote in fence metadata".to_string(),
-                        ));
+                        return Err(fail(markdown_diag::markdown_metadata_unterminated_quote(
+                            line_no,
+                        )));
                     }
                 }
             }
@@ -187,24 +192,26 @@ fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
             "env" => {
                 let (name, val) = value
                     .split_once('=')
-                    .ok_or_else(|| fail("env metadata must be 'env:KEY=VALUE'".to_string()))?;
+                    .ok_or_else(|| fail(markdown_diag::markdown_metadata_env_shape(line_no)))?;
                 metadata.env.push((name.to_string(), val.to_string()));
             }
             "roots" => {
                 if value != "unified" {
-                    return Err(fail(format!(
-                        "unsupported roots metadata '{value}' (only 'unified' is defined)"
+                    return Err(fail(markdown_diag::markdown_metadata_roots_unsupported(
+                        line_no, &value,
                     )));
                 }
                 if metadata.unified_roots {
-                    return Err(fail("roots metadata specified more than once".to_string()));
+                    return Err(fail(markdown_diag::markdown_metadata_roots_duplicate(
+                        line_no,
+                    )));
                 }
                 metadata.unified_roots = true;
             }
             "expect_error" => {
                 if metadata.expect_error.replace(value.clone()).is_some() {
                     return Err(fail(
-                        "expect_error metadata specified more than once".to_string(),
+                        markdown_diag::markdown_metadata_expect_error_duplicate(line_no),
                     ));
                 }
             }
@@ -212,8 +219,8 @@ fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
                 metadata.mock_remote.push(value.clone());
             }
             other => {
-                return Err(fail(format!(
-                    "unknown fence metadata key '{other}' (supported: env, roots, expect_error, mock_remote)"
+                return Err(fail(markdown_diag::markdown_metadata_unknown_key(
+                    line_no, other,
                 )));
             }
         }
@@ -334,12 +341,12 @@ mod tests {
         let err = extract_fenced_blocks(md, "oxdock").expect_err("unknown key");
         assert!(
             err.to_string()
-                .contains("unknown fence metadata key 'bogus'")
+                .contains("unknown fence metadata key `bogus`")
         );
 
         let roots = "```oxdock roots:squashed\nECHO x\n```\n";
         let err = extract_fenced_blocks(roots, "oxdock").expect_err("bad roots");
-        assert!(err.to_string().contains("only 'unified'"));
+        assert!(err.to_string().contains("only `unified`"));
 
         let env = "```oxdock env:NOVALUE\nECHO x\n```\n";
         let err = extract_fenced_blocks(env, "oxdock").expect_err("env without '='");
@@ -358,7 +365,7 @@ mod tests {
         let md = "```oxdock expect_error=\"oops\"\nECHO x\n```\n"
             .replace("expect_error:", "expect_error=");
         let err = extract_fenced_blocks(&md, "oxdock").expect_err("equals separator");
-        assert!(err.to_string().contains("must use 'key:value' syntax"));
+        assert!(err.to_string().contains("must use `key:value` syntax"));
     }
 
     #[test]

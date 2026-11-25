@@ -13,7 +13,8 @@ use super::constants::{
     KEYWORD_ASYNC, KEYWORD_ELSE, KEYWORD_IF, KEYWORD_IN, KEYWORD_ISOLATED, KEYWORD_TIMEOUT,
     KEYWORD_WITH_IO, MODULE_SEPARATOR,
 };
-use super::{Command, Step};
+use super::diagnostics as macro_diag;
+use crate::{Command, Step};
 use anyhow::Result;
 use proc_macro2::{Delimiter, LineColumn, Spacing, TokenStream as TokenStream2, TokenTree};
 use syn::parse::{Parse, ParseStream};
@@ -904,7 +905,9 @@ pub fn split_modules_prefix(ts: &TokenStream2) -> Result<(Vec<String>, TokenStre
                     TokenTree::Ident(name) => names.push(name.to_string()),
                     TokenTree::Punct(comma) if comma.as_char() == ',' => {}
                     other => {
-                        anyhow::bail!("modules: prefix holds module names, found `{other}`");
+                        return Err(anyhow::Error::new(
+                            macro_diag::macro_input_modules_prefix_other(&other.to_string()),
+                        ));
                     }
                 }
             }

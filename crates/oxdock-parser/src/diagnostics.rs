@@ -35,6 +35,7 @@ const FIELD_FLAG: &str = "flag";
 const FIELD_MAX: &str = "max";
 const FIELD_SECOND: &str = "second";
 const FIELD_SPELLING: &str = "spelling";
+const FIELD_LINE: &str = "line";
 
 /// Decode a mid-parse fragment for user output: the transient
 /// `WS_SENTINEL` boundary becomes a space. Single owner for the decode
@@ -991,6 +992,201 @@ pub fn assert_equality_hash_with_expected(command: &str) -> Diagnostic {
     )
 }
 
+/// Markdown code fence that never closes. Takes the 1-based line
+/// number where the fence opens; the `markdown:{line}` prefix lives
+/// here so call sites pass the line only.
+pub fn markdown_unclosed_fence(line: usize) -> Diagnostic {
+    let message = format!("markdown:{line}: code fence is never closed");
+    Diagnostic::new(
+        "dsl.markdown.unclosed_fence",
+        message,
+        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string())]),
+    )
+}
+
+/// Unexpected character in fence metadata. Takes the 1-based line
+/// number and the character; quoting lives here.
+pub fn markdown_metadata_unexpected_char(line: usize, ch: char) -> Diagnostic {
+    let message = format!("markdown:{line}: unexpected character `{ch}` in fence metadata");
+    Diagnostic::new(
+        "dsl.markdown.metadata_unexpected_char",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_LINE, &line.to_string()),
+            (FIELD_GOT, &ch.to_string()),
+        ]),
+    )
+}
+
+/// Fence metadata item missing `:` after its key. Takes the 1-based
+/// line number and the key; quoting lives here.
+pub fn markdown_metadata_missing_colon(line: usize, key: &str) -> Diagnostic {
+    let message =
+        format!("markdown:{line}: fence metadata item `{key}` is missing ':' after its key");
+    Diagnostic::new(
+        "dsl.markdown.metadata_missing_colon",
+        message,
+        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string()), ("key", key)]),
+    )
+}
+
+/// Fence metadata item using `=` instead of `:`. Takes the 1-based
+/// line number and the key; quoting lives here.
+pub fn markdown_metadata_equals_syntax(line: usize, key: &str) -> Diagnostic {
+    let message =
+        format!("markdown:{line}: fence metadata item `{key}` must use `key:value` syntax");
+    Diagnostic::new(
+        "dsl.markdown.metadata_equals_syntax",
+        message,
+        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string()), ("key", key)]),
+    )
+}
+
+/// Unterminated double quote in fence metadata. Takes the 1-based
+/// line number.
+pub fn markdown_metadata_unterminated_quote(line: usize) -> Diagnostic {
+    let message = format!("markdown:{line}: unterminated double quote in fence metadata");
+    Diagnostic::new(
+        "dsl.markdown.metadata_unterminated_quote",
+        message,
+        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string())]),
+    )
+}
+
+/// `env` metadata without `KEY=VALUE` shape. Takes the 1-based line
+/// number.
+pub fn markdown_metadata_env_shape(line: usize) -> Diagnostic {
+    let message = format!("markdown:{line}: env metadata must be `env:KEY=VALUE`");
+    Diagnostic::new(
+        "dsl.markdown.metadata_env_shape",
+        message,
+        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string())]),
+    )
+}
+
+/// Unsupported `roots` metadata value. Takes the 1-based line number
+/// and the value; quoting lives here.
+pub fn markdown_metadata_roots_unsupported(line: usize, value: &str) -> Diagnostic {
+    let message = format!(
+        "markdown:{line}: unsupported roots metadata `{value}` (only `unified` is defined)"
+    );
+    Diagnostic::new(
+        "dsl.markdown.metadata_roots_unsupported",
+        message,
+        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string()), (FIELD_GOT, value)]),
+    )
+}
+
+/// Duplicate `roots` metadata. Takes the 1-based line number.
+pub fn markdown_metadata_roots_duplicate(line: usize) -> Diagnostic {
+    let message = format!("markdown:{line}: roots metadata specified more than once");
+    Diagnostic::new(
+        "dsl.markdown.metadata_roots_duplicate",
+        message,
+        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string())]),
+    )
+}
+
+/// Duplicate `expect_error` metadata. Takes the 1-based line number.
+pub fn markdown_metadata_expect_error_duplicate(line: usize) -> Diagnostic {
+    let message = format!("markdown:{line}: expect_error metadata specified more than once");
+    Diagnostic::new(
+        "dsl.markdown.metadata_expect_error_duplicate",
+        message,
+        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string())]),
+    )
+}
+
+/// Unknown fence metadata key. Takes the 1-based line number and the
+/// key; the supported-key list lives here.
+pub fn markdown_metadata_unknown_key(line: usize, key: &str) -> Diagnostic {
+    let message = format!(
+        "markdown:{line}: unknown fence metadata key `{key}` (supported: env, roots, expect_error, mock_remote)"
+    );
+    Diagnostic::new(
+        "dsl.markdown.metadata_unknown_key",
+        message,
+        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string()), ("key", key)]),
+    )
+}
+
+/// Text after a quoted string literal's closer. Takes the source;
+/// `Debug` rendering lives here.
+pub fn template_string_trailing_text(src: &str) -> Diagnostic {
+    let message = format!("unexpected text after string literal: {src:?}");
+    Diagnostic::new(
+        "dsl.template.string_trailing_text",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, src)]),
+    )
+}
+
+/// Quoted string literal with no closer. Takes the source; `Debug`
+/// rendering lives here.
+pub fn template_string_unterminated(src: &str) -> Diagnostic {
+    let message = format!("unterminated string literal: {src:?}");
+    Diagnostic::new(
+        "dsl.template.string_unterminated",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, src)]),
+    )
+}
+
+/// Text after a block string literal's closer. Takes the source;
+/// `Debug` rendering lives here.
+pub fn template_block_trailing_text(src: &str) -> Diagnostic {
+    let message = format!("unexpected text after block string literal: {src:?}");
+    Diagnostic::new(
+        "dsl.template.block_trailing_text",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, src)]),
+    )
+}
+
+/// Block string literal with no closer triple. Takes the source;
+/// `Debug` rendering lives here.
+pub fn template_block_unterminated(src: &str) -> Diagnostic {
+    let message = format!("unterminated block string literal: {src:?}");
+    Diagnostic::new(
+        "dsl.template.block_unterminated",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, src)]),
+    )
+}
+
+/// Placeholder string literal ending in a backslash. Parameterless:
+/// the wording is fixed.
+pub fn template_string_unterminated_escape() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.template.string_unterminated_escape",
+        "unterminated escape in placeholder string literal".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Map literal key that is neither a bare name nor a string spelling.
+/// Takes the source; quoting lives here.
+pub fn template_map_key_invalid(src: &str) -> Diagnostic {
+    let message =
+        format!("invalid map literal key `{src}`: use a bare name or any string spelling");
+    Diagnostic::new(
+        "dsl.template.map_key_invalid",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, src)]),
+    )
+}
+
+/// `modules:` prefix holding a non-module token. Takes the rendered
+/// token; quoting lives here.
+pub fn macro_input_modules_prefix_other(other: &str) -> Diagnostic {
+    let message = format!("modules: prefix holds module names, found `{other}`");
+    Diagnostic::new(
+        "dsl.macro_input.modules_prefix_other",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, other)]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1101,11 +1297,72 @@ mod tests {
             assert_equality_requires_value("ASSERT_EQ").key(),
             assert_equality_requires_expected("ASSERT_EQ").key(),
             assert_equality_hash_with_expected("ASSERT_EQ").key(),
+            markdown_unclosed_fence(3).key(),
+            markdown_metadata_unexpected_char(3, '%').key(),
+            markdown_metadata_missing_colon(3, "k").key(),
+            markdown_metadata_equals_syntax(3, "k").key(),
+            markdown_metadata_unterminated_quote(3).key(),
+            markdown_metadata_env_shape(3).key(),
+            markdown_metadata_roots_unsupported(3, "v").key(),
+            markdown_metadata_roots_duplicate(3).key(),
+            markdown_metadata_expect_error_duplicate(3).key(),
+            markdown_metadata_unknown_key(3, "k").key(),
+            template_string_trailing_text("x").key(),
+            template_string_unterminated("x").key(),
+            template_block_trailing_text("x").key(),
+            template_block_unterminated("x").key(),
+            template_string_unterminated_escape().key(),
+            template_map_key_invalid("x").key(),
+            macro_input_modules_prefix_other("x").key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
             assert!(seen.insert(k), "duplicate key {k}");
         }
+    }
+
+    #[test]
+    fn markdown_template_macro_messages_match_canonical_wording() {
+        assert_eq!(
+            markdown_unclosed_fence(3).message(),
+            "markdown:3: code fence is never closed"
+        );
+        assert_eq!(
+            markdown_unclosed_fence(3).key(),
+            "dsl.markdown.unclosed_fence"
+        );
+        assert_eq!(
+            markdown_metadata_unknown_key(3, "bogus").message(),
+            "markdown:3: unknown fence metadata key `bogus` (supported: env, roots, expect_error, mock_remote)"
+        );
+        assert_eq!(
+            markdown_metadata_roots_unsupported(3, "squashed").message(),
+            "markdown:3: unsupported roots metadata `squashed` (only `unified` is defined)"
+        );
+        assert_eq!(
+            markdown_metadata_env_shape(3).message(),
+            "markdown:3: env metadata must be `env:KEY=VALUE`"
+        );
+        assert_eq!(
+            template_string_unterminated("abc").message(),
+            "unterminated string literal: \"abc\""
+        );
+        assert_eq!(
+            template_string_trailing_text("abc").message(),
+            "unexpected text after string literal: \"abc\""
+        );
+        assert_eq!(
+            template_map_key_invalid("a b").message(),
+            "invalid map literal key `a b`: use a bare name or any string spelling"
+        );
+        assert_eq!(
+            template_string_unterminated_escape().message(),
+            "unterminated escape in placeholder string literal"
+        );
+        assert_eq!(
+            macro_input_modules_prefix_other("foo").message(),
+            "modules: prefix holds module names, found `foo`"
+        );
     }
 
     #[test]
