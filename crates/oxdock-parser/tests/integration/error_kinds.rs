@@ -38,6 +38,10 @@ fn stable_keys_survive_the_token_round_trip() {
         ("WRITE\n", "dsl.validation.missing_argument"),
         ("FROBNICATE hi\n", "dsl.unknown_command.unknown"),
         ("EXPORT NOPE\n", "dsl.validation.export_unknown_func"),
+        (
+            "EXPORT [\n# comment\nFOO\n]\n",
+            "dsl.spelling.bracket_list_comment",
+        ),
     ] {
         let err = parse_script(script, lower_command).expect_err("must fail");
         assert_eq!(err.key(), Some(key), "script: {script:?} got: {err}");

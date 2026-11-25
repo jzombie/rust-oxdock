@@ -195,6 +195,28 @@ fn func_cannot_shadow_module_function() {
 }
 
 #[test]
+fn import_bracket_list_with_comments_fails_with_full_error() {
+    // Same shared rule as EXPORT: comments inside the brackets miss
+    // the list shape and fail with the one keyed diagnostic naming
+    // the comment, not the generic statement error.
+    let expected = "IMPORT lists do not allow comments inside the brackets: move the comment above the statement\n  --> line 1, col 1-8\n  1 | IMPORT [\n    | ^^^^^^^^";
+    let err = parse(indoc! {r#"
+        IMPORT [
+            # leading comment
+            ALPHA,
+        ]
+        GLOB("*.txt")
+    "#})
+    .expect_err("commented import must fail");
+    assert_eq!(err.to_string(), expected, "entire error differs");
+    assert_eq!(
+        err.key(),
+        Some("dsl.spelling.bracket_list_comment"),
+        "commented import carries the shared key"
+    );
+}
+
+#[test]
 fn export_multiline_list_with_comments_fails_with_full_error() {
     use oxdock_parser::parse_script_with_modules_and_exports;
     // Baseline: a multi-line bracket list with no comments parses.
@@ -221,13 +243,11 @@ fn export_multiline_list_with_comments_fails_with_full_error() {
         vec!["FOO".to_string(), "BAR".to_string()]
     );
 
-    // Comments inside the bracket list miss the `EXPORT` shape, so the
-    // whole statement fails structural parsing: the error points at
-    // the `EXPORT [` head line, not at the comment itself, and carries
-    // no stable diagnostic key. Both comment spellings fail with this
-    // entire error, byte for byte.
-    let expected =
-        "unexpected line break in argument\n  --> line 7, col 1-8\n  7 | EXPORT [\n    | ^^^^^^^^";
+    // Comments inside the bracket list miss the `EXPORT` shape, so
+    // the statement fails with the shared bracket-list diagnostic
+    // naming the comment, not the generic statement error. Both
+    // comment spellings fail with this entire error, byte for byte.
+    let expected = "EXPORT lists do not allow comments inside the brackets: move the comment above the statement\n  --> line 7, col 1-8\n  7 | EXPORT [\n    | ^^^^^^^^";
     let commented = [
         indoc! {r#"
             FUNC FOO(): STRING {
@@ -263,7 +283,11 @@ fn export_multiline_list_with_comments_fails_with_full_error() {
             parse_script_with_modules_and_exports(script, mock_lower, HashSet::new(), table())
                 .expect_err("commented export must fail");
         assert_eq!(err.to_string(), expected, "entire error differs");
-        assert_eq!(err.key(), None, "commented export has no keyed diagnostic");
+        assert_eq!(
+            err.key(),
+            Some("dsl.spelling.bracket_list_comment"),
+            "commented export carries the shared key"
+        );
     }
 }
 

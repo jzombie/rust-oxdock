@@ -182,6 +182,21 @@ pub fn spelling_invalid_int(got: &str) -> Diagnostic {
     )
 }
 
+/// Comment inside an `IMPORT`/`EXPORT` bracket name list. Takes the
+/// invoking command; one key for both lists since the rule is
+/// shared. Call sites pass the `KEYWORD_*` constant, never a
+/// literal.
+pub fn spelling_bracket_list_comment(command: &str) -> Diagnostic {
+    let message = format!(
+        "{command} lists do not allow comments inside the brackets: move the comment above the statement"
+    );
+    Diagnostic::new(
+        "dsl.spelling.bracket_list_comment",
+        message,
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command)]),
+    )
+}
+
 /// Flag that requires a value but got none. `COMMAND`-lead per the
 /// unified contract; the flag is a DSL token in backticks.
 pub fn flag_missing_value(command: &str, flag: &str) -> Diagnostic {
@@ -1208,6 +1223,22 @@ mod tests {
     }
 
     #[test]
+    fn bracket_list_comment_shares_one_key_across_invokers() {
+        let export = spelling_bracket_list_comment("EXPORT");
+        let import = spelling_bracket_list_comment("IMPORT");
+        assert_eq!(export.key(), "dsl.spelling.bracket_list_comment");
+        assert_eq!(import.key(), export.key());
+        assert_eq!(
+            export.message(),
+            "EXPORT lists do not allow comments inside the brackets: move the comment above the statement"
+        );
+        assert_eq!(
+            import.message(),
+            "IMPORT lists do not allow comments inside the brackets: move the comment above the statement"
+        );
+    }
+
+    #[test]
     fn each_failure_has_a_distinct_key() {
         let keys = [
             spelling_trailing_text("x").key(),
@@ -1219,6 +1250,7 @@ mod tests {
             spelling_expected_literal("x").key(),
             spelling_invalid_float("x").key(),
             spelling_invalid_int("x").key(),
+            spelling_bracket_list_comment("EXPORT").key(),
             alias_needs_field("x").key(),
             alias_needs_name().key(),
             alias_name_lowercase("B", "B").key(),
