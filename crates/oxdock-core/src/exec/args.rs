@@ -429,11 +429,11 @@ pub(crate) fn resolve_overrides<P: ProcessManager>(
 pub(crate) fn resolve_arg_as_int<P: ProcessManager>(
     arg: &Arg,
     cx: &mut StepCtx<'_, P>,
-) -> Result<i64> {
-    let resolved = resolve_arg(arg, cx)?;
+) -> DiagnosticResult<i64> {
+    let resolved = resolve_arg(arg, cx).map_err(|err| args_diag::eval_int_arg_resolve(&err))?;
     oxdock_parser::command::strip_digit_separators(&resolved)
         .parse::<i64>()
-        .map_err(|_| anyhow::anyhow!("expected int, got {resolved:?}"))
+        .map_err(|_| args_diag::eval_expected_int(&resolved))
 }
 
 /// Resolve an [`Arg`] to a duration, enforcing the declared `duration`
@@ -558,10 +558,10 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
 }
 
 /// Check if a value is truthy. Only `BOOL` words are accepted; all other types produce a TypeError.
-pub(crate) fn is_truthy(val: &Value) -> Result<bool> {
+pub(crate) fn is_truthy(val: &Value) -> DiagnosticResult<bool> {
     match val.as_bool() {
         Some(b) => Ok(b),
-        None => bail!("Type Error: condition must be a Bool, found {:?}", val),
+        None => Err(args_diag::eval_condition_needs_bool(val)),
     }
 }
 

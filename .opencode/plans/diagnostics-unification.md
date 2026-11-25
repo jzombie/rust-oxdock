@@ -910,6 +910,20 @@ transport, so this phase is mechanical:
    each at the anyhow boundary, while the interior
    `?` sites hold via blanket From. Core 408 plus
    integration 629 green; clippy and fmt clean.
+   Condition-int resolve step 2026-11-26: three new
+   ctors (eval_condition_needs_bool plus
+   eval_expected_int plus eval_int_arg_resolve,
+   wording byte-identical, all pinned by key plus
+   message tests, Debug rendering inside the ctors);
+   is_truthy plus resolve_arg_as_int now return
+   DiagnosticResult. The resolve_arg dependency stays
+   anyhow, so its failure maps through the verbatim
+   passthrough (message already names the argument
+   and cause, per the parse_args precedent). All five
+   is_truthy plus three resolve_arg_as_int call sites
+   sit in anyhow fns and hold via blanket From. Core
+   408 plus integration 629 green; clippy and fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

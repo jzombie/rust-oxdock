@@ -1341,6 +1341,40 @@ pub fn eval_neg_needs_numeric(got: &super::Value) -> Diagnostic {
     )
 }
 
+/// Non-`BOOL` condition value. Takes the value; `Debug` rendering
+/// lives here.
+pub fn eval_condition_needs_bool(got: &super::Value) -> Diagnostic {
+    let message = format!("Type Error: condition must be a Bool, found {got:?}");
+    Diagnostic::new(
+        "dsl.eval.condition_needs_bool",
+        message,
+        Diagnostic::make_fields(&[("got", &format!("{got:?}"))]),
+    )
+}
+
+/// `int`-typed argument with a non-integer spelling. Takes the
+/// resolved text; `Debug` rendering lives here.
+pub fn eval_expected_int(got: &str) -> Diagnostic {
+    let message = format!("expected int, got {got:?}");
+    Diagnostic::new(
+        "dsl.eval.expected_int",
+        message,
+        Diagnostic::make_fields(&[("got", got)]),
+    )
+}
+
+/// `int`-typed argument whose resolution failed. Takes the underlying
+/// failure verbatim: its message already names the argument and the
+/// cause, so no wrapper is added.
+pub fn eval_int_arg_resolve(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.eval.int_arg_resolve",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
 /// `FORMAT_BYTE_COUNT` with a negative count.
 pub fn std_format_byte_count_negative(bytes: i64) -> Diagnostic {
     let message = format!("FORMAT_BYTE_COUNT needs a non-negative byte count, got {bytes}");
@@ -2921,6 +2955,9 @@ mod tests {
             eval_non_finite_result().key(),
             eval_neg_overflow().key(),
             eval_neg_needs_numeric(&crate::Value::string("x".to_string())).key(),
+            eval_condition_needs_bool(&crate::Value::string("x".to_string())).key(),
+            eval_expected_int("x").key(),
+            eval_int_arg_resolve(&anyhow::anyhow!("x")).key(),
             std_format_byte_count_negative(-1).key(),
             std_format_duration_negative(-1).key(),
             std_parse_duration_range("x").key(),
@@ -3097,6 +3134,18 @@ mod tests {
         assert_eq!(
             eval_neg_needs_numeric(&crate::Value::string("x".to_string())).message(),
             "Type Error: unary '-' requires Int or Float, found STRING(\"x\")"
+        );
+        assert_eq!(
+            eval_condition_needs_bool(&crate::Value::string("x".to_string())).message(),
+            "Type Error: condition must be a Bool, found STRING(\"x\")"
+        );
+        assert_eq!(
+            eval_expected_int("12x").message(),
+            "expected int, got \"12x\""
+        );
+        assert_eq!(
+            eval_int_arg_resolve(&anyhow::anyhow!("undefined variable `$x`")).message(),
+            "undefined variable `$x`"
         );
         assert_eq!(
             std_bool_cannot_coerce("BOOL_OR", "x").message(),
