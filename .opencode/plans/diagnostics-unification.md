@@ -561,6 +561,14 @@ transport, so this phase is mechanical:
    mcp via Ok wrap with question-mark coercion. Init_handler,
    build_inner, and reload paths stay on anyhow Result until
    core session errors flip. Mcp 50 green; clippy and fmt clean.
+   Pty output step 2026-11-26: new output_write_failed and
+   output_flush_failed ctors replace the two with_context
+   format-string wraps (typed io error via with_source, distinct
+   keys); pump_master_out now returns DiagnosticResult with bare
+   Err ctors, output-worker boundary maps back via Error from
+   into the anyhow ChildDone channel. Run_pty_session spawn and
+   alloc paths stay on anyhow Result until spawn ctors land.
+   Pty 19 plus core 408 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

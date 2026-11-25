@@ -206,7 +206,7 @@ fn pump_master_out(
     activity: &Arc<AtomicU64>,
     epoch: Instant,
     func: &'static str,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut buffer = [0u8; PUMP_CHUNK];
     let mut queries = DsrFilter::new();
     loop {
@@ -220,7 +220,7 @@ fn pump_master_out(
             // ends here.
             Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => break,
             Err(err) => {
-                return Err(anyhow::Error::new(pty_diag::master_read_failed(func, &err)));
+                return Err(pty_diag::master_read_failed(func, &err));
             }
             Ok(0) => break,
             Ok(count) => {
@@ -230,13 +230,13 @@ fn pump_master_out(
                 }
                 let mut guard = writer
                     .lock()
-                    .map_err(|_| anyhow::Error::new(pty_diag::output_lock_poisoned(func)))?;
+                    .map_err(|_| pty_diag::output_lock_poisoned(func))?;
                 guard
                     .write_all(&clean)
-                    .with_context(|| format!("{func} output write failed"))?;
+                    .map_err(|err| pty_diag::output_write_failed(func, &err))?;
                 guard
                     .flush()
-                    .with_context(|| format!("{func} output flush failed"))?;
+                    .map_err(|err| pty_diag::output_flush_failed(func, &err))?;
                 activity.store(elapsed_ms(epoch), Ordering::SeqCst);
             }
         }
@@ -247,13 +247,13 @@ fn pump_master_out(
     if !tail.is_empty() {
         let mut guard = writer
             .lock()
-            .map_err(|_| anyhow::Error::new(pty_diag::output_lock_poisoned(func)))?;
+            .map_err(|_| pty_diag::output_lock_poisoned(func))?;
         guard
             .write_all(&tail)
-            .with_context(|| format!("{func} output write failed"))?;
+            .map_err(|err| pty_diag::output_write_failed(func, &err))?;
         guard
             .flush()
-            .with_context(|| format!("{func} output flush failed"))?;
+            .map_err(|err| pty_diag::output_flush_failed(func, &err))?;
     }
     Ok(())
 }
@@ -552,7 +552,7 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
                 func,
             );
             peer_done_out.store(true, Ordering::SeqCst);
-            result
+            result.map_err(anyhow::Error::from)
         }));
         let outcome = match outcome {
             Ok(inner) => inner,

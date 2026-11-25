@@ -47,6 +47,40 @@ pub fn output_lock_poisoned(func: &str) -> Diagnostic {
     )
 }
 
+/// Output write failed. Takes the caller label plus the I/O failure;
+/// rendering lives here. The typed I/O error rides as the chained
+/// source so `Error::source` and `{err:#}` chains keep it.
+pub fn output_write_failed(func: &str, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{func} output write failed: {err_text}");
+    Diagnostic::new(
+        "pty.pump.output_write_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, err_text.as_str())]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        err.kind(),
+        err_text,
+    )))
+}
+
+/// Output flush failed. Takes the caller label plus the I/O failure;
+/// rendering lives here. The typed I/O error rides as the chained
+/// source so `Error::source` and `{err:#}` chains keep it.
+pub fn output_flush_failed(func: &str, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{func} output flush failed: {err_text}");
+    Diagnostic::new(
+        "pty.pump.output_flush_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, err_text.as_str())]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        err.kind(),
+        err_text,
+    )))
+}
+
 /// Caller stdin read failed. Takes the caller label plus the I/O
 /// failure; rendering lives here. The typed I/O error rides as the
 /// chained source so `Error::source` and `{err:#}` chains keep it.
@@ -117,6 +151,8 @@ mod tests {
         let keys = [
             master_read_failed("FUNC", &err).key(),
             output_lock_poisoned("FUNC").key(),
+            output_write_failed("FUNC", &err).key(),
+            output_flush_failed("FUNC", &err).key(),
             input_read_failed("FUNC", &err).key(),
             sink_lock_poisoned("FUNC").key(),
             needs_program("FUNC").key(),
@@ -149,6 +185,14 @@ mod tests {
             "SSH_PTY_RUN output lock poisoned"
         );
         assert_eq!(
+            output_write_failed("SSH_PTY_RUN", &err).message(),
+            "SSH_PTY_RUN output write failed: boom"
+        );
+        assert_eq!(
+            output_flush_failed("SSH_PTY_RUN", &err).message(),
+            "SSH_PTY_RUN output flush failed: boom"
+        );
+        assert_eq!(
             input_read_failed("SSH_PTY_RUN", &err).message(),
             "SSH_PTY_RUN input read failed: boom"
         );
@@ -177,6 +221,8 @@ mod tests {
         for diag in [
             master_read_failed("FUNC", &err),
             input_read_failed("FUNC", &err),
+            output_write_failed("FUNC", &err),
+            output_flush_failed("FUNC", &err),
         ] {
             let source = diag.source().expect("io ctor keeps a source");
             let io_source = source
