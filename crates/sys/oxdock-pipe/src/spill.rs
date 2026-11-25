@@ -187,7 +187,7 @@ impl SpillBuffer {
     pub fn drain_string_strict(&self) -> anyhow::Result<String> {
         let bytes = self.drain_bytes()?;
         String::from_utf8(bytes)
-            .map_err(|e| anyhow::anyhow!("captured stdout is not valid UTF-8: {e}"))
+            .map_err(|e| anyhow::Error::new(crate::diagnostics::captured_stdout_invalid_utf8(&e)))
     }
 
     /// Bytes currently held (memory plus unread spill-file backlog).

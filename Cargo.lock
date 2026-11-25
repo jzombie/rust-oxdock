@@ -1865,6 +1865,7 @@ name = "oxdock-pipe"
 version = "0.44.1-alpha"
 dependencies = [
  "anyhow",
+ "oxdock-diagnostics",
  "oxdock-fs",
 ]
 

@@ -10,6 +10,7 @@
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Condvar, Mutex};
 
+use crate::diagnostics as pipe_diag;
 use crate::slot::{SharedInput, SharedOutput};
 use crate::spill::SpillBuffer;
 
@@ -404,15 +405,11 @@ pub fn peek(handle: &crate::slot::PipeHandle) -> anyhow::Result<Vec<u8>> {
         match &*guard {
             Slot::Script { backend } => Some(Arc::clone(backend)),
             Slot::Unbound => {
-                return Err(anyhow::anyhow!(
-                    "cannot peek unbound pipe: bind it to a command first"
-                ));
+                return Err(anyhow::Error::new(pipe_diag::peek_unbound()));
             }
             #[cfg(not(miri))]
             Slot::Os { .. } => {
-                return Err(anyhow::anyhow!(
-                    "cannot peek OS-materialized pipe: drain it through a bound command instead"
-                ));
+                return Err(anyhow::Error::new(pipe_diag::peek_os_materialized()));
             }
         }
     };
@@ -421,7 +418,7 @@ pub fn peek(handle: &crate::slot::PipeHandle) -> anyhow::Result<Vec<u8>> {
     };
     inner
         .peek_bytes()
-        .map_err(|e| anyhow::anyhow!("failed to peek pipe: {e}"))
+        .map_err(|e| anyhow::Error::new(pipe_diag::peek_failed(&e)))
 }
 
 /// Snapshot one handle for diagnostics. Unbound handles report kind

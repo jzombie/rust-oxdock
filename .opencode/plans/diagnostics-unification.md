@@ -376,6 +376,15 @@ Remaining:
   identically on the clean tree: `check_options` renders
   "expected `MAP`" with backticks vs the test's "expected MAP");
   clippy/doc clean; zero fmt drift).
+- Sys crate: `oxdock-pipe` done 2026-11-26 (new
+  `src/diagnostics.rs` owning 8 `pipe.*` ctors: slot
+  os-reader-lock/os-writer-lock/os-handle-consumed (shared
+  reader/writer key)/handle-lock, peek unbound/os-materialized/failed,
+  spill captured-stdout-invalid-UTF-8; `slot.rs`/`backend.rs`/`spill.rs`
+  zero inline failures (only `anyhow::Error::new` remains);
+  I/O failures take `&std::io::Error`, UTF-8 takes
+  `&std::string::FromUtf8Error`; messages byte-identical; lib 5 green
+  (incl. 2 new key+wording pins); clippy/doc clean; zero fmt drift).
 
 ### Phase D — retire `anyhow` as the carrier
 

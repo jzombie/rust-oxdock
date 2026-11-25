@@ -18,6 +18,7 @@ use std::sync::{
 use anyhow::Result;
 
 use crate::backend::{PipeInner, ScriptPipe};
+use crate::diagnostics as pipe_diag;
 
 /// Shared reader half: mutex-guarded `Read` behind an `Arc`, so every
 /// binding aliases one channel.
@@ -61,11 +62,9 @@ impl OsPipeReader {
     pub fn take(&self) -> Result<std::io::PipeReader> {
         self.inner
             .lock()
-            .map_err(|_| anyhow::anyhow!("os pipe reader lock poisoned"))?
+            .map_err(|_| anyhow::Error::new(pipe_diag::os_reader_lock_poisoned()))?
             .take()
-            .ok_or_else(|| {
-                anyhow::anyhow!("os pipe handle has already been consumed by another process")
-            })
+            .ok_or_else(|| anyhow::Error::new(pipe_diag::os_handle_consumed()))
     }
 
     /// Whether this half was already taken. A poisoned slot reports live
@@ -89,11 +88,9 @@ impl OsPipeWriter {
     pub fn take(&self) -> Result<std::io::PipeWriter> {
         self.inner
             .lock()
-            .map_err(|_| anyhow::anyhow!("os pipe writer lock poisoned"))?
+            .map_err(|_| anyhow::Error::new(pipe_diag::os_writer_lock_poisoned()))?
             .take()
-            .ok_or_else(|| {
-                anyhow::anyhow!("os pipe handle has already been consumed by another process")
-            })
+            .ok_or_else(|| anyhow::Error::new(pipe_diag::os_handle_consumed()))
     }
 
     /// Whether this half was already taken. A poisoned slot reports live
@@ -250,7 +247,7 @@ pub fn materialize(handle: &PipeHandle, promote: bool) -> anyhow::Result<Materia
     let mut guard = handle
         .cell()
         .lock()
-        .map_err(|_| anyhow::anyhow!("pipe handle lock poisoned"))?;
+        .map_err(|_| anyhow::Error::new(pipe_diag::handle_lock_poisoned()))?;
     match &*guard {
         Slot::Script { backend } => Ok(Materialized::Script(Arc::clone(backend))),
         #[cfg(not(miri))]
