@@ -491,7 +491,7 @@ fn finish_union(members: Vec<TypeTag>) -> DiagnosticResult<TypeTag> {
 pub fn collect_type_aliases<P: ProcessManager>(
     steps: &[Step],
     exec: &ExecState<P>,
-) -> Result<HashMap<String, String>> {
+) -> DiagnosticResult<HashMap<String, String>> {
     let mut func_names = HashSet::new();
     for step in steps {
         if let StepKind::FuncDef { name, .. } = &step.kind {
@@ -504,23 +504,19 @@ pub fn collect_type_aliases<P: ProcessManager>(
             continue;
         };
         if aliases.contains_key(name) {
-            return Err(anyhow::Error::new(typing_diag::alias_already_defined(name)));
+            return Err(typing_diag::alias_already_defined(name));
         }
         if TypeTag::builtin(name).is_some() {
-            return Err(anyhow::Error::new(typing_diag::alias_builtin_collision(
-                name,
-            )));
+            return Err(typing_diag::alias_builtin_collision(name));
         }
         if exec.types.contains_key(name) {
-            return Err(anyhow::Error::new(typing_diag::alias_host_collision(name)));
+            return Err(typing_diag::alias_host_collision(name));
         }
         if exec.record_schemas.contains_key(name) {
-            return Err(anyhow::Error::new(typing_diag::alias_schema_collision(
-                name,
-            )));
+            return Err(typing_diag::alias_schema_collision(name));
         }
         if func_names.contains(name) {
-            return Err(anyhow::Error::new(typing_diag::alias_func_collision(name)));
+            return Err(typing_diag::alias_func_collision(name));
         }
         aliases.insert(name.clone(), canonicalize_spelling(target));
     }

@@ -794,6 +794,15 @@ transport, so this phase is mechanical:
    caller stays on anyhow Result, so the tail call takes
    one Ok(...?) wrap (direct return does not coerce).
    Core 408 green; clippy and fmt clean.
+   Alias-collect leaf step 2026-11-26: no new ctors;
+   collect_type_aliases now returns DiagnosticResult
+   with five bare Err ctors (already keyed:
+   already_defined plus builtin/host/schema/func
+   collisions). All callers (handlers map-transpose,
+   six static_check sites, five import sites, mod
+   validate_closure, tests if-let-Ok) stay on anyhow
+   and hold via blanket From. Core 408 green; clippy
+   and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
