@@ -30,6 +30,7 @@ use anyhow::{Context, Result};
 
 use crate::diagnostics as net_diag;
 use oxdock_core::PreRunCheck;
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_parser::{Expr, Step, StepKind, split_qualified};
 use oxdock_pipe::ScriptPipe;
 
@@ -319,22 +320,20 @@ impl EndpointRegistry {
     /// without a bound socket bails: memory and offline services report
     /// the virtual-channel message, unmapped services the mapping hint.
     /// `noun` is `"port"` (`NET_PORT`) or `"address"` (`NET_ADDR`).
-    pub fn resolve_ref(&self, raw: &str, func: &str, noun: &str) -> Result<SocketAddr> {
+    pub fn resolve_ref(&self, raw: &str, func: &str, noun: &str) -> DiagnosticResult<SocketAddr> {
         let text = raw.trim();
         let (protocol, endpoint) = crate::validate::parse_endpoint_ref(text, func)?;
-        let resolve_one = |key: &EndpointKey, kind: &SlotKind| -> Result<SocketAddr> {
-            match kind {
-                SlotKind::TcpBound(addr) => Ok(*addr),
-                SlotKind::Memory | SlotKind::Offline => Err(anyhow::Error::new(
-                    net_diag::virtual_channel_no_physical(func, &key.endpoint, noun),
-                )),
-                SlotKind::Unmapped => Err(anyhow::Error::new(net_diag::service_not_mapped(
-                    func,
-                    &key.endpoint,
-                ))),
-                SlotKind::TcpUnbound => Err(anyhow::Error::new(net_diag::never_bound(func, key))),
-            }
-        };
+        let resolve_one =
+            |key: &EndpointKey, kind: &SlotKind| -> DiagnosticResult<SocketAddr> {
+                match kind {
+                    SlotKind::TcpBound(addr) => Ok(*addr),
+                    SlotKind::Memory | SlotKind::Offline => Err(
+                        net_diag::virtual_channel_no_physical(func, &key.endpoint, noun),
+                    ),
+                    SlotKind::Unmapped => Err(net_diag::service_not_mapped(func, &key.endpoint)),
+                    SlotKind::TcpUnbound => Err(net_diag::never_bound(func, key)),
+                }
+            };
         match protocol {
             Some(protocol) => {
                 let key = EndpointKey { protocol, endpoint };
@@ -348,7 +347,7 @@ impl EndpointRegistry {
                 let udp_kind = self.slot_kind(&udp);
                 match (&tcp_kind, &udp_kind) {
                     (SlotKind::TcpBound(_), SlotKind::TcpBound(_)) => {
-                        Err(anyhow::Error::new(net_diag::ambiguous_endpoint(text)))
+                        Err(net_diag::ambiguous_endpoint(text))
                     }
                     // A known slot's verdict beats an absent one; TCP
                     // first preserves the bare-text default.
@@ -492,7 +491,7 @@ pub fn assert_services_bound(
     registry: &EndpointRegistry,
     module: &str,
     steps: &[Step],
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     if registry.is_offline() {
         return Ok(());
     }
@@ -502,9 +501,7 @@ pub fn assert_services_bound(
     }
     for (func, service) in calls {
         let Some(service) = service else {
-            return Err(anyhow::Error::new(net_diag::service_names_must_be_literal(
-                func,
-            )));
+            return Err(net_diag::service_names_must_be_literal(func));
         };
         check_service_bound(registry, func, &service)?;
     }
@@ -577,7 +574,11 @@ pub fn classify_service_call(module: &str, name: &str) -> Option<&'static str> {
 /// explicitly-mapped memory slot, or an offline designation. Anything
 /// else is a hard error naming the fix. Introspection targets reuse
 /// their own verdicts (same text as the call path).
-fn check_service_bound(registry: &EndpointRegistry, func: &str, service: &str) -> Result<()> {
+fn check_service_bound(
+    registry: &EndpointRegistry,
+    func: &str,
+    service: &str,
+) -> DiagnosticResult<()> {
     if func == "NET_PORT" || func == "NET_ADDR" {
         let noun = if func == "NET_ADDR" {
             "address"
@@ -596,10 +597,10 @@ fn check_service_bound(registry: &EndpointRegistry, func: &str, service: &str) -
         SlotKind::TcpBound(_) | SlotKind::Offline => Ok(()),
         SlotKind::Memory => match sockets {
             SocketRequirement::SocketlessOk => Ok(()),
-            SocketRequirement::SocketRequired => Err(no_cli_mapping(func, &key.endpoint)),
+            SocketRequirement::SocketRequired => Err(net_diag::no_cli_mapping(func, &key.endpoint)),
         },
-        SlotKind::TcpUnbound => Err(anyhow::Error::new(net_diag::never_bound(func, &key))),
-        SlotKind::Unmapped => Err(no_cli_mapping(func, &key.endpoint)),
+        SlotKind::TcpUnbound => Err(net_diag::never_bound(func, &key)),
+        SlotKind::Unmapped => Err(net_diag::no_cli_mapping(func, &key.endpoint)),
     }
 }
 

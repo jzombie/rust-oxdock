@@ -5742,7 +5742,7 @@ pub struct ModuleState {
 /// A pre-run steps inspection: pure function of the parsed steps,
 ///
 /// shared so the struct field stays under the complexity lint.
-pub type PreRunInspector = dyn Fn(&[Step]) -> Result<()> + Send + Sync;
+pub type PreRunInspector = dyn Fn(&[Step]) -> DiagnosticResult<()> + Send + Sync;
 
 /// A pre-run check riding in a module's `states`: the runner executes
 /// every staged check against the parsed steps before the first step
@@ -5756,14 +5756,14 @@ pub struct PreRunCheck {
 
 impl PreRunCheck {
     /// Wrap a steps inspector as a pre-run check.
-    pub fn new(check: impl Fn(&[Step]) -> Result<()> + Send + Sync + 'static) -> Self {
+    pub fn new(check: impl Fn(&[Step]) -> DiagnosticResult<()> + Send + Sync + 'static) -> Self {
         Self {
             check: Arc::new(check),
         }
     }
 
     /// Run the inspection: `Ok` lets execution start.
-    pub fn run(&self, steps: &[Step]) -> Result<()> {
+    pub fn run(&self, steps: &[Step]) -> DiagnosticResult<()> {
         (self.check)(steps)
     }
 }
@@ -5782,7 +5782,7 @@ impl<P: ProcessManager> HostModule<P> {
     /// Run every staged [`PreRunCheck`] against already-parsed steps.
     /// The runner calls this before the first step executes; the first
     /// failing check aborts the run with no side effects.
-    pub fn check_pre_run(&self, steps: &[Step]) -> Result<()> {
+    pub fn check_pre_run(&self, steps: &[Step]) -> DiagnosticResult<()> {
         for state in &self.states {
             if let Some(check) = state.state.downcast_ref::<PreRunCheck>() {
                 check.run(steps)?;

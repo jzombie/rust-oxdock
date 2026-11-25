@@ -1302,6 +1302,29 @@ transport, so this phase is mechanical:
    all still anyhow, so the signature flip waits
    per leaf-to-root order. Core 409 plus integration
    629 green; clippy and fmt clean.
+   Pre-run chain step 2026-11-26: no new ctors, all
+   wordings already pinned. Four signatures flip to
+   DiagnosticResult across two crates: core
+   PreRunInspector plus PreRunCheck::new plus run
+   plus HostModule::check_pre_run, and net
+   assert_services_bound plus check_service_bound
+   plus EndpointRegistry::resolve_ref. resolve_ref
+   internals drop six anyhow::Error::new wrappers
+   (virtual_channel_no_physical, service_not_mapped,
+   never_bound, ambiguous_endpoint) since
+   parse_endpoint_ref was already DiagnosticResult.
+   check_service_bound calls net_diag::no_cli_mapping
+   directly at its two sites; the endpoints.rs
+   no_cli_mapping anyhow wrapper stays for the
+   call-time acquire paths plus SSH, which hold
+   anyhow and flip in their own steps. Callers hold
+   via the blanket conversion (core mod.rs plus
+   mcp.rs check_pre_run sites unchanged); tests
+   using to_string plus contains plus {:#} pass
+   unchanged since Display renders the message.
+   Core 409 plus integration 629 plus net 38 plus
+   service_enforcement 4 green; clippy and fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
