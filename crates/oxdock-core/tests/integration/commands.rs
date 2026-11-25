@@ -6208,7 +6208,7 @@ fn type_describe_reports_alias_targets() {
         "IMPORT [STD]\nLET $d: MAP<ANY> = TYPE_DESCRIBE(\"NOPE\")\n",
     )
     .expect_err("unknown type must still fail");
-    assert!(err.to_string().contains("unknown type NOPE"), "{err}");
+    assert!(err.to_string().contains("unknown type `NOPE`"), "{err}");
 }
 
 #[test]

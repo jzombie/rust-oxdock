@@ -14,6 +14,7 @@ use oxdock_parser::{
 use oxdock_pipe::PipeHandle;
 use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
 
+use super::diagnostics as std_diag;
 use super::io::StreamHandle;
 use super::state::ExecState;
 use super::steps::StepCtx;
@@ -975,10 +976,9 @@ pub fn optional_zero_value(tag: &TypeTag) -> Result<Value> {
         {
             Ok(Value::map(BTreeMap::new()))
         }
-        other => anyhow::bail!(
-            "no zero value for {}; omit the `?` or pass the argument explicitly",
-            oxdock_parser::render_structural(other)
-        ),
+        other => Err(anyhow::Error::new(std_diag::func_zero_value_missing(
+            &oxdock_parser::render_structural(other),
+        ))),
     }
 }
 
@@ -997,11 +997,11 @@ pub fn resolve_script_params<P: ProcessManager>(
         let clean = pname.trim_start_matches('$').to_string();
         let tag = state
             .resolve_tag(ptype)
-            .map_err(|err| anyhow::anyhow!("function `{func_name}`: {err:#}"))?;
+            .map_err(|err| anyhow::Error::new(std_diag::func_param_type(func_name, &err)))?;
         state.check_declaration_tag(&format!("function `{func_name}` param `${clean}`"), &tag)?;
         if *optional {
             optional_zero_value(&tag).map(|_| ()).map_err(|err| {
-                anyhow::anyhow!("function `{func_name}` optional param `${clean}`: {err:#}")
+                anyhow::Error::new(std_diag::func_optional_param(func_name, &clean, &err))
             })?;
         }
         resolved.push((clean, tag, *optional));
@@ -1015,7 +1015,7 @@ pub fn check_script_param_tags(func_name: &str, params: &[(String, TypeTag, bool
     for (pname, tag, optional) in params {
         if *optional {
             optional_zero_value(tag).map(|_| ()).map_err(|err| {
-                anyhow::anyhow!("function `{func_name}` optional param `${pname}`: {err:#}")
+                anyhow::Error::new(std_diag::func_optional_param(func_name, pname, &err))
             })?;
         }
     }
@@ -1113,10 +1113,7 @@ pub fn placeholder_resolver(table: Arc<PureTable>) -> oxdock_process::Placeholde
                     .flat_map(|(m, entries)| entries.keys().map(move |f| format!("{m}::{f}")))
                     .collect();
                 known.sort();
-                anyhow::anyhow!(
-                    "unknown placeholder function '{module}::{func}'; known functions: {}",
-                    known.join(", ")
-                )
+                anyhow::Error::new(std_diag::func_placeholder_unknown(module, func, &known))
             })?;
         callee(args)
     })
@@ -1608,14 +1605,14 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 && !matches!(entry.body, FuncBody::Script(_))
         });
         if reserved && !shadowable {
-            anyhow::bail!("cannot shadow reserved function `{name}`");
+            return Err(anyhow::Error::new(std_diag::func_shadow_reserved(name)));
         }
         if self
             .scopes
             .last()
             .is_some_and(|frame| frame.defined.contains(&qualified))
         {
-            anyhow::bail!("duplicate function `{name}` in same scope");
+            return Err(anyhow::Error::new(std_diag::func_duplicate_in_scope(name)));
         }
         check_script_param_tags(name, params)?;
         let old = self.entries.insert(
@@ -1700,7 +1697,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 && !matches!(entry.body, FuncBody::Script(_))
         });
         if reserved && !shadowable {
-            anyhow::bail!("cannot shadow reserved function `{name}`");
+            return Err(anyhow::Error::new(std_diag::func_shadow_reserved(name)));
         }
         // File entries live in the global frame (index 0, never
         // popped): eviction on scope exit would strand the module
@@ -1711,7 +1708,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             .get(frame_idx)
             .is_some_and(|frame| frame.defined.contains(&qualified))
         {
-            anyhow::bail!("duplicate function `{name}` in same scope");
+            return Err(anyhow::Error::new(std_diag::func_duplicate_in_scope(name)));
         }
         check_script_param_tags(name, params)?;
         let old = self.entries.insert(
@@ -1821,9 +1818,8 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 Ok(None)
             }
             AliasResolution::Canonical(key) => Ok(Some(key)),
-            AliasResolution::Ambiguous { alias, base, files } => Err(anyhow::anyhow!(
-                "{}",
-                ambiguous_alias_message(&alias, &base, &files)
+            AliasResolution::Ambiguous { alias, base, files } => Err(anyhow::Error::new(
+                std_diag::func_ambiguous_alias(&alias, &base, &files),
             )),
         }
     }
@@ -1926,9 +1922,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 out.push(meta);
                 continue;
             }
-            anyhow::bail!(
-                "EXPORT `{name}` matches no defined script function or known host function"
-            );
+            return Err(anyhow::Error::new(std_diag::func_export_unknown(name)));
         }
         Ok(out)
     }
@@ -2059,8 +2053,8 @@ fn format_byte_count(
     bytes: i64,
 ) -> Result<Value> {
     if bytes < 0 {
-        return Err(anyhow::anyhow!(
-            "FORMAT_BYTE_COUNT needs a non-negative byte count, got {bytes}"
+        return Err(anyhow::Error::new(
+            std_diag::std_format_byte_count_negative(bytes),
         ));
     }
     Ok(Value::string(oxdock_parser::command::format_byte_count(
@@ -2120,9 +2114,9 @@ fn parse_byte_count(
 ) -> Result<Value> {
     if let Some(n) = text.as_i64() {
         if n < 0 {
-            return Err(anyhow::anyhow!(
-                "PARSE_BYTE_COUNT needs a non-negative byte count, got {n}"
-            ));
+            return Err(anyhow::Error::new(std_diag::std_parse_byte_count_negative(
+                n,
+            )));
         }
         return Ok(Value::int(n));
     }
@@ -2130,18 +2124,18 @@ fn parse_byte_count(
         if f.is_finite() && f.fract() == 0.0 && f >= 0.0 && f <= i64::MAX as f64 {
             return Ok(Value::int(f as i64));
         }
-        return Err(anyhow::anyhow!(
-            "PARSE_BYTE_COUNT needs an integral byte count, got {f:?}"
-        ));
+        return Err(anyhow::Error::new(std_diag::std_parse_byte_count_integral(
+            f,
+        )));
     }
     let Some(s) = text.as_str() else {
-        return Err(anyhow::anyhow!(
-            "PARSE_BYTE_COUNT needs a token or number, found {text:?}"
-        ));
+        return Err(anyhow::Error::new(std_diag::std_parse_byte_count_shape(
+            &text,
+        )));
     };
     let n = oxdock_parser::command::parse_byte_count(s)?;
     let n = i64::try_from(n)
-        .map_err(|_| anyhow::anyhow!("PARSE_BYTE_COUNT out of INT range: {s:?}"))?;
+        .map_err(|_| anyhow::Error::new(std_diag::std_parse_byte_count_range(s)))?;
     Ok(Value::int(n))
 }
 
@@ -2168,9 +2162,9 @@ fn format_duration(
     millis: i64,
 ) -> Result<Value> {
     if millis < 0 {
-        return Err(anyhow::anyhow!(
-            "FORMAT_DURATION needs non-negative milliseconds, got {millis}"
-        ));
+        return Err(anyhow::Error::new(std_diag::std_format_duration_negative(
+            millis,
+        )));
     }
     Ok(Value::string(oxdock_parser::command::format_duration(
         &std::time::Duration::from_millis(millis as u64),
@@ -2206,7 +2200,7 @@ fn parse_duration(
 ) -> Result<Value> {
     let duration = oxdock_parser::command::parse_duration(&text)?;
     let millis = i64::try_from(duration.as_millis())
-        .map_err(|_| anyhow::anyhow!("PARSE_DURATION out of INT range: {text:?}"))?;
+        .map_err(|_| anyhow::Error::new(std_diag::std_parse_duration_range(&text)))?;
     Ok(Value::int(millis))
 }
 
@@ -2947,7 +2941,9 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
     fn registration() -> HostRegistration<P> {
         let func: NativeFn<P> = Arc::new(|cx: &mut StepCtx<P>, values: Vec<Value>| {
             if values.len() != 1 {
-                anyhow::bail!("PARSE_ARGS() expects 1 argument, got {}", values.len());
+                return Err(anyhow::Error::new(std_diag::std_parse_args_arity(
+                    values.len(),
+                )));
             }
             let mut iter = values.into_iter();
             let args_val = iter.next().expect("arity checked above");
@@ -3164,35 +3160,43 @@ fn coerce_cli_flag(target: CliType, flag: &str, raw: Value) -> Result<Value> {
             if let Some(s) = raw.as_str() {
                 match super::args::parse_bool_str(s) {
                     Some(b) => return Ok(Value::bool(b)),
-                    None => anyhow::bail!(
-                        "PARSE_ARGS flag --{flag} expects BOOL (true/false, 1/0, yes/no, on/off), got {s:?}"
-                    ),
+                    None => {
+                        return Err(anyhow::Error::new(std_diag::std_parse_args_bool_flag(
+                            flag, s,
+                        )));
+                    }
                 }
             }
-            anyhow::bail!(
-                "PARSE_ARGS flag --{flag} expects BOOL, got {}",
-                raw.type_name()
-            )
+            Err(anyhow::Error::new(std_diag::std_parse_args_bool_type(
+                flag,
+                raw.type_name(),
+            )))
         }
         CliType::String => {
             if let Some(s) = raw.as_str() {
                 return Ok(Value::string(s.to_string()));
             }
-            anyhow::bail!("PARSE_ARGS flag --{flag} needs a value: use --{flag}=<value>");
+            Err(anyhow::Error::new(std_diag::std_parse_args_needs_value(
+                flag,
+            )))
         }
         CliType::Int => {
             if raw.as_bool().is_some() {
-                anyhow::bail!("PARSE_ARGS flag --{flag} needs a value: use --{flag}=<value>");
+                return Err(anyhow::Error::new(std_diag::std_parse_args_needs_value(
+                    flag,
+                )));
             }
             super::args::int_from_value(raw)
-                .map_err(|_| anyhow::anyhow!("PARSE_ARGS flag --{flag} expects INT"))
+                .map_err(|_| anyhow::Error::new(std_diag::std_parse_args_expects_int(flag)))
         }
         CliType::Float => {
             if raw.as_bool().is_some() {
-                anyhow::bail!("PARSE_ARGS flag --{flag} needs a value: use --{flag}=<value>");
+                return Err(anyhow::Error::new(std_diag::std_parse_args_needs_value(
+                    flag,
+                )));
             }
             super::args::float_from_value(raw)
-                .map_err(|_| anyhow::anyhow!("PARSE_ARGS flag --{flag} expects FLOAT"))
+                .map_err(|_| anyhow::Error::new(std_diag::std_parse_args_expects_float(flag)))
         }
     }
 }
@@ -3238,7 +3242,7 @@ fn tokenize_raw_args(args: Vec<String>) -> Result<(BTreeMap<String, Value>, Vec<
     let utf8 = |value: std::ffi::OsString| -> Result<String> {
         value
             .into_string()
-            .map_err(|_| anyhow::anyhow!("PARSE_ARGS: argument must be UTF-8"))
+            .map_err(|_| anyhow::Error::new(std_diag::std_parse_args_not_utf8()))
     };
     loop {
         match parser.next() {
@@ -3264,7 +3268,7 @@ fn tokenize_raw_args(args: Vec<String>) -> Result<(BTreeMap<String, Value>, Vec<
                     .unwrap_or(option.as_str());
                 flags.insert(key.to_string(), Value::string(utf8(value)?));
             }
-            Err(err) => anyhow::bail!("PARSE_ARGS: {err}"),
+            Err(err) => return Err(anyhow::Error::new(std_diag::std_parse_args_lex_error(&err))),
         }
     }
     Ok((flags, positionals))
@@ -3292,17 +3296,17 @@ fn coerce_flags(
     let mut coerced: BTreeMap<String, Value> = BTreeMap::new();
     for (flag, spec) in specs.iter() {
         if flag.is_empty() {
-            anyhow::bail!("PARSE_ARGS schema flag names must be non-empty");
+            return Err(anyhow::Error::new(
+                std_diag::std_parse_args_schema_flag_empty(),
+            ));
         }
         let canonical_raw = raw.get(flag);
         let alias_raw = spec.alias.as_ref().and_then(|alias| raw.get(alias));
-        // Display name names both spellings when an alias exists.
-        let display = match spec.alias.as_ref() {
-            Some(alias) => format!("--{flag}/--{alias}"),
-            None => format!("--{flag}"),
-        };
         if canonical_raw.is_some() && alias_raw.is_some() {
-            anyhow::bail!("PARSE_ARGS duplicate flag {display}");
+            return Err(anyhow::Error::new(std_diag::std_parse_args_duplicate_flag(
+                flag,
+                spec.alias.as_deref(),
+            )));
         }
         if let Some(raw_val) = canonical_raw.or(alias_raw) {
             coerced.insert(
@@ -3312,12 +3316,17 @@ fn coerce_flags(
         } else if let Some(d) = spec.default.as_ref() {
             coerced.insert(flag.clone(), d.clone());
         } else if spec.required {
-            anyhow::bail!("PARSE_ARGS missing required flag {display}");
+            return Err(anyhow::Error::new(std_diag::std_parse_args_missing_flag(
+                flag,
+                spec.alias.as_deref(),
+            )));
         }
     }
     for flag in raw.keys() {
         if !specs.contains_key(flag) && !alias_to_canonical.contains_key(flag.as_str()) {
-            anyhow::bail!("PARSE_ARGS unknown flag --{flag}");
+            return Err(anyhow::Error::new(std_diag::std_parse_args_unknown_flag(
+                flag,
+            )));
         }
     }
     Ok(coerced)
@@ -3334,9 +3343,11 @@ fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<CliSpec
     let tag = cx
         .state
         .resolve_tag(name)
-        .map_err(|err| anyhow::anyhow!("PARSE_ARGS schema type {name:?}: {err:#}"))?;
+        .map_err(|err| anyhow::Error::new(std_diag::std_parse_args_schema_type(name, &err)))?;
     let TypeTag::Record(fields) = tag else {
-        anyhow::bail!("PARSE_ARGS schema type {name:?} must be a MAP shape with scalar fields");
+        return Err(anyhow::Error::new(std_diag::std_parse_args_schema_shape(
+            name,
+        )));
     };
     let mut specs = BTreeMap::new();
     for field in fields.iter() {
@@ -3345,11 +3356,11 @@ fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<CliSpec
             TypeTag::Bool => CliType::Bool,
             TypeTag::Int => CliType::Int,
             TypeTag::Float => CliType::Float,
-            _ => anyhow::bail!(
-                "PARSE_ARGS schema for --{}: type must be one of STRING, BOOL, INT, or FLOAT, got {}",
-                field.name,
-                field.ty.name(),
-            ),
+            _ => {
+                return Err(anyhow::Error::new(
+                    std_diag::std_parse_args_schema_field_type(&field.name, field.ty.name()),
+                ));
+            }
         };
         specs.insert(
             field.name.clone(),
@@ -3377,7 +3388,9 @@ impl<P: ProcessManager> OxDockFn<P> for ParseFlags {
     fn registration() -> HostRegistration<P> {
         let func: NativeFn<P> = Arc::new(|cx: &mut StepCtx<P>, values: Vec<Value>| {
             if values.len() != 1 {
-                anyhow::bail!("PARSE_FLAGS() expects 1 argument, got {}", values.len());
+                return Err(anyhow::Error::new(std_diag::std_parse_flags_arity(
+                    values.len(),
+                )));
             }
             let mut iter = values.into_iter();
             let args_val = iter.next().expect("arity checked above");
@@ -3385,11 +3398,12 @@ impl<P: ProcessManager> OxDockFn<P> for ParseFlags {
             let specs = resolve_flags_specs(cx)?;
             let (raw, positionals) = tokenize_raw_args(args)?;
             if !positionals.is_empty() {
-                let shown: Vec<String> = positionals.iter().map(|pos| pos.to_string()).collect();
-                anyhow::bail!(
-                    "PARSE_FLAGS() does not accept positional arguments; found {}",
-                    shown.join(", ")
-                );
+                return Err(anyhow::Error::new(std_diag::std_parse_flags_positional(
+                    &positionals
+                        .iter()
+                        .map(|pos| pos.to_string())
+                        .collect::<Vec<_>>(),
+                )));
             }
             Ok(Value::map(coerce_flags(&specs, &raw)?))
         });
@@ -3439,10 +3453,9 @@ impl<P: ProcessManager> OxDockFn<P> for ParsePositionals {
     fn registration() -> HostRegistration<P> {
         let func: NativeFn<P> = Arc::new(|_: &mut StepCtx<P>, values: Vec<Value>| {
             if values.len() != 1 {
-                anyhow::bail!(
-                    "PARSE_POSITIONALS() expects 1 argument, got {}",
-                    values.len()
-                );
+                return Err(anyhow::Error::new(std_diag::std_parse_positionals_arity(
+                    values.len(),
+                )));
             }
             let mut iter = values.into_iter();
             let args_val = iter.next().expect("arity checked above");
@@ -3570,13 +3583,13 @@ fn describe<P: ProcessManager>(
     name: String,
 ) -> Result<Value> {
     if split_qualified(&name).is_none() && name != KEYWORD_INSPECT {
-        anyhow::bail!(
-            "unknown function `{name}`: DESCRIBE requires a qualified name (e.g. `STD::{name}`)"
-        );
+        return Err(anyhow::Error::new(std_diag::func_describe_unqualified(
+            &name,
+        )));
     }
     cx.state
         .describe_function(&name)
-        .ok_or_else(|| anyhow::anyhow!("unknown function {name}"))
+        .ok_or_else(|| anyhow::Error::new(std_diag::func_unknown(&name)))
 }
 
 /// List all known type names.
@@ -3676,7 +3689,7 @@ fn type_describe<P: ProcessManager>(
         );
         return Ok(Value::map(map));
     }
-    Err(anyhow::anyhow!("unknown type {name}"))
+    Err(anyhow::Error::new(std_diag::std_unknown_type(&name)))
 }
 
 /// Path of the running interpreter binary.
@@ -3892,13 +3905,11 @@ fn is_terminal<P: ProcessManager>(
                 }
             }
         }
-        _ => anyhow::bail!(
-            // Unreachable through the macro path: the generated
-            // extractor rejects non-members before the body runs, and
-            // the static pre-pass rejects bad literals earlier still.
-            // Kept as a bail (never a panic) for hand-built callers.
-            "IS_TERMINAL expects \"stdin\", \"stdout\", or \"stderr\", got {stream_name:?}"
-        ),
+        _ => {
+            return Err(anyhow::Error::new(std_diag::std_is_terminal_expected(
+                &stream_name,
+            )));
+        }
     };
     Ok(Value::bool(terminal))
 }
@@ -3930,9 +3941,9 @@ fn semaphore_new<P: ProcessManager>(
 ) -> Result<Value> {
     let _ = cx;
     if max <= 0 {
-        return Err(anyhow::anyhow!(
-            "SEMAPHORE_NEW() requires a positive max, got {max}"
-        ));
+        return Err(anyhow::Error::new(std_diag::std_semaphore_needs_positive(
+            max,
+        )));
     }
     Ok(Value::semaphore(max as usize))
 }
@@ -4305,7 +4316,8 @@ fn path_base(
     path: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&path)?;
-    let base = oxdock_fs::path_base(&text).map_err(|e| anyhow::anyhow!("PATH_BASE: {e:#}"))?;
+    let base = oxdock_fs::path_base(&text)
+        .map_err(|e| anyhow::Error::new(std_diag::std_path_base_failed(&e)))?;
     Ok(Value::string(base))
 }
 
@@ -4342,7 +4354,8 @@ fn path_rel(
 ) -> Result<Value> {
     let b = super::args::string_or_path_text(&base)?;
     let p = super::args::string_or_path_text(&path)?;
-    let rel = oxdock_fs::path_rel(&b, &p).map_err(|e| anyhow::anyhow!("PATH_REL: {e:#}"))?;
+    let rel = oxdock_fs::path_rel(&b, &p)
+        .map_err(|e| anyhow::Error::new(std_diag::std_path_rel_failed(&e)))?;
     Ok(Value::string(rel))
 }
 
@@ -4708,7 +4721,7 @@ fn shell_split_args(
 ) -> Result<Value> {
     match shell_words::split(&command) {
         Ok(words) => Ok(super::args::text_list_value(words)),
-        Err(err) => anyhow::bail!("SHELL_SPLIT_ARGS: {err}"),
+        Err(err) => Err(anyhow::Error::new(std_diag::std_shell_split_failed(&err))),
     }
 }
 
@@ -4905,13 +4918,15 @@ fn bool_convert(
         return Ok(Value::bool(b));
     }
     let Some(s) = val.as_str() else {
-        return Err(anyhow::anyhow!(
-            "BOOL needs a Bool or String, found {val:?}"
-        ));
+        return Err(anyhow::Error::new(std_diag::std_bool_needs_bool_or_string(
+            &val,
+        )));
     };
     match super::args::parse_bool_str(s) {
         Some(b) => Ok(Value::bool(b)),
-        None => anyhow::bail!("BOOL cannot coerce {s:?} to BOOL"),
+        None => Err(anyhow::Error::new(std_diag::std_bool_cannot_coerce(
+            "BOOL", s,
+        ))),
     }
 }
 
@@ -4950,7 +4965,9 @@ fn bool_or(
     }
     match super::args::parse_bool_str(&text) {
         Some(b) => Ok(Value::bool(b)),
-        None => anyhow::bail!("BOOL_OR cannot coerce {text:?} to BOOL"),
+        None => Err(anyhow::Error::new(std_diag::std_bool_cannot_coerce(
+            "BOOL_OR", &text,
+        ))),
     }
 }
 
@@ -5100,10 +5117,9 @@ fn contains(
 ) -> Result<Value> {
     if let Some(text) = haystack.as_str() {
         let Some(n) = needle.as_str() else {
-            return Err(anyhow::anyhow!(
-                "CONTAINS needs a STRING needle for a STRING haystack, found {}",
-                needle.type_name()
-            ));
+            return Err(anyhow::Error::new(std_diag::std_contains_needle_type(
+                needle.type_name(),
+            )));
         };
         return Ok(Value::bool(text.contains(n)));
     }
@@ -5115,10 +5131,9 @@ fn contains(
         }
         return Ok(Value::bool(false));
     }
-    Err(anyhow::anyhow!(
-        "CONTAINS needs a STRING or LIST haystack, found {}",
-        haystack.type_name()
-    ))
+    Err(anyhow::Error::new(std_diag::std_contains_haystack_type(
+        haystack.type_name(),
+    )))
 }
 
 /// Deduplicate a `LIST`, keeping the first occurrence of each member.
@@ -5225,10 +5240,9 @@ fn len(
     if let Some(entries) = value.as_map() {
         return Ok(Value::int(entries.len() as i64));
     }
-    Err(anyhow::anyhow!(
-        "LEN needs a STRING, LIST, or MAP value, got {}",
-        value.type_name()
-    ))
+    Err(anyhow::Error::new(std_diag::std_len_unexpected_type(
+        value.type_name(),
+    )))
 }
 
 /// Count non-overlapping literal occurrences of a needle.
@@ -5860,7 +5874,7 @@ mod tests {
             resolve("T", "NOPE", vec![]).expect_err("unknown must fail")
         );
         assert!(
-            err.contains("unknown placeholder function 'T::NOPE'"),
+            err.contains("unknown placeholder function `T::NOPE`"),
             "names the call: {err}"
         );
         assert!(

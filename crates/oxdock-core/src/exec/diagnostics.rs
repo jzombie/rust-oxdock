@@ -604,6 +604,519 @@ pub fn import_flow_crosses_boundary(flow: &str, step: usize, path: &str) -> Diag
     )
 }
 
+/// Function registration needing a zero value where none exists.
+/// Takes the rendered structural spelling; quoting lives here.
+pub fn func_zero_value_missing(rendered: &str) -> Diagnostic {
+    let message =
+        format!("no zero value for {rendered}; omit the `?` or pass the argument explicitly");
+    Diagnostic::new(
+        "dsl.func.zero_value_missing",
+        message,
+        Diagnostic::make_fields(&[("spelling", rendered)]),
+    )
+}
+
+/// Function parameter type resolution failure. Takes the function
+/// name and the underlying failure.
+pub fn func_param_type(func: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("function `{func}`: {reason_text}");
+    Diagnostic::new(
+        "dsl.func.param_type",
+        message,
+        Diagnostic::make_fields(&[("function", func), ("reason", &reason_text)]),
+    )
+}
+
+/// Optional function parameter without a zero value. Takes the
+/// function and parameter names plus the underlying failure.
+pub fn func_optional_param(func: &str, param: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("function `{func}` optional param `${param}`: {reason_text}");
+    Diagnostic::new(
+        "dsl.func.optional_param",
+        message,
+        Diagnostic::make_fields(&[
+            ("function", func),
+            ("param", param),
+            ("reason", &reason_text),
+        ]),
+    )
+}
+
+/// Shadowing a reserved (native/host) function.
+pub fn func_shadow_reserved(name: &str) -> Diagnostic {
+    let message = format!("cannot shadow reserved function `{name}`");
+    Diagnostic::new(
+        "dsl.func.shadow_reserved",
+        message,
+        Diagnostic::make_fields(&[("name", name)]),
+    )
+}
+
+/// Duplicate function definition in the same scope.
+pub fn func_duplicate_in_scope(name: &str) -> Diagnostic {
+    let message = format!("duplicate function `{name}` in same scope");
+    Diagnostic::new(
+        "dsl.func.duplicate_in_scope",
+        message,
+        Diagnostic::make_fields(&[("name", name)]),
+    )
+}
+
+/// Ambiguous `ALIAS::FUNC` resolution. Takes the alias, the base
+/// name, and the holder files; joining lives here with the single
+/// owner in `super::native`.
+pub fn func_ambiguous_alias(
+    alias: &str,
+    base: &str,
+    files: &std::collections::HashSet<String>,
+) -> Diagnostic {
+    let message = super::native::ambiguous_alias_message(alias, base, files);
+    Diagnostic::new(
+        "dsl.func.ambiguous_alias",
+        message,
+        Diagnostic::make_fields(&[("alias", alias), ("name", base)]),
+    )
+}
+
+/// `EXPORT` naming no defined script function and no known host
+/// function.
+pub fn func_export_unknown(name: &str) -> Diagnostic {
+    let message =
+        format!("EXPORT `{name}` matches no defined script function or known host function");
+    Diagnostic::new(
+        "dsl.func.export_unknown",
+        message,
+        Diagnostic::make_fields(&[("name", name)]),
+    )
+}
+
+/// Unknown placeholder function. Takes the module and function names
+/// plus the known functions; sorting and joining live here.
+pub fn func_placeholder_unknown(module: &str, func: &str, known: &[String]) -> Diagnostic {
+    let mut known: Vec<&str> = known.iter().map(|s| s.as_str()).collect();
+    known.sort();
+    let joined = known.join(", ");
+    let message =
+        format!("unknown placeholder function `{module}::{func}`; known functions: {joined}");
+    Diagnostic::new(
+        "dsl.func.placeholder_unknown",
+        message,
+        Diagnostic::make_fields(&[("module", module), ("name", func), ("known", &joined)]),
+    )
+}
+
+/// `DESCRIBE` with an unqualified name.
+pub fn func_describe_unqualified(name: &str) -> Diagnostic {
+    let message = format!(
+        "unknown function `{name}`: DESCRIBE requires a qualified name (e.g. `STD::{name}`)"
+    );
+    Diagnostic::new(
+        "dsl.func.describe_unqualified",
+        message,
+        Diagnostic::make_fields(&[("name", name)]),
+    )
+}
+
+/// Unknown function name.
+pub fn func_unknown(name: &str) -> Diagnostic {
+    let message = format!("unknown function `{name}`");
+    Diagnostic::new(
+        "dsl.func.unknown",
+        message,
+        Diagnostic::make_fields(&[("name", name)]),
+    )
+}
+
+/// Unknown type name (bare builtin lookup).
+pub fn std_unknown_type(name: &str) -> Diagnostic {
+    let message = format!("unknown type `{name}`");
+    Diagnostic::new(
+        "dsl.std.unknown_type",
+        message,
+        Diagnostic::make_fields(&[("name", name)]),
+    )
+}
+
+/// `CONTAINS` with a non-string needle for a string haystack. Takes
+/// the actual needle type name.
+pub fn std_contains_needle_type(actual: &str) -> Diagnostic {
+    let message = format!("CONTAINS needs a STRING needle for a STRING haystack, found `{actual}`");
+    Diagnostic::new(
+        "dsl.std.contains_needle_type",
+        message,
+        Diagnostic::make_fields(&[("actual", actual)]),
+    )
+}
+
+/// `CONTAINS` with a non-string, non-list haystack.
+pub fn std_contains_haystack_type(actual: &str) -> Diagnostic {
+    let message = format!("CONTAINS needs a STRING or LIST haystack, found `{actual}`");
+    Diagnostic::new(
+        "dsl.std.contains_haystack_type",
+        message,
+        Diagnostic::make_fields(&[("actual", actual)]),
+    )
+}
+
+/// `LEN` with a non-string, non-list, non-map value.
+pub fn std_len_unexpected_type(actual: &str) -> Diagnostic {
+    let message = format!("LEN needs a STRING, LIST, or MAP value, got `{actual}`");
+    Diagnostic::new(
+        "dsl.std.len_unexpected_type",
+        message,
+        Diagnostic::make_fields(&[("actual", actual)]),
+    )
+}
+
+/// `IS_TERMINAL` with an unexpected stream name.
+pub fn std_is_terminal_expected(stream: &str) -> Diagnostic {
+    let message =
+        format!("IS_TERMINAL expects \"stdin\", \"stdout\", or \"stderr\", got {stream:?}");
+    Diagnostic::new(
+        "dsl.std.is_terminal_expected",
+        message,
+        Diagnostic::make_fields(&[("got", stream)]),
+    )
+}
+
+/// `SEMAPHORE_NEW` with a non-positive max.
+pub fn std_semaphore_needs_positive(max: i64) -> Diagnostic {
+    let message = format!("SEMAPHORE_NEW() requires a positive max, got {max}");
+    Diagnostic::new(
+        "dsl.std.semaphore_needs_positive",
+        message,
+        Diagnostic::make_fields(&[("max", &max.to_string())]),
+    )
+}
+
+/// `BOOL` with a non-bool, non-string value. Takes the value;
+/// `Debug` rendering lives here.
+pub fn std_bool_needs_bool_or_string(got: &super::Value) -> Diagnostic {
+    let message = format!("BOOL needs a Bool or String, found {got:?}");
+    Diagnostic::new(
+        "dsl.std.bool_needs_bool_or_string",
+        message,
+        Diagnostic::make_fields(&[("got", &format!("{got:?}"))]),
+    )
+}
+
+/// `BOOL`/`BOOL_OR` with an uncoercible string. Takes the invoking
+/// command (same failure mode, one key).
+pub fn std_bool_cannot_coerce(command: &str, got: &str) -> Diagnostic {
+    let message = format!("{command} cannot coerce {got:?} to BOOL");
+    Diagnostic::new(
+        "dsl.std.bool_cannot_coerce",
+        message,
+        Diagnostic::make_fields(&[("command", command), ("got", got)]),
+    )
+}
+
+/// `PATH_BASE` failure. Takes the underlying failure.
+pub fn std_path_base_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("PATH_BASE: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.path_base_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// `PATH_REL` failure. Takes the underlying failure.
+pub fn std_path_rel_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("PATH_REL: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.path_rel_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// `SHELL_SPLIT_ARGS` failure. Takes the underlying failure.
+pub fn std_shell_split_failed(reason: &shell_words::ParseError) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("SHELL_SPLIT_ARGS: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.shell_split_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// `PARSE_ARGS` with other than one argument.
+pub fn std_parse_args_arity(got: usize) -> Diagnostic {
+    let message = format!("PARSE_ARGS() expects 1 argument, got {got}");
+    Diagnostic::new(
+        "dsl.std.parse_args_arity",
+        message,
+        Diagnostic::make_fields(&[("got", &got.to_string())]),
+    )
+}
+
+/// `PARSE_ARGS` BOOL flag with an unparseable string. Takes the flag
+/// and the rendered value; quoting lives here.
+pub fn std_parse_args_bool_flag(flag: &str, got: &str) -> Diagnostic {
+    let message = format!(
+        "PARSE_ARGS flag --{flag} expects BOOL (true/false, 1/0, yes/no, on/off), got {got:?}"
+    );
+    Diagnostic::new(
+        "dsl.std.parse_args_bool_flag",
+        message,
+        Diagnostic::make_fields(&[("flag", flag), ("got", got)]),
+    )
+}
+
+/// `PARSE_ARGS` BOOL flag with a non-string value. Takes the flag and
+/// the actual type name.
+pub fn std_parse_args_bool_type(flag: &str, actual: &str) -> Diagnostic {
+    let message = format!("PARSE_ARGS flag --{flag} expects BOOL, got `{actual}`");
+    Diagnostic::new(
+        "dsl.std.parse_args_bool_type",
+        message,
+        Diagnostic::make_fields(&[("flag", flag), ("actual", actual)]),
+    )
+}
+
+/// `PARSE_ARGS` flag without a value.
+pub fn std_parse_args_needs_value(flag: &str) -> Diagnostic {
+    let message = format!("PARSE_ARGS flag --{flag} needs a value: use --{flag}=<value>");
+    Diagnostic::new(
+        "dsl.std.parse_args_needs_value",
+        message,
+        Diagnostic::make_fields(&[("flag", flag)]),
+    )
+}
+
+/// `PARSE_ARGS` INT flag with an unparseable value.
+pub fn std_parse_args_expects_int(flag: &str) -> Diagnostic {
+    let message = format!("PARSE_ARGS flag --{flag} expects INT");
+    Diagnostic::new(
+        "dsl.std.parse_args_expects_int",
+        message,
+        Diagnostic::make_fields(&[("flag", flag)]),
+    )
+}
+
+/// `PARSE_ARGS` FLOAT flag with an unparseable value.
+pub fn std_parse_args_expects_float(flag: &str) -> Diagnostic {
+    let message = format!("PARSE_ARGS flag --{flag} expects FLOAT");
+    Diagnostic::new(
+        "dsl.std.parse_args_expects_float",
+        message,
+        Diagnostic::make_fields(&[("flag", flag)]),
+    )
+}
+
+/// `PARSE_ARGS` with a non-UTF-8 argument.
+pub fn std_parse_args_not_utf8() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.std.parse_args_not_utf8",
+        "PARSE_ARGS: argument must be UTF-8".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `PARSE_ARGS` lexing failure. Takes the underlying failure.
+pub fn std_parse_args_lex_error(reason: &lexopt::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("PARSE_ARGS: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.parse_args_lex_error",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// `PARSE_ARGS` schema with an empty flag name.
+pub fn std_parse_args_schema_flag_empty() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.std.parse_args_schema_flag_empty",
+        "PARSE_ARGS schema flag names must be non-empty".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `PARSE_ARGS` flag given twice (canonical or alias). Takes the flag
+/// and its optional alias; the display name joins both spellings
+/// here.
+pub fn std_parse_args_duplicate_flag(flag: &str, alias: Option<&str>) -> Diagnostic {
+    let display = match alias {
+        Some(alias) => format!("--{flag}/--{alias}"),
+        None => format!("--{flag}"),
+    };
+    let message = format!("PARSE_ARGS duplicate flag {display}");
+    Diagnostic::new(
+        "dsl.std.parse_args_duplicate_flag",
+        message,
+        Diagnostic::make_fields(&[("flag", flag), ("display", &display)]),
+    )
+}
+
+/// `PARSE_ARGS` missing a required flag.
+pub fn std_parse_args_missing_flag(flag: &str, alias: Option<&str>) -> Diagnostic {
+    let display = match alias {
+        Some(alias) => format!("--{flag}/--{alias}"),
+        None => format!("--{flag}"),
+    };
+    let message = format!("PARSE_ARGS missing required flag {display}");
+    Diagnostic::new(
+        "dsl.std.parse_args_missing_flag",
+        message,
+        Diagnostic::make_fields(&[("flag", flag), ("display", &display)]),
+    )
+}
+
+/// `PARSE_ARGS` with an undeclared flag.
+pub fn std_parse_args_unknown_flag(flag: &str) -> Diagnostic {
+    let message = format!("PARSE_ARGS unknown flag --{flag}");
+    Diagnostic::new(
+        "dsl.std.parse_args_unknown_flag",
+        message,
+        Diagnostic::make_fields(&[("flag", flag)]),
+    )
+}
+
+/// `PARSE_ARGS` schema type resolution failure. Takes the schema name
+/// and the underlying failure.
+pub fn std_parse_args_schema_type(name: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("PARSE_ARGS schema type {name:?}: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.parse_args_schema_type",
+        message,
+        Diagnostic::make_fields(&[("name", name), ("reason", &reason_text)]),
+    )
+}
+
+/// `PARSE_ARGS` schema type that is not a MAP of scalars.
+pub fn std_parse_args_schema_shape(name: &str) -> Diagnostic {
+    let message = format!("PARSE_ARGS schema type {name:?} must be a MAP shape with scalar fields");
+    Diagnostic::new(
+        "dsl.std.parse_args_schema_shape",
+        message,
+        Diagnostic::make_fields(&[("name", name)]),
+    )
+}
+
+/// `PARSE_ARGS` schema field with a non-scalar type. Takes the field
+/// name and the actual type name.
+pub fn std_parse_args_schema_field_type(field: &str, actual: &str) -> Diagnostic {
+    let message = format!(
+        "PARSE_ARGS schema for --{field}: type must be one of STRING, BOOL, INT, or FLOAT, got {actual}"
+    );
+    Diagnostic::new(
+        "dsl.std.parse_args_schema_field_type",
+        message,
+        Diagnostic::make_fields(&[("field", field), ("actual", actual)]),
+    )
+}
+
+/// `PARSE_FLAGS` with other than one argument.
+pub fn std_parse_flags_arity(got: usize) -> Diagnostic {
+    let message = format!("PARSE_FLAGS() expects 1 argument, got {got}");
+    Diagnostic::new(
+        "dsl.std.parse_flags_arity",
+        message,
+        Diagnostic::make_fields(&[("got", &got.to_string())]),
+    )
+}
+
+/// `PARSE_FLAGS` with positional arguments. Takes the positionals;
+/// joining lives here.
+pub fn std_parse_flags_positional(items: &[String]) -> Diagnostic {
+    let joined = items.join(", ");
+    let message = format!("PARSE_FLAGS() does not accept positional arguments; found {joined}");
+    Diagnostic::new(
+        "dsl.std.parse_flags_positional",
+        message,
+        Diagnostic::make_fields(&[("found", &joined)]),
+    )
+}
+
+/// `PARSE_POSITIONALS` with other than one argument.
+pub fn std_parse_positionals_arity(got: usize) -> Diagnostic {
+    let message = format!("PARSE_POSITIONALS() expects 1 argument, got {got}");
+    Diagnostic::new(
+        "dsl.std.parse_positionals_arity",
+        message,
+        Diagnostic::make_fields(&[("got", &got.to_string())]),
+    )
+}
+
+/// `PARSE_BYTE_COUNT` with a negative count.
+pub fn std_parse_byte_count_negative(n: i64) -> Diagnostic {
+    let message = format!("PARSE_BYTE_COUNT needs a non-negative byte count, got {n}");
+    Diagnostic::new(
+        "dsl.std.parse_byte_count_negative",
+        message,
+        Diagnostic::make_fields(&[("got", &n.to_string())]),
+    )
+}
+
+/// `PARSE_BYTE_COUNT` with a non-integral float.
+pub fn std_parse_byte_count_integral(got: f64) -> Diagnostic {
+    let message = format!("PARSE_BYTE_COUNT needs an integral byte count, got {got:?}");
+    Diagnostic::new(
+        "dsl.std.parse_byte_count_integral",
+        message,
+        Diagnostic::make_fields(&[("got", &format!("{got:?}"))]),
+    )
+}
+
+/// `PARSE_BYTE_COUNT` with neither a token nor a number. Takes
+/// the value; `Debug` rendering lives here.
+pub fn std_parse_byte_count_shape(got: &super::Value) -> Diagnostic {
+    let message = format!("PARSE_BYTE_COUNT needs a token or number, found {got:?}");
+    Diagnostic::new(
+        "dsl.std.parse_byte_count_shape",
+        message,
+        Diagnostic::make_fields(&[("got", &format!("{got:?}"))]),
+    )
+}
+
+/// `PARSE_BYTE_COUNT` out of `INT` range.
+pub fn std_parse_byte_count_range(s: &str) -> Diagnostic {
+    let message = format!("PARSE_BYTE_COUNT out of INT range: {s:?}");
+    Diagnostic::new(
+        "dsl.std.parse_byte_count_range",
+        message,
+        Diagnostic::make_fields(&[("got", s)]),
+    )
+}
+
+/// `FORMAT_BYTE_COUNT` with a negative count.
+pub fn std_format_byte_count_negative(bytes: i64) -> Diagnostic {
+    let message = format!("FORMAT_BYTE_COUNT needs a non-negative byte count, got {bytes}");
+    Diagnostic::new(
+        "dsl.std.format_byte_count_negative",
+        message,
+        Diagnostic::make_fields(&[("got", &bytes.to_string())]),
+    )
+}
+
+/// `FORMAT_DURATION` with negative milliseconds.
+pub fn std_format_duration_negative(millis: i64) -> Diagnostic {
+    let message = format!("FORMAT_DURATION needs non-negative milliseconds, got {millis}");
+    Diagnostic::new(
+        "dsl.std.format_duration_negative",
+        message,
+        Diagnostic::make_fields(&[("got", &millis.to_string())]),
+    )
+}
+
+/// `PARSE_DURATION` out of `INT` range.
+pub fn std_parse_duration_range(text: &str) -> Diagnostic {
+    let message = format!("PARSE_DURATION out of INT range: {text:?}");
+    Diagnostic::new(
+        "dsl.std.parse_duration_range",
+        message,
+        Diagnostic::make_fields(&[("got", text)]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,6 +1183,52 @@ mod tests {
             import_const_uninitialized("q").key(),
             import_const_is_let("q").key(),
             import_flow_crosses_boundary("BREAK", 3, "f").key(),
+            func_zero_value_missing("MAP").key(),
+            func_param_type("F", &anyhow::anyhow!("x")).key(),
+            func_optional_param("F", "p", &anyhow::anyhow!("x")).key(),
+            func_shadow_reserved("F").key(),
+            func_duplicate_in_scope("F").key(),
+            func_ambiguous_alias("A", "F", &std::collections::HashSet::new()).key(),
+            func_export_unknown("F").key(),
+            func_placeholder_unknown("M", "F", &["M::F".to_string()]).key(),
+            func_describe_unqualified("F").key(),
+            func_unknown("F").key(),
+            std_unknown_type("T").key(),
+            std_contains_needle_type("INT").key(),
+            std_contains_haystack_type("INT").key(),
+            std_len_unexpected_type("INT").key(),
+            std_is_terminal_expected("nope").key(),
+            std_semaphore_needs_positive(0).key(),
+            std_bool_needs_bool_or_string(&crate::Value::string("x".to_string())).key(),
+            std_bool_cannot_coerce("BOOL", "x").key(),
+            std_shell_split_failed(&shell_words::ParseError).key(),
+            std_path_base_failed(&anyhow::anyhow!("x")).key(),
+            std_path_rel_failed(&anyhow::anyhow!("x")).key(),
+            std_parse_args_arity(2).key(),
+            std_parse_args_bool_flag("f", "x").key(),
+            std_parse_args_bool_type("f", "INT").key(),
+            std_parse_args_needs_value("f").key(),
+            std_parse_args_expects_int("f").key(),
+            std_parse_args_expects_float("f").key(),
+            std_parse_args_not_utf8().key(),
+            std_parse_args_lex_error(&lexopt::Error::UnexpectedOption("--x".to_string())).key(),
+            std_parse_args_schema_flag_empty().key(),
+            std_parse_args_duplicate_flag("f", None).key(),
+            std_parse_args_missing_flag("f", None).key(),
+            std_parse_args_unknown_flag("f").key(),
+            std_parse_args_schema_type("S", &anyhow::anyhow!("x")).key(),
+            std_parse_args_schema_shape("S").key(),
+            std_parse_args_schema_field_type("f", "INT").key(),
+            std_parse_flags_arity(2).key(),
+            std_parse_flags_positional(&["a".to_string()]).key(),
+            std_parse_positionals_arity(2).key(),
+            std_parse_byte_count_negative(-1).key(),
+            std_parse_byte_count_integral(1.5).key(),
+            std_parse_byte_count_shape(&crate::Value::string("x".to_string())).key(),
+            std_parse_byte_count_range("x").key(),
+            std_format_byte_count_negative(-1).key(),
+            std_format_duration_negative(-1).key(),
+            std_parse_duration_range("x").key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -710,6 +1269,45 @@ mod tests {
         assert_eq!(
             alias_cycle(&["A".to_string(), "B".to_string(), "A".to_string()]).message(),
             "type alias cycle: A -> B -> A"
+        );
+    }
+
+    #[test]
+    fn func_and_std_messages_match_canonical_wording() {
+        assert_eq!(
+            func_export_unknown("F").message(),
+            "EXPORT `F` matches no defined script function or known host function"
+        );
+        assert!(
+            func_placeholder_unknown("M", "F", &["M::F".to_string()])
+                .message()
+                .contains("`M::F`")
+        );
+        assert_eq!(func_unknown("F").message(), "unknown function `F`");
+        assert_eq!(std_unknown_type("T").message(), "unknown type `T`");
+        assert_eq!(
+            std_parse_args_arity(2).message(),
+            "PARSE_ARGS() expects 1 argument, got 2"
+        );
+        assert_eq!(
+            std_parse_args_needs_value("f").message(),
+            "PARSE_ARGS flag --f needs a value: use --f=<value>"
+        );
+        assert_eq!(
+            std_parse_args_duplicate_flag("f", Some("g")).message(),
+            "PARSE_ARGS duplicate flag --f/--g"
+        );
+        assert_eq!(
+            std_parse_args_missing_flag("f", None).message(),
+            "PARSE_ARGS missing required flag --f"
+        );
+        assert_eq!(
+            std_bool_cannot_coerce("BOOL_OR", "x").message(),
+            "BOOL_OR cannot coerce \"x\" to BOOL"
+        );
+        assert_eq!(
+            std_contains_haystack_type("INT").message(),
+            "CONTAINS needs a STRING or LIST haystack, found `INT`"
         );
     }
 

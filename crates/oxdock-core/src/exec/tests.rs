@@ -11143,7 +11143,7 @@ fn template_in_module_body_uses_module_aliases_not_importer() {
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
     assert!(
-        rendered.contains("unknown placeholder function 'CB::F'"),
+        rendered.contains("unknown placeholder function `CB::F`"),
         "module body must not see the importer's alias, got: {rendered}"
     );
     assert!(
@@ -11249,7 +11249,7 @@ fn template_module_init_inside_entry_func_resolves_against_module() {
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
     assert!(
-        rendered.contains("unknown placeholder function 'CB::F'"),
+        rendered.contains("unknown placeholder function `CB::F`"),
         "module init must not inherit the entry frame's aliases, got: {rendered}"
     );
     assert!(
@@ -11318,7 +11318,7 @@ fn template_module_init_call_into_other_uses_callee_aliases() {
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
     assert!(
-        rendered.contains("unknown placeholder function 'CB::F'"),
+        rendered.contains("unknown placeholder function `CB::F`"),
         "callee must resolve against its own imports, got: {rendered}"
     );
     assert!(

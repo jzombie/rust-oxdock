@@ -1238,7 +1238,7 @@ fn block_import_unwinds_on_block_exit() {
         )
         .expect_err("runtime must unwind block imports too");
     assert!(
-        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        format!("{err:#}").contains("unknown placeholder function `LIB::WHO`"),
         "{err:#}"
     );
 }
@@ -1309,7 +1309,7 @@ fn func_block_imports_unwind_and_isolate_callees() {
         )
         .expect_err("runtime must unwind function block imports too");
     assert!(
-        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        format!("{err:#}").contains("unknown placeholder function `LIB::WHO`"),
         "{err:#}"
     );
     // SEV-1b, static: sibling callee `G` reads nothing from caller
@@ -1364,7 +1364,7 @@ fn func_block_imports_unwind_and_isolate_callees() {
         )
         .expect_err("runtime must not leak caller block imports into callees");
     assert!(
-        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        format!("{err:#}").contains("unknown placeholder function `LIB::WHO`"),
         "{err:#}"
     );
     // SEV-2: a bare guarded block unwinds its import past `}` in both
@@ -1427,7 +1427,7 @@ fn func_block_imports_unwind_and_isolate_callees() {
         )
         .expect_err("runtime must unwind bare guarded block imports too");
     assert!(
-        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        format!("{err:#}").contains("unknown placeholder function `LIB::WHO`"),
         "{err:#}"
     );
     // `ISOLATED` blocks scope the same way: the runtime runs the
@@ -1474,7 +1474,7 @@ fn func_block_imports_unwind_and_isolate_callees() {
         )
         .expect_err("runtime must unwind ISOLATED block imports too");
     assert!(
-        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        format!("{err:#}").contains("unknown placeholder function `LIB::WHO`"),
         "{err:#}"
     );
 }
