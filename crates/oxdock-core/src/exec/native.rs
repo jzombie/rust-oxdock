@@ -996,9 +996,12 @@ pub fn resolve_script_params<P: ProcessManager>(
     let mut resolved = Vec::with_capacity(params.len());
     for (pname, ptype, optional) in params {
         let clean = pname.trim_start_matches('$').to_string();
-        let tag = state
-            .resolve_tag(ptype)
-            .map_err(|err| anyhow::Error::new(std_diag::func_param_type(func_name, &err)))?;
+        let tag = state.resolve_tag(ptype).map_err(|err| {
+            anyhow::Error::new(std_diag::func_param_type(
+                func_name,
+                &anyhow::Error::new(err),
+            ))
+        })?;
         state.check_declaration_tag(&format!("function `{func_name}` param `${clean}`"), &tag)?;
         if *optional {
             optional_zero_value(&tag).map(|_| ()).map_err(|err| {
@@ -3344,10 +3347,12 @@ fn coerce_flags(
 /// types and non-scalar fields fail naming the flag.
 fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<CliSpecs> {
     let name = "FLAGS";
-    let tag = cx
-        .state
-        .resolve_tag(name)
-        .map_err(|err| anyhow::Error::new(std_diag::std_parse_args_schema_type(name, &err)))?;
+    let tag = cx.state.resolve_tag(name).map_err(|err| {
+        anyhow::Error::new(std_diag::std_parse_args_schema_type(
+            name,
+            &anyhow::Error::new(err),
+        ))
+    })?;
     let TypeTag::Record(fields) = tag else {
         return Err(anyhow::Error::new(std_diag::std_parse_args_schema_shape(
             name,

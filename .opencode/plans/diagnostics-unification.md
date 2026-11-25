@@ -803,6 +803,28 @@ transport, so this phase is mechanical:
    validate_closure, tests if-let-Ok) stay on anyhow
    and hold via blanket From. Core 408 green; clippy
    and fmt clean.
+   Tag-resolution cluster step 2026-11-26: two new
+   ctors (typing_unregistered plus typing_void_position,
+   wording byte-identical to the replaced bail!s, both
+   pinned by key plus message tests); resolve_tag plus
+   resolve_named plus resolve_spelling_text plus
+   build_rendered plus build_generic plus check_tag_known
+   plus check_declaration_tag plus check_return_tag now
+   return DiagnosticResult with bare Err ctors (all other
+   keys pre-existing). parse_spelling already returns
+   Diagnostic so its map_err shim drops; check_value keeps
+   its map_err (anyhow into Diagnostic, same-type ?).
+   validate_function_type_tags stays anyhow (three bare
+   bail!s need their own ctors later) and its
+   check_tag_known call holds via blanket From, as do all
+   bare-? callers. Sixteen map_err-with-ctor sites
+   (native 2, static_check 10 incl. check_return_tag and
+   check_declaration_tag wraps, import 4 with Some) take
+   the &anyhow::Error::new inner shim per the passthrough
+   precedent; the handlers anyhow!-format site compiles
+   unchanged (Display). Core 408 plus integration 629
+   plus parser 267 green; clippy (only pre-existing
+   baseline) and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

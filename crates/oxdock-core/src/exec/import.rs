@@ -476,7 +476,11 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         if !file_exists && cx.state.module_table.modules.contains_key(path) {
             for name in type_names {
                 cx.state.resolve_tag(name).map_err(|e| {
-                    anyhow::Error::new(import_diag::import_unknown_type(path, name, Some(&e)))
+                    anyhow::Error::new(import_diag::import_unknown_type(
+                        path,
+                        name,
+                        Some(&anyhow::Error::new(e)),
+                    ))
                 })?;
             }
             if let Some(alias) = alias {
@@ -800,7 +804,7 @@ fn resolve_own_type_harvests_inner<P: ProcessManager>(
                         anyhow::Error::new(import_diag::import_unknown_type(
                             harvest_path,
                             name,
-                            Some(&e),
+                            Some(&anyhow::Error::new(e)),
                         ))
                     })?;
                 }
@@ -1304,7 +1308,7 @@ fn expand_walk<P: ProcessManager>(
                                 anyhow::Error::new(import_diag::import_unknown_type(
                                     path,
                                     name,
-                                    Some(&e),
+                                    Some(&anyhow::Error::new(e)),
                                 ))
                             })?;
                         }
@@ -1380,7 +1384,7 @@ fn expand_walk_top<P: ProcessManager>(
                                 anyhow::Error::new(import_diag::import_unknown_type(
                                     path,
                                     name,
-                                    Some(&e),
+                                    Some(&anyhow::Error::new(e)),
                                 ))
                             })?;
                         }

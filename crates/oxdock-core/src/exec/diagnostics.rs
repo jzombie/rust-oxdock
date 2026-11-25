@@ -140,6 +140,33 @@ pub fn typing_unknown(
     )
 }
 
+/// Declaration names a custom type nobody registered. Takes the
+/// use site, the name, and the known-type directory; joining lives
+/// here so call sites pass the slice.
+pub fn typing_unregistered(what: &str, name: &str, types: &[String]) -> Diagnostic {
+    let known = types.join(", ");
+    let message = format!("{what} declares unregistered type '{name}'; known types: {known}");
+    Diagnostic::new(
+        "dsl.typing.unregistered",
+        message,
+        Diagnostic::make_fields(&[("ctx", what), ("name", name), ("types", &known)]),
+    )
+}
+
+/// `VOID` outside a return annotation. Takes the use site; the rule
+/// (bare `VOID` is a return type, or a `HANDLE` payload) is fixed
+/// wording.
+pub fn typing_void_position(what: &str) -> Diagnostic {
+    let message = format!(
+        "{what} declares VOID outside a return annotation: VOID is only a return type (or HANDLE<VOID> payload)"
+    );
+    Diagnostic::new(
+        "dsl.typing.void_position",
+        message,
+        Diagnostic::make_fields(&[("ctx", what)]),
+    )
+}
+
 /// Type arguments on a head that takes none.
 pub fn typing_no_args(name: &str) -> Diagnostic {
     let message = format!("`{name}` takes no type arguments");
@@ -2463,6 +2490,8 @@ mod tests {
             typing_bare_handle().key(),
             alias_cycle(&["A".to_string(), "A".to_string()]).key(),
             typing_unknown("NOPE", &types, &empty, &empty).key(),
+            typing_unregistered("LET $x", "NOPE", &types).key(),
+            typing_void_position("LET $x").key(),
             typing_no_args("STRING").key(),
             typing_handle_arity().key(),
             typing_list_arity().key(),
@@ -2689,6 +2718,14 @@ mod tests {
         assert_eq!(
             typing_empty_union().message(),
             "empty union: no member shapes to admit"
+        );
+        assert_eq!(
+            typing_unregistered("LET $x", "NOPE", &["STRING".to_string()]).message(),
+            "LET $x declares unregistered type 'NOPE'; known types: STRING"
+        );
+        assert_eq!(
+            typing_void_position("LET $x").message(),
+            "LET $x declares VOID outside a return annotation: VOID is only a return type (or HANDLE<VOID> payload)"
         );
         assert_eq!(
             alias_cycle(&["A".to_string(), "B".to_string(), "A".to_string()]).message(),

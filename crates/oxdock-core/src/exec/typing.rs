@@ -162,7 +162,7 @@ impl<P: ProcessManager> ExecState<P> {
     /// Single choke for every `LET`/`FUNC` declaration. Signature is
     /// stable: alias cycles and shared depth accounting thread
     /// internally, so all call sites gain generics with zero edits.
-    pub fn resolve_tag(&self, name: &str) -> Result<TypeTag> {
+    pub fn resolve_tag(&self, name: &str) -> DiagnosticResult<TypeTag> {
         let canonical = canonicalize_spelling(name);
         if canonical.contains('<') || canonical.contains('|') {
             return self.resolve_spelling_text(&canonical, &mut Vec::new(), 0);
@@ -179,21 +179,18 @@ impl<P: ProcessManager> ExecState<P> {
         name: &str,
         resolving: &mut Vec<String>,
         depth: usize,
-    ) -> Result<TypeTag> {
+    ) -> DiagnosticResult<TypeTag> {
         if depth > MAX_GENERIC_DEPTH {
-            return Err(anyhow::Error::new(typing_diag::typing_max_depth(
-                MAX_GENERIC_DEPTH,
-                name,
-            )));
+            return Err(typing_diag::typing_max_depth(MAX_GENERIC_DEPTH, name));
         }
         if name == MAP_TYPE_NAME {
-            return Err(anyhow::Error::new(typing_diag::typing_bare_map()));
+            return Err(typing_diag::typing_bare_map());
         }
         if name == LIST_TYPE_NAME {
-            return Err(anyhow::Error::new(typing_diag::typing_bare_list()));
+            return Err(typing_diag::typing_bare_list());
         }
         if name == HANDLE_TYPE_NAME {
-            return Err(anyhow::Error::new(typing_diag::typing_bare_handle()));
+            return Err(typing_diag::typing_bare_handle());
         }
         if let Some(tag) = TypeTag::builtin(name) {
             return Ok(tag);
@@ -209,7 +206,7 @@ impl<P: ProcessManager> ExecState<P> {
         if let Some(target) = self.type_aliases.get(name) {
             if resolving.iter().any(|s| s.as_str() == name) {
                 resolving.push(name.to_string());
-                return Err(anyhow::Error::new(typing_diag::alias_cycle(resolving)));
+                return Err(typing_diag::alias_cycle(resolving));
             }
             resolving.push(name.to_string());
             let target = target.clone();
@@ -217,12 +214,12 @@ impl<P: ProcessManager> ExecState<P> {
             resolving.pop();
             return result;
         }
-        Err(anyhow::Error::new(typing_diag::typing_unknown(
+        Err(typing_diag::typing_unknown(
             name,
             &self.type_names(),
             &self.schema_names(),
             &self.alias_names(),
-        )))
+        ))
     }
 
     /// Resolve one canonical spelling that may carry `<...>` args:
@@ -235,12 +232,12 @@ impl<P: ProcessManager> ExecState<P> {
         canonical: &str,
         resolving: &mut Vec<String>,
         depth: usize,
-    ) -> Result<TypeTag> {
+    ) -> DiagnosticResult<TypeTag> {
         let key = format!("{}\x1f{:016x}", canonical, self.type_env_digest);
         if let Some(hit) = lookup_rendered(&key) {
             return Ok(hit);
         }
-        let spelled = parse_spelling(canonical).map_err(anyhow::Error::new)?;
+        let spelled = parse_spelling(canonical)?;
         let tag = self.build_rendered(&spelled, resolving, depth)?;
         Ok(intern_rendered(key, tag))
     }
@@ -294,12 +291,12 @@ impl<P: ProcessManager> ExecState<P> {
         spelled: &Spelled,
         resolving: &mut Vec<String>,
         depth: usize,
-    ) -> Result<TypeTag> {
+    ) -> DiagnosticResult<TypeTag> {
         if depth > MAX_GENERIC_DEPTH {
-            return Err(anyhow::Error::new(typing_diag::typing_max_depth_spelled(
+            return Err(typing_diag::typing_max_depth_spelled(
                 MAX_GENERIC_DEPTH,
                 spelled,
-            )));
+            ));
         }
         match spelled {
             Spelled::Named(name) => self.resolve_named(name, resolving, depth),
@@ -328,10 +325,10 @@ impl<P: ProcessManager> ExecState<P> {
         args: &[SpelledField],
         resolving: &mut Vec<String>,
         depth: usize,
-    ) -> Result<TypeTag> {
+    ) -> DiagnosticResult<TypeTag> {
         if name != LIST_TYPE_NAME && name != MAP_TYPE_NAME && name != HANDLE_TYPE_NAME {
             self.resolve_named(name, resolving, depth)?;
-            return Err(anyhow::Error::new(typing_diag::typing_no_args(name)));
+            return Err(typing_diag::typing_no_args(name));
         }
         if name == HANDLE_TYPE_NAME {
             let [
@@ -342,7 +339,7 @@ impl<P: ProcessManager> ExecState<P> {
                 },
             ] = args
             else {
-                return Err(anyhow::Error::new(typing_diag::typing_handle_arity()));
+                return Err(typing_diag::typing_handle_arity());
             };
             let payload = self.build_rendered(payload, resolving, depth + 1)?;
             return Ok(TypeTag::HandleOf(std::sync::Arc::new(payload)));
@@ -356,7 +353,7 @@ impl<P: ProcessManager> ExecState<P> {
                 },
             ] = args
             else {
-                return Err(anyhow::Error::new(typing_diag::typing_list_arity()));
+                return Err(typing_diag::typing_list_arity());
             };
             let element = self.build_rendered(element, resolving, depth + 1)?;
             return Ok(TypeTag::ListOf(std::sync::Arc::new(element)));
@@ -379,7 +376,7 @@ impl<P: ProcessManager> ExecState<P> {
         let mut fields = Vec::with_capacity(args.len());
         for arg in args {
             let Some(field_name) = arg.name.as_ref() else {
-                return Err(anyhow::Error::new(typing_diag::typing_map_bare(name)));
+                return Err(typing_diag::typing_map_bare(name));
             };
             let ty = self.build_rendered(&arg.ty, resolving, depth + 1)?;
             let default = match &arg.default {
@@ -387,10 +384,10 @@ impl<P: ProcessManager> ExecState<P> {
                 Some(lit) => {
                     let value = lit.to_value();
                     check_value(&ty, &value).map_err(|_| {
-                        anyhow::Error::new(typing_diag::typing_default_mismatch(
+                        typing_diag::typing_default_mismatch(
                             field_name,
                             &oxdock_parser::render_structural(&ty),
-                        ))
+                        )
                     })?;
                     Some(value)
                 }
@@ -415,23 +412,14 @@ impl<P: ProcessManager> ExecState<P> {
             for field in &fields {
                 if let Some(prev) = seen.insert(field.name.as_str(), field.name.as_str()) {
                     let _ = prev;
-                    return Err(anyhow::Error::new(typing_diag::map_duplicate_field(
-                        &field.name,
-                    )));
+                    return Err(typing_diag::map_duplicate_field(&field.name));
                 }
                 if let Some(alias) = field.alias.as_ref() {
                     if alias == &field.name {
-                        return Err(anyhow::Error::new(typing_diag::alias_self(
-                            &field.name,
-                            alias,
-                        )));
+                        return Err(typing_diag::alias_self(&field.name, alias));
                     }
                     if let Some(owner) = seen.insert(alias.as_str(), field.name.as_str()) {
-                        return Err(anyhow::Error::new(typing_diag::alias_clash(
-                            alias,
-                            &field.name,
-                            owner,
-                        )));
+                        return Err(typing_diag::alias_clash(alias, &field.name, owner));
                     }
                 }
             }
@@ -537,21 +525,19 @@ impl<P: ProcessManager> ExecState<P> {
     /// deeper. One recursion serves all declaration sites, so the
     /// rule cannot drift between LET, params, returns, schemas, and
     /// aliases: resolve first, then validate here.
-    fn check_tag_known(&self, what: &str, tag: &TypeTag, top_void: bool) -> Result<()> {
+    fn check_tag_known(&self, what: &str, tag: &TypeTag, top_void: bool) -> DiagnosticResult<()> {
         match tag {
             TypeTag::Custom(descriptor) => {
                 if !self.types.contains_key(descriptor.name) {
-                    bail!(
-                        "{what} declares unregistered type '{}'; known types: {}",
+                    return Err(typing_diag::typing_unregistered(
+                        what,
                         descriptor.name,
-                        self.type_names().join(", ")
-                    );
+                        &self.type_names(),
+                    ));
                 }
             }
             TypeTag::Void if !top_void => {
-                bail!(
-                    "{what} declares VOID outside a return annotation: VOID is only a return type (or HANDLE<VOID> payload)"
-                );
+                return Err(typing_diag::typing_void_position(what));
             }
             TypeTag::Void => {}
             TypeTag::ListOf(element) => self.check_tag_known(what, element, false)?,
@@ -596,14 +582,14 @@ impl<P: ProcessManager> ExecState<P> {
     /// return: LET bindings, parameters, schemas, aliases at use.
     /// Single choke so the VOID position rule cannot drift between
     /// the static checker and runtime definition paths.
-    pub fn check_declaration_tag(&self, what: &str, tag: &TypeTag) -> Result<()> {
+    pub fn check_declaration_tag(&self, what: &str, tag: &TypeTag) -> DiagnosticResult<()> {
         self.check_tag_known(what, tag, false)
     }
 
     /// Return-position gate: bare VOID is legal here (and only
     /// here, besides HANDLE payloads). Same single recursion as
     /// every other declaration site.
-    pub fn check_return_tag(&self, what: &str, tag: &TypeTag) -> Result<()> {
+    pub fn check_return_tag(&self, what: &str, tag: &TypeTag) -> DiagnosticResult<()> {
         self.check_tag_known(what, tag, true)
     }
 

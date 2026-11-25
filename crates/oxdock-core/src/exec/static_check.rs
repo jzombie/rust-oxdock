@@ -601,9 +601,9 @@ fn module_lets_indexed<P: ProcessManager>(
                 is_const,
                 ..
             } => {
-                let tag = exec
-                    .resolve_tag(decl_type)
-                    .map_err(|err| anyhow::Error::new(check_diag::check_var_tag(var, &err)))?;
+                let tag = exec.resolve_tag(decl_type).map_err(|err| {
+                    anyhow::Error::new(check_diag::check_var_tag(var, &anyhow::Error::new(err)))
+                })?;
                 out.push((
                     GuardedLet {
                         name: clean_var(var),
@@ -690,7 +690,11 @@ fn merge_harvest<P: ProcessManager>(
         if exec.module_table.modules.contains_key(path) {
             for name in type_names {
                 exec.resolve_tag(name).map_err(|err| {
-                    anyhow::Error::new(check_diag::import_unknown_type(path, name, Some(&err)))
+                    anyhow::Error::new(check_diag::import_unknown_type(
+                        path,
+                        name,
+                        Some(&anyhow::Error::new(err)),
+                    ))
                 })?;
             }
             return Ok(());
@@ -2981,13 +2985,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         col: usize,
     ) -> Result<FuncInfo> {
         let resolved = resolve_script_params(self.exec, name, params)?;
-        let declared = self
-            .exec
-            .resolve_tag(return_type)
-            .map_err(|err| anyhow::Error::new(check_diag::check_func_tag(name, &err)))?;
+        let declared = self.exec.resolve_tag(return_type).map_err(|err| {
+            anyhow::Error::new(check_diag::check_func_tag(name, &anyhow::Error::new(err)))
+        })?;
         self.exec
             .check_return_tag(&format!("function `{name}` returns"), &declared)
-            .map_err(|err| anyhow::Error::new(check_diag::check_func_tag(name, &err)))?;
+            .map_err(|err| {
+                anyhow::Error::new(check_diag::check_func_tag(name, &anyhow::Error::new(err)))
+            })?;
         Ok(FuncInfo {
             params: resolved,
             declared,
@@ -4045,14 +4050,20 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             } => {
                 self.infer_expr(in_expr, env, scope, idx, depth + 1)?;
                 let val_tag = self.exec.resolve_tag(var_type).map_err(|err| {
-                    anyhow::Error::new(check_diag::check_step_wrap(idx + 1, &err))
+                    anyhow::Error::new(check_diag::check_step_wrap(
+                        idx + 1,
+                        &anyhow::Error::new(err),
+                    ))
                 })?;
                 let mut fork = env.fork();
                 fork.insert_top(clean_var(var), val_tag, step.guard.as_ref());
                 if let Some(key) = key_var {
                     let key_tag = match key_type {
                         Some(name) => self.exec.resolve_tag(name).map_err(|err| {
-                            anyhow::Error::new(check_diag::check_step_wrap(idx + 1, &err))
+                            anyhow::Error::new(check_diag::check_step_wrap(
+                                idx + 1,
+                                &anyhow::Error::new(err),
+                            ))
                         })?,
                         None => TypeTag::Int,
                     };
@@ -4088,13 +4099,17 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 ..
             } => {
                 let resolved = resolve_script_params(self.exec, name, params)?;
-                let declared = self
-                    .exec
-                    .resolve_tag(return_type)
-                    .map_err(|err| anyhow::Error::new(check_diag::check_func_tag(name, &err)))?;
+                let declared = self.exec.resolve_tag(return_type).map_err(|err| {
+                    anyhow::Error::new(check_diag::check_func_tag(name, &anyhow::Error::new(err)))
+                })?;
                 self.exec
                     .check_return_tag(&format!("function `{name}` returns"), &declared)
-                    .map_err(|err| anyhow::Error::new(check_diag::check_func_tag(name, &err)))?;
+                    .map_err(|err| {
+                        anyhow::Error::new(check_diag::check_func_tag(
+                            name,
+                            &anyhow::Error::new(err),
+                        ))
+                    })?;
                 let info = FuncInfo {
                     params: resolved,
                     declared,
@@ -4134,7 +4149,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // matching the historical per-form order. No per-form
                 // restatement of the tag gate or the const branch.
                 let tag = self.exec.resolve_tag(decl_type).map_err(|err| {
-                    anyhow::Error::new(check_diag::check_step_wrap(idx + 1, &err))
+                    anyhow::Error::new(check_diag::check_step_wrap(
+                        idx + 1,
+                        &anyhow::Error::new(err),
+                    ))
                 })?;
                 match rhs {
                     oxdock_parser::BindRhs::Expr(expr) => {
@@ -4155,7 +4173,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.exec
                     .check_declaration_tag(&format!("step {}", idx + 1), &tag)
                     .map_err(|err| {
-                        anyhow::Error::new(check_diag::check_step_wrap(idx + 1, &err))
+                        anyhow::Error::new(check_diag::check_step_wrap(
+                            idx + 1,
+                            &anyhow::Error::new(err),
+                        ))
                     })?;
                 let key = clean_var(var);
                 if *is_const {
