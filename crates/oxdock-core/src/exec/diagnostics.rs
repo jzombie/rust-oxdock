@@ -14,9 +14,9 @@ use oxdock_parser::{
 
 use super::function_names::{
     FUNC_BASE64_DECODE, FUNC_BASE64_ENCODE, FUNC_BOOL, FUNC_CONTAINS, FUNC_FLOAT,
-    FUNC_FORMAT_BYTE_COUNT, FUNC_FORMAT_DURATION, FUNC_GLOB, FUNC_INT, FUNC_IS_EXEC,
-    FUNC_IS_TERMINAL, FUNC_LEN, FUNC_LOAD_JSON, FUNC_LOAD_TOML, FUNC_PARSE_ARGS,
-    FUNC_PARSE_BYTE_COUNT, FUNC_PARSE_DURATION, FUNC_PARSE_FLAGS, FUNC_PARSE_JSON,
+    FUNC_FORMAT_BYTE_COUNT, FUNC_FORMAT_DURATION, FUNC_GLOB, FUNC_HAS_KEY, FUNC_INT, FUNC_IS_EXEC,
+    FUNC_IS_TERMINAL, FUNC_LEN, FUNC_LOAD_JSON, FUNC_LOAD_TOML, FUNC_MAP_SET, FUNC_MERGE_MAPS,
+    FUNC_PARSE_ARGS, FUNC_PARSE_BYTE_COUNT, FUNC_PARSE_DURATION, FUNC_PARSE_FLAGS, FUNC_PARSE_JSON,
     FUNC_PARSE_POSITIONALS, FUNC_PARSE_TOML, FUNC_PATH_BASE, FUNC_PATH_REL, FUNC_PATH_TYPE,
     FUNC_PATH_WRITABLE, FUNC_SEMAPHORE_NEW, FUNC_SHELL_SPLIT_ARGS, FUNC_TO_JSON,
 };
@@ -1861,6 +1861,79 @@ pub fn std_glob_list_failed(reason: &std::io::Error) -> Diagnostic {
     )
 }
 
+/// `HAS_KEY` with a non-map first argument. Takes the actual type name.
+pub fn std_has_key_needs_map(actual: &str) -> Diagnostic {
+    let message = format!(
+        "{FUNC_HAS_KEY} expects a {} as its first argument, got {actual}",
+        MAP_TYPE_NAME
+    );
+    Diagnostic::new(
+        "dsl.std.has_key_needs_map",
+        message,
+        Diagnostic::make_fields(&[("actual", actual)]),
+    )
+}
+
+/// `MAP_SET` with a non-map first argument. Takes the actual type name.
+pub fn std_map_set_needs_map(actual: &str) -> Diagnostic {
+    let message = format!(
+        "{FUNC_MAP_SET} expects a {} as its first argument, got {actual}",
+        MAP_TYPE_NAME
+    );
+    Diagnostic::new(
+        "dsl.std.map_set_needs_map",
+        message,
+        Diagnostic::make_fields(&[("actual", actual)]),
+    )
+}
+
+/// `MAP_SET` on a duplicate key. Takes the rejected key.
+pub fn std_map_set_duplicate(key: &str) -> Diagnostic {
+    let message = format!("{FUNC_MAP_SET} duplicate key '{key}'");
+    Diagnostic::new(
+        "dsl.std.map_set_duplicate",
+        message,
+        Diagnostic::make_fields(&[("key", key)]),
+    )
+}
+
+/// `MERGE_MAPS` with a non-list argument. Takes the actual type name.
+pub fn std_merge_maps_needs_list(actual: &str) -> Diagnostic {
+    let message = format!(
+        "{FUNC_MERGE_MAPS} expects a {} of {}s, got {actual}",
+        LIST_TYPE_NAME, MAP_TYPE_NAME
+    );
+    Diagnostic::new(
+        "dsl.std.merge_maps_needs_list",
+        message,
+        Diagnostic::make_fields(&[("actual", actual)]),
+    )
+}
+
+/// `MERGE_MAPS` element that is not a map. Takes the position and the
+/// actual type name.
+pub fn std_merge_maps_needs_map(index: usize, actual: &str) -> Diagnostic {
+    let message = format!("{FUNC_MERGE_MAPS} element {index} is {actual}, not {MAP_TYPE_NAME}");
+    Diagnostic::new(
+        "dsl.std.merge_maps_needs_map",
+        message,
+        Diagnostic::make_fields(&[("index", &index.to_string()), ("actual", actual)]),
+    )
+}
+
+/// `MERGE_MAPS` duplicate under `fail_on_duplicate`. Takes the
+/// repeated key.
+pub fn std_merge_maps_duplicate(key: &str) -> Diagnostic {
+    let message = format!(
+        "duplicate values key '{key}'; later files must not repeat it under fail_on_duplicate"
+    );
+    Diagnostic::new(
+        "dsl.std.merge_maps_duplicate",
+        message,
+        Diagnostic::make_fields(&[("key", key)]),
+    )
+}
+
 /// `HANDLE` typed JSON decode on a non-object. Takes the offending
 /// JSON value; `Display` rendering lives here.
 pub fn json_handle_needs_object(other: &serde_json::Value) -> Diagnostic {
@@ -3441,6 +3514,12 @@ mod tests {
             std_glob_needs_string().key(),
             std_glob_resolve_failed(&anyhow::anyhow!("x")).key(),
             std_glob_list_failed(&std::io::Error::other("x")).key(),
+            std_has_key_needs_map("INT").key(),
+            std_map_set_needs_map("INT").key(),
+            std_map_set_duplicate("k").key(),
+            std_merge_maps_needs_list("INT").key(),
+            std_merge_maps_needs_map(0, "INT").key(),
+            std_merge_maps_duplicate("k").key(),
             std_base64_encode_needs_string("INT").key(),
             std_base64_decode_needs_string("INT").key(),
             std_base64_decode_failed("!!!", &base64::DecodeError::InvalidByte(0, b'!')).key(),
@@ -3776,6 +3855,30 @@ mod tests {
         assert_eq!(
             std_glob_list_failed(&std::io::Error::other("denied")).message(),
             "denied"
+        );
+        assert_eq!(
+            std_has_key_needs_map("INT").message(),
+            "HAS_KEY expects a MAP as its first argument, got INT"
+        );
+        assert_eq!(
+            std_map_set_needs_map("INT").message(),
+            "MAP_SET expects a MAP as its first argument, got INT"
+        );
+        assert_eq!(
+            std_map_set_duplicate("k").message(),
+            "MAP_SET duplicate key 'k'"
+        );
+        assert_eq!(
+            std_merge_maps_needs_list("INT").message(),
+            "MERGE_MAPS expects a LIST of MAPs, got INT"
+        );
+        assert_eq!(
+            std_merge_maps_needs_map(1, "INT").message(),
+            "MERGE_MAPS element 1 is INT, not MAP"
+        );
+        assert_eq!(
+            std_merge_maps_duplicate("k").message(),
+            "duplicate values key 'k'; later files must not repeat it under fail_on_duplicate"
         );
         assert!(
             std_json_parse_failed(&serde_json::from_str::<serde_json::Value>("{bad").unwrap_err())

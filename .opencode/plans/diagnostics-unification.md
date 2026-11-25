@@ -1077,6 +1077,24 @@ transport, so this phase is mechanical:
    test; test-sample construction uses
    `io::Error::other` per the clippy lint. Core 409
    plus integration 629 green; clippy and fmt clean.
+   Map-helpers step 2026-11-26: six new ctors
+   (std_has_key_needs_map plus
+   std_map_set_needs_map plus std_map_set_duplicate
+   plus std_merge_maps_needs_list plus
+   std_merge_maps_needs_map plus
+   std_merge_maps_duplicate, wording byte-identical,
+   all pinned by key plus message tests; the element
+   position rides a `usize` index formatted through
+   `to_string`, per the eval-index precedent).
+   has_key_from_value plus map_set_from_value plus
+   merge_maps_from_value now return DiagnosticResult;
+   the three NativeFn wrappers stay anyhow with one
+   Ok(...?) wrap each. Three new FUNC_* constants
+   (`FUNC_HAS_KEY`, `FUNC_MAP_SET`,
+   `FUNC_MERGE_MAPS`) covered by the lock test; also
+   removed a stray duplicate `FUNC_LOAD_TOML` entry
+   the TOML step left in the lock list. Core 409 plus
+   integration 629 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

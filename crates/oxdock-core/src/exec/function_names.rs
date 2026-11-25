@@ -35,6 +35,8 @@ pub const FUNC_FORMAT_DURATION: &str = "FORMAT_DURATION";
 pub const FUNC_FLOAT: &str = "FLOAT";
 /// `GLOB`: workspace pattern listing.
 pub const FUNC_GLOB: &str = "GLOB";
+/// `HAS_KEY`: map membership probe.
+pub const FUNC_HAS_KEY: &str = "HAS_KEY";
 /// `INT`: integer conversion.
 pub const FUNC_INT: &str = "INT";
 /// `IS_EXEC`: executable probe.
@@ -43,6 +45,10 @@ pub const FUNC_IS_EXEC: &str = "IS_EXEC";
 pub const FUNC_IS_TERMINAL: &str = "IS_TERMINAL";
 /// `LEN`: length of strings, lists, and maps.
 pub const FUNC_LEN: &str = "LEN";
+/// `MAP_SET`: single-key map insertion.
+pub const FUNC_MAP_SET: &str = "MAP_SET";
+/// `MERGE_MAPS`: ordered list-of-maps merge.
+pub const FUNC_MERGE_MAPS: &str = "MERGE_MAPS";
 /// `LOAD_TOML`: TOML file loading.
 pub const FUNC_LOAD_TOML: &str = "LOAD_TOML";
 /// `LOAD_JSON`: JSON file loading.

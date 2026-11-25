@@ -1072,28 +1072,22 @@ pub(crate) fn float_from_value(val: Value) -> DiagnosticResult<Value> {
 /// Value-semantics core of `HAS_KEY()`: report whether a map holds a key
 /// so scripts can branch on optional fields without tripping the strict
 /// missing-key error.
-pub(crate) fn has_key_from_value(map: Value, key: &str) -> Result<Value> {
-    let entries = map.as_map().ok_or_else(|| {
-        anyhow::anyhow!(
-            "HAS_KEY expects a MAP as its first argument, got {}",
-            map.type_name()
-        )
-    })?;
+pub(crate) fn has_key_from_value(map: Value, key: &str) -> DiagnosticResult<Value> {
+    let entries = map
+        .as_map()
+        .ok_or_else(|| args_diag::std_has_key_needs_map(map.type_name()))?;
     Ok(Value::bool(entries.contains_key(key)))
 }
 
 /// Value-semantics core of `MAP_SET()`: insert one key into a map,
 /// failing on duplicates so two entries sharing a key fail the run
 /// instead of silently shadowing each other.
-pub(crate) fn map_set_from_value(map: Value, key: String, value: Value) -> Result<Value> {
-    let entries = map.as_map().ok_or_else(|| {
-        anyhow::anyhow!(
-            "MAP_SET expects a MAP as its first argument, got {}",
-            map.type_name()
-        )
-    })?;
+pub(crate) fn map_set_from_value(map: Value, key: String, value: Value) -> DiagnosticResult<Value> {
+    let entries = map
+        .as_map()
+        .ok_or_else(|| args_diag::std_map_set_needs_map(map.type_name()))?;
     if entries.contains_key(&key) {
-        bail!("MAP_SET duplicate key '{key}'");
+        return Err(args_diag::std_map_set_duplicate(&key));
     }
     let mut next = entries.clone();
     next.insert(key, value);
@@ -1106,26 +1100,18 @@ pub(crate) fn map_set_from_value(map: Value, key: String, value: Value) -> Resul
 /// against `fail_on_duplicate` only and treats anything else as
 /// overwrite, so all production traffic enters through the checked
 /// boundary.
-pub(crate) fn merge_maps_from_value(maps: Value, policy: String) -> Result<Value> {
-    let items = maps.as_list().ok_or_else(|| {
-        anyhow::anyhow!(
-            "MERGE_MAPS expects a LIST of MAPs, got {}",
-            maps.type_name()
-        )
-    })?;
+pub(crate) fn merge_maps_from_value(maps: Value, policy: String) -> DiagnosticResult<Value> {
+    let items = maps
+        .as_list()
+        .ok_or_else(|| args_diag::std_merge_maps_needs_list(maps.type_name()))?;
     let mut merged = std::collections::BTreeMap::new();
     for (index, item) in items.iter().enumerate() {
-        let entries = item.as_map().ok_or_else(|| {
-            anyhow::anyhow!(
-                "MERGE_MAPS element {index} is {}, not MAP",
-                item.type_name()
-            )
-        })?;
+        let entries = item
+            .as_map()
+            .ok_or_else(|| args_diag::std_merge_maps_needs_map(index, item.type_name()))?;
         for (key, value) in entries {
             if merged.contains_key(key) && policy == "fail_on_duplicate" {
-                bail!(
-                    "duplicate values key '{key}'; later files must not repeat it under fail_on_duplicate"
-                );
+                return Err(args_diag::std_merge_maps_duplicate(key));
             }
             merged.insert(key.clone(), value.clone());
         }

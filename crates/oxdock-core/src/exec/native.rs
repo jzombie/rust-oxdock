@@ -2639,7 +2639,7 @@ fn has_key(
     /// Key to look up.
     key: String,
 ) -> Result<Value> {
-    super::args::has_key_from_value(Value::map(map), &key)
+    Ok(super::args::has_key_from_value(Value::map(map), &key)?)
 }
 
 /// Read one map entry with a default for missing keys.
@@ -2697,7 +2697,11 @@ fn map_set(
     /// Value to store.
     value: Value,
 ) -> Result<Value> {
-    super::args::map_set_from_value(Value::map(map), key, value)
+    Ok(super::args::map_set_from_value(
+        Value::map(map),
+        key,
+        value,
+    )?)
 }
 
 /// Draw a random FLOAT uniformly from [0, 1), optionally seeded.
@@ -2870,10 +2874,10 @@ fn merge_maps(
     #[values("fail_on_duplicate", "overwrite")]
     policy: String,
 ) -> Result<Value> {
-    super::args::merge_maps_from_value(
+    Ok(super::args::merge_maps_from_value(
         Value::list(maps.into_iter().map(Value::map).collect()),
         policy,
-    )
+    )?)
 }
 
 /// Report the running engine version.
