@@ -7,13 +7,15 @@
 
 use std::net::IpAddr;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+
+use crate::diagnostics as net_diag;
 
 /// Parse a numeric port (`0`-`65535`; callers narrow further).
 pub fn parse_port(text: &str) -> Result<u16> {
     match text.parse::<u16>() {
         Ok(port) => Ok(port),
-        _ => bail!("port must be numeric 0-65535"),
+        _ => Err(anyhow::Error::new(net_diag::port_not_numeric())),
     }
 }
 
@@ -131,9 +133,9 @@ fn split_protocol_qualifier(text: &str) -> Result<(Option<Protocol>, &str)> {
         return Ok(qualified);
     }
     if text.contains('/') {
-        bail!(
-            "unknown protocol qualifier in {text:?} (expected 'tcp/...', 'udp/...', '.../tcp', or '.../udp')"
-        );
+        return Err(anyhow::Error::new(net_diag::unknown_protocol_qualifier(
+            text,
+        )));
     }
     Ok((None, text))
 }
@@ -145,7 +147,7 @@ fn split_protocol_qualifier(text: &str) -> Result<(Option<Protocol>, &str)> {
 pub fn parse_endpoint_ref(raw: &str, func: &str) -> Result<(Option<Protocol>, VirtualEndpoint)> {
     let text = raw.trim();
     let (protocol, bare) = split_protocol_qualifier(text)
-        .map_err(|err| anyhow::anyhow!("{func} invalid endpoint {raw:?}: {err:#}"))?;
+        .map_err(|err| anyhow::Error::new(net_diag::endpoint_ref_invalid(func, raw, &err)))?;
     let endpoint = parse_virtual_endpoint(bare, func)?;
     Ok((protocol, endpoint))
 }
@@ -166,25 +168,21 @@ fn is_reserved_name(name: &str) -> bool {
 /// (`-p 0:<name>`). The `func` prefix names the caller (`NET_LISTEN`,
 /// `SSH_SERVE`) for error context.
 pub fn parse_virtual_endpoint(raw: &str, func: &str) -> Result<VirtualEndpoint> {
-    let prefix = format!("{func} invalid endpoint {raw:?}");
     let text = raw.trim();
     if text.is_empty() {
-        bail!("{prefix}: expected a port 1-65535 or a service name");
+        return Err(anyhow::Error::new(net_diag::endpoint_empty(func, raw)));
     }
     if text.contains(':') {
-        bail!(
-            "{prefix}: scripts declare logical endpoints, not host:port binds (the host runner maps them with --listen/-p)"
-        );
+        return Err(anyhow::Error::new(net_diag::endpoint_host_port(func, raw)));
     }
     if text.contains('/') || text.chars().any(char::is_whitespace) {
-        bail!("{prefix}: service names use [A-Za-z0-9_-] only");
+        return Err(anyhow::Error::new(net_diag::endpoint_bad_chars(func, raw)));
     }
     if text.chars().all(|c| c.is_ascii_digit()) {
-        let port = parse_port(text).map_err(|err| anyhow::anyhow!("{prefix}: {err}"))?;
+        let port = parse_port(text)
+            .map_err(|err| anyhow::Error::new(net_diag::endpoint_port_parse(func, raw, &err)))?;
         if port == 0 {
-            bail!(
-                "{prefix}: port 0 is reserved for the CLI outer mapping (use -p 0:<endpoint>); scripts declare fixed ports 1-65535 or service names"
-            );
+            return Err(anyhow::Error::new(net_diag::endpoint_port_zero(func, raw)));
         }
         return Ok(VirtualEndpoint::Port(port));
     }
@@ -196,12 +194,10 @@ pub fn parse_virtual_endpoint(raw: &str, func: &str) -> Result<VirtualEndpoint> 
             .chars()
             .any(|c| c.is_ascii_alphabetic() || c == '-' || c == '_')
     {
-        bail!(
-            "{prefix}: service names are 1-64 chars of [A-Za-z0-9_-] with at least one letter, '-' or '_'"
-        );
+        return Err(anyhow::Error::new(net_diag::endpoint_bad_shape(func, raw)));
     }
     if is_reserved_name(text) {
-        bail!("{prefix}: {text:?} is a reserved host name, not a service name");
+        return Err(anyhow::Error::new(net_diag::endpoint_reserved(func, raw)));
     }
     Ok(VirtualEndpoint::Name(text.to_string()))
 }

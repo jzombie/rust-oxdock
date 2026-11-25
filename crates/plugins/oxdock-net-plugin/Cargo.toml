@@ -20,6 +20,7 @@ muxio-rpc-service.workspace = true
 muxio-rpc-service-caller.workspace = true
 muxio-sync-rpc-client.workspace = true
 oxdock-core.workspace = true
+oxdock-diagnostics.workspace = true
 oxdock-fs.workspace = true
 oxdock-func-macro.workspace = true
 oxdock-parser.workspace = true

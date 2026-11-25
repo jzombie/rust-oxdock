@@ -13,6 +13,7 @@
 //! [`Engine`]: oxdock_core::Engine
 
 mod bridge;
+pub mod diagnostics;
 mod endpoints;
 mod fetch;
 mod funcs;

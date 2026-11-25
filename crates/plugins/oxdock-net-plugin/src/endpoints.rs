@@ -26,7 +26,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+
+use crate::diagnostics as net_diag;
 use oxdock_core::PreRunCheck;
 use oxdock_parser::{Expr, Step, StepKind, split_qualified};
 use oxdock_pipe::ScriptPipe;
@@ -160,9 +162,7 @@ pub enum ServiceTarget {
 /// wording lives in this function and nowhere else. Exported so the SSH
 /// defensive arms report it without restating it.
 pub fn no_cli_mapping(func: &str, endpoint: &VirtualEndpoint) -> anyhow::Error {
-    anyhow::anyhow!(
-        "{func} service '{endpoint}' has no CLI port mapping; pass -p <host_port>:{endpoint} at invocation"
-    )
+    anyhow::Error::new(net_diag::no_cli_mapping(func, endpoint))
 }
 
 struct ListenerSlot {
@@ -247,7 +247,7 @@ impl EndpointRegistry {
     pub fn add_mapping(&self, key: &EndpointKey, spec: BindingSpec) -> Result<()> {
         let mut slots = self.lock_slots();
         if slots.contains_key(key) {
-            bail!("duplicate endpoint mapping for '{key}'");
+            return Err(anyhow::Error::new(net_diag::duplicate_mapping(key)));
         }
         slots.insert(
             key.clone(),
@@ -308,7 +308,7 @@ impl EndpointRegistry {
     /// offline slots all report the same error: no `0`/empty sentinels.
     pub fn resolve_endpoint(&self, key: &EndpointKey) -> Result<SocketAddr> {
         self.bound_addr(key)
-            .ok_or_else(|| anyhow::anyhow!("virtual endpoint '{key}' is not bound"))
+            .ok_or_else(|| anyhow::Error::new(net_diag::endpoint_not_bound(key)))
     }
 
     /// Resolve caller-facing endpoint text (`NET_PORT`/`NET_ADDR`): an
@@ -325,17 +325,14 @@ impl EndpointRegistry {
         let resolve_one = |key: &EndpointKey, kind: &SlotKind| -> Result<SocketAddr> {
             match kind {
                 SlotKind::TcpBound(addr) => Ok(*addr),
-                SlotKind::Memory | SlotKind::Offline => bail!(
-                    "{func} service '{}' is running as an in-memory virtual channel with no physical {noun}",
-                    key.endpoint
-                ),
-                SlotKind::Unmapped => bail!(
-                    "{func} service '{}' is not mapped by the runner (map it with -p/--listen)",
-                    key.endpoint
-                ),
-                SlotKind::TcpUnbound => {
-                    bail!("{func}: '{key}' was never bound (the runner must call bind_all)")
-                }
+                SlotKind::Memory | SlotKind::Offline => Err(anyhow::Error::new(
+                    net_diag::virtual_channel_no_physical(func, &key.endpoint, noun),
+                )),
+                SlotKind::Unmapped => Err(anyhow::Error::new(net_diag::service_not_mapped(
+                    func,
+                    &key.endpoint,
+                ))),
+                SlotKind::TcpUnbound => Err(anyhow::Error::new(net_diag::never_bound(func, key))),
             }
         };
         match protocol {
@@ -350,9 +347,9 @@ impl EndpointRegistry {
                 let tcp_kind = self.slot_kind(&tcp);
                 let udp_kind = self.slot_kind(&udp);
                 match (&tcp_kind, &udp_kind) {
-                    (SlotKind::TcpBound(_), SlotKind::TcpBound(_)) => bail!(
-                        "ambiguous virtual endpoint '{text}': both TCP and UDP bindings exist; qualify as 'tcp/{text}' or 'udp/{text}'"
-                    ),
+                    (SlotKind::TcpBound(_), SlotKind::TcpBound(_)) => {
+                        Err(anyhow::Error::new(net_diag::ambiguous_endpoint(text)))
+                    }
                     // A known slot's verdict beats an absent one; TCP
                     // first preserves the bare-text default.
                     _ => {
@@ -379,10 +376,10 @@ impl EndpointRegistry {
         }
         let mut slots = self.lock_slots();
         let Some(slot) = slots.get_mut(key) else {
-            bail!("{func}: unknown service '{key}' (map it with -p/--listen)");
+            return Err(anyhow::Error::new(net_diag::unknown_service(func, key)));
         };
         if slot.claimed.swap(true, Ordering::SeqCst) {
-            bail!("{func}: '{key}' is already claimed");
+            return Err(anyhow::Error::new(net_diag::already_claimed(func, key)));
         }
         if let Some(socket) = slot.socket.as_ref() {
             let addr = socket
@@ -398,13 +395,11 @@ impl EndpointRegistry {
             BindingSpec::Offline => Ok(AcquiredListener::Offline),
             BindingSpec::DialOnly { .. } => {
                 slot.claimed.store(false, Ordering::SeqCst);
-                bail!(
-                    "{func}: '{key}' is a dial-only mapping (the runner owns the socket; LISTEN elsewhere)"
-                )
+                Err(anyhow::Error::new(net_diag::dial_only_mapping(func, key)))
             }
             BindingSpec::Loopback { .. } | BindingSpec::Exposed { .. } => {
                 slot.claimed.store(false, Ordering::SeqCst);
-                bail!("{func}: '{key}' was never bound (the runner must call bind_all)")
+                Err(anyhow::Error::new(net_diag::never_bound(func, key)))
             }
         }
     }
@@ -470,10 +465,10 @@ impl EndpointRegistry {
     pub fn enqueue_memory_session(&self, key: &EndpointKey, pair: MemoryPipePair) -> Result<()> {
         let mut slots = self.lock_slots();
         let Some(slot) = slots.get_mut(key) else {
-            bail!("NET_CONNECT: unknown service '{key}' (map it with -p/--listen)");
+            return Err(anyhow::Error::new(net_diag::connect_unknown_service(key)));
         };
         if slot.memory.len() >= MEMORY_QUEUE_CAP {
-            bail!("NET_CONNECT: memory connection queue for '{key}' is full");
+            return Err(anyhow::Error::new(net_diag::connect_queue_full(key)));
         }
         slot.memory.push_back(pair);
         Ok(())
@@ -507,9 +502,9 @@ pub fn assert_services_bound(
     }
     for (func, service) in calls {
         let Some(service) = service else {
-            bail!(
-                "{func} service names must be string literals so the runner can verify bindings before execution"
-            );
+            return Err(anyhow::Error::new(net_diag::service_names_must_be_literal(
+                func,
+            )));
         };
         check_service_bound(registry, func, &service)?;
     }
@@ -603,9 +598,7 @@ fn check_service_bound(registry: &EndpointRegistry, func: &str, service: &str) -
             SocketRequirement::SocketlessOk => Ok(()),
             SocketRequirement::SocketRequired => Err(no_cli_mapping(func, &key.endpoint)),
         },
-        SlotKind::TcpUnbound => {
-            bail!("{func}: '{key}' was never bound (the runner must call bind_all)")
-        }
+        SlotKind::TcpUnbound => Err(anyhow::Error::new(net_diag::never_bound(func, &key))),
         SlotKind::Unmapped => Err(no_cli_mapping(func, &key.endpoint)),
     }
 }
@@ -655,7 +648,7 @@ pub fn resolve_service_target(
     sockets: SocketRequirement,
 ) -> Result<ServiceTarget> {
     if registry.is_offline() {
-        bail!("{func}: '{key}' is offline")
+        return Err(anyhow::Error::new(net_diag::service_offline(func, key)));
     }
     match registry.slot_kind(key) {
         SlotKind::TcpBound(addr) => Ok(ServiceTarget::Tcp(addr)),
@@ -664,10 +657,8 @@ pub fn resolve_service_target(
             SocketRequirement::SocketRequired => Err(no_cli_mapping(func, &key.endpoint)),
         },
         SlotKind::Unmapped => Err(no_cli_mapping(func, &key.endpoint)),
-        SlotKind::TcpUnbound => {
-            bail!("{func}: '{key}' was never bound (the runner must call bind_all)")
-        }
-        SlotKind::Offline => bail!("{func}: '{key}' is offline"),
+        SlotKind::TcpUnbound => Err(anyhow::Error::new(net_diag::never_bound(func, key))),
+        SlotKind::Offline => Err(anyhow::Error::new(net_diag::service_offline(func, key))),
     }
 }
 

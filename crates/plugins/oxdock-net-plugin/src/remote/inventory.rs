@@ -6,8 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use oxdock_parser::StepKind;
+
+use crate::diagnostics as net_diag;
 
 /// One inventory entry: the tokenized transport command. `--remote-serve`
 /// is appended at spawn time, never stored here.
@@ -31,13 +33,17 @@ impl RemoteInventory {
         let mut targets = BTreeMap::new();
         for (target, command) in pairs {
             if targets.contains_key(&target) {
-                bail!("duplicate --remote target {target:?}");
+                return Err(anyhow::Error::new(net_diag::inventory_duplicate_target(
+                    &target,
+                )));
             }
             let argv = shell_words::split(&command).map_err(|err| {
-                anyhow::anyhow!("invalid --remote {target:?}: cannot tokenize command: {err}")
+                anyhow::Error::new(net_diag::inventory_tokenize_failed(&target, &err))
             })?;
             if argv.is_empty() {
-                bail!("invalid --remote {target:?}: command tokenizes to no executable");
+                return Err(anyhow::Error::new(net_diag::inventory_no_executable(
+                    &target,
+                )));
             }
             targets.insert(target, RemoteTarget { argv });
         }
@@ -76,14 +82,10 @@ impl RemoteInventory {
     pub fn validate_script(&self, steps: &[oxdock_parser::Step]) -> Result<()> {
         for target in Self::collect_targets(steps) {
             if !self.targets.contains_key(&target) {
-                bail!(
-                    "unknown remote target {target:?} (declared: [{}]; add --remote {target}=\"<command>\")",
-                    self.targets()
-                        .iter()
-                        .map(|name| format!("{name:?}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+                return Err(anyhow::Error::new(net_diag::inventory_unknown_target(
+                    &target,
+                    &self.targets(),
+                )));
             }
         }
         Ok(())

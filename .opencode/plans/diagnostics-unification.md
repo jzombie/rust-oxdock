@@ -419,6 +419,38 @@ Remaining:
   `requires max_level == min_level`/needle pins hold); lib 26
   (incl. 3 new key+wording pins) + integration + doc green;
   clippy/doc clean; zero fmt drift).
+- Plugin crate: `oxdock-net-plugin` done 2026-11-26 (new
+  `src/diagnostics.rs` owning 69 `net.*` ctors: pump
+  worker-panicked/socket-shutdown/stdout-lock (shared socket+memory
+  key)/socket-read/interrupted (shared supervisors key)/memory-lock/
+  memory-read, fetch url-missing-scheme/url-not-https (distinct keys)/
+  cleartext/scheme/redirects/missing-location/status, endpoint
+  no-cli-mapping (kept `-> anyhow::Error` signature for the SSH
+  caller, body built from the ctor)/duplicate/not-bound/
+  virtual-channel/service-not-mapped/never-bound (shared serve/dial/
+  introspect/pre-run key)/ambiguous/unknown/already-claimed/dial-only/
+  connect-unknown/connect-full/literal-names/offline (shared key),
+  validate port-numeric/qualifier/ref-invalid/empty/host-port/
+  bad-chars/port-parse/port-zero/bad-shape/reserved, func
+  listen-qualified/accept-requires-async/interrupted (shared loops
+  key)/listener-closed (shared paths key)/accept-failed/connect-
+  requires-async/connect-offline/fetch-option-negative (shared key via
+  `OPT_*`)/fetch-exceeds-u32, remote transport-empty/cancelled/
+  unknown-tag/no-staged-tarball/handshake-rejected (reason defaults
+  inside)/proto-mismatch/language-mismatch/response-failed (chain
+  inline)/no-frame/target-failed (reason defaults inside)/script-sha/
+  stdout-sha/no-tarball/push-sha/undeclared-path (shared entries key)/
+  flag malformed/target-invalid/command-empty/tokenize-failed/
+  inventory duplicate/tokenize-failed/no-executable/unknown-target
+  (declared list renders inside); all 8 files zero inline failures
+  (only `anyhow::Error::new` + proper `.context` chains remain);
+  concrete `&io::Error` / `&shell_words::ParseError` /
+  `&anyhow::Error` params per contract; messages byte-identical
+  (existing `already claimed`/`listener is closed`/`requires ASYNC`/
+  `is full`/`--offline mode`/`cleartext`/`is not mapped`/`ambiguous`
+  pins hold); lib 38 (incl. 3 new key+wording pins) + integration 38
+  green, ssh-plugin lib 13 green (sole `no_cli_mapping` consumer);
+  clippy/doc clean; zero fmt drift).
 
 ### Phase D — retire `anyhow` as the carrier
 

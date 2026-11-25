@@ -12,7 +12,9 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+
+use crate::diagnostics as net_diag;
 
 /// Default maximum response body a fetch reads: 10 MiB. Matches
 /// ureq's own default cap. Overridable per request through the
@@ -62,11 +64,11 @@ fn is_loopback_host(host: &str) -> bool {
 /// Split `scheme://rest`. Missing or malformed schemes bail before any
 /// socket opens.
 fn split_scheme(url: &str) -> Result<(&str, &str)> {
-    let (scheme, rest) = url.split_once("://").ok_or_else(|| {
-        anyhow::anyhow!("NET_FETCH() needs an https URL, got {url:?} (missing '://')")
-    })?;
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| anyhow::Error::new(net_diag::fetch_url_missing_scheme(url)))?;
     if scheme.is_empty() || rest.is_empty() {
-        bail!("NET_FETCH() needs an https URL, got {url:?}");
+        return Err(anyhow::Error::new(net_diag::fetch_url_not_https(url)));
     }
     Ok((scheme, rest))
 }
@@ -104,14 +106,14 @@ fn check_url(url: &str) -> Result<()> {
         if scheme == "http" {
             let host = authority_host(rest).to_lowercase();
             if !is_loopback_host(&host) {
-                bail!(
-                    "NET_FETCH() refuses cleartext http to non-loopback host {host:?}: use https"
-                );
+                return Err(anyhow::Error::new(net_diag::fetch_refuses_cleartext_http(
+                    &host,
+                )));
             }
         } else {
-            bail!(
-                "NET_FETCH() supports https URLs (plus loopback http for tests), got scheme {scheme:?}"
-            );
+            return Err(anyhow::Error::new(net_diag::fetch_unsupported_scheme(
+                scheme,
+            )));
         }
     }
     Ok(())
@@ -150,10 +152,12 @@ pub fn fetch_text_with_options(initial_url: &str, options: &FetchOptions) -> Res
         let status = response.status().as_u16();
         if (300..400).contains(&status) {
             if redirects >= options.max_redirects {
-                bail!("NET_FETCH({initial_url:?}) failed: too many redirects");
+                return Err(anyhow::Error::new(net_diag::fetch_too_many_redirects(
+                    initial_url,
+                )));
             }
             let location = response.headers().get("location").ok_or_else(|| {
-                anyhow::anyhow!("NET_FETCH({current_url:?}) redirect missing Location header")
+                anyhow::Error::new(net_diag::fetch_redirect_missing_location(&current_url))
             })?;
             let location = location.to_str().with_context(|| {
                 format!("NET_FETCH({current_url:?}) redirect Location is not visible ASCII")
@@ -163,7 +167,10 @@ pub fn fetch_text_with_options(initial_url: &str, options: &FetchOptions) -> Res
             continue;
         }
         if !(200..300).contains(&status) {
-            bail!("NET_FETCH({current_url:?}) failed: http status: {status}");
+            return Err(anyhow::Error::new(net_diag::fetch_http_status(
+                &current_url,
+                status,
+            )));
         }
         let mut response = response;
         let body = response

@@ -1830,6 +1830,7 @@ dependencies = [
  "muxio-rpc-service-caller",
  "muxio-sync-rpc-client",
  "oxdock-core",
+ "oxdock-diagnostics",
  "oxdock-fs",
  "oxdock-func-macro",
  "oxdock-parser",

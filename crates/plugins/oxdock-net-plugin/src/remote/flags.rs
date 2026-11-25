@@ -6,7 +6,9 @@
 //! `-o "ProxyCommand=ssh -W %h:%p jump"`). DSL scripts keep target-only
 //! identifiers; every transport byte stays in the CLI invocation.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+
+use crate::diagnostics as net_diag;
 
 /// Parse one `--remote` flag value of the form `<target>=<command>`.
 /// Returns the target name plus the raw command string; tokenization
@@ -14,21 +16,19 @@ use anyhow::{Result, bail};
 /// text attached.
 pub fn parse_remote_arg(raw: &str) -> Result<(String, String)> {
     let Some((target, command)) = raw.split_once('=') else {
-        bail!(
-            "invalid --remote {raw:?}: expected <target>=\"<command>\", e.g. --remote prod=\"ssh user@host oxdock\""
-        );
+        return Err(anyhow::Error::new(net_diag::remote_arg_malformed(raw)));
     };
     let target = target.trim();
     if !oxdock_parser::commands::is_valid_remote_target(target) {
-        bail!(
-            "invalid --remote target {target:?}: start alphanumeric, then alphanumeric, `_`, or `-`, max 64 chars, never SNAPSHOT, LOCAL, CACHE, SYSTEM, or REMOTE"
-        );
+        return Err(anyhow::Error::new(net_diag::remote_target_invalid(target)));
     }
     if command.trim().is_empty() {
-        bail!("invalid --remote {target:?}: command string is empty");
+        return Err(anyhow::Error::new(net_diag::remote_command_empty(target)));
     }
     if let Err(err) = shell_words::split(command) {
-        bail!("invalid --remote {target:?}: cannot tokenize command: {err}");
+        return Err(anyhow::Error::new(net_diag::remote_tokenize_failed(
+            target, &err,
+        )));
     }
     Ok((target.to_string(), command.to_string()))
 }

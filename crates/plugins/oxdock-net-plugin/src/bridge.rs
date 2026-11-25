@@ -30,7 +30,9 @@ use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
+
+use crate::diagnostics as net_diag;
 use oxdock_core::{StepCtx, Value};
 use oxdock_pipe::PipeInner;
 use oxdock_process::{
@@ -91,7 +93,9 @@ fn note_failure<T>(
         }
         Err(_) => {
             if failed.is_none() {
-                *failed = Some(anyhow!("{func} {worker} panicked"));
+                *failed = Some(anyhow::Error::new(net_diag::pump_worker_panicked(
+                    func, worker,
+                )));
             }
         }
     }
@@ -119,8 +123,9 @@ fn pump_in(
         {
             0 => {
                 if half_close {
-                    suppress_peer_gone(stream.shutdown(Shutdown::Write))
-                        .map_err(|err| anyhow!("{func} socket shutdown failed: {err}"))?;
+                    suppress_peer_gone(stream.shutdown(Shutdown::Write)).map_err(|err| {
+                        anyhow::Error::new(net_diag::pump_socket_shutdown_failed(func, &err))
+                    })?;
                 }
                 return Ok(());
             }
@@ -164,7 +169,7 @@ fn pump_out_loop(
             Ok(n) => {
                 let mut guard = writer
                     .lock()
-                    .map_err(|_| anyhow!("{func} stdout lock poisoned"))?;
+                    .map_err(|_| anyhow::Error::new(net_diag::pump_stdout_lock_poisoned(func)))?;
                 guard
                     .write_all(&buf[..n])
                     .with_context(|| format!("{func} stdout pipe write failed"))?;
@@ -173,7 +178,9 @@ fn pump_out_loop(
                     .with_context(|| format!("{func} stdout pipe flush failed"))?;
             }
             Err(err) => {
-                return Err(anyhow!("{func} socket read failed: {err}"));
+                return Err(anyhow::Error::new(net_diag::pump_socket_read_failed(
+                    func, &err,
+                )));
             }
         }
     }
@@ -281,7 +288,9 @@ pub fn pump_stream<P: ProcessManager>(
         Some(err) => Err(err),
         None => {
             if cancel.load(Ordering::SeqCst) {
-                anyhow::bail!("{func} interrupted by cancellation");
+                return Err(anyhow::Error::new(
+                    net_diag::pump_interrupted_by_cancellation(func),
+                ));
             }
             Ok(())
         }
@@ -315,9 +324,9 @@ fn memory_pump_in(
                 return Ok(Some(writer));
             }
             n => {
-                let mut guard = writer
-                    .lock()
-                    .map_err(|_| anyhow!("{func} memory pipe lock poisoned"))?;
+                let mut guard = writer.lock().map_err(|_| {
+                    anyhow::Error::new(net_diag::pump_memory_pipe_lock_poisoned(func))
+                })?;
                 guard
                     .write_all(&buf[..n])
                     .with_context(|| format!("{func} memory pipe write failed"))?;
@@ -356,7 +365,7 @@ fn memory_pump_out(
             Ok(n) => {
                 let mut guard = writer
                     .lock()
-                    .map_err(|_| anyhow!("{func} stdout lock poisoned"))?;
+                    .map_err(|_| anyhow::Error::new(net_diag::pump_stdout_lock_poisoned(func)))?;
                 guard
                     .write_all(&buf[..n])
                     .with_context(|| format!("{func} stdout pipe write failed"))?;
@@ -365,7 +374,9 @@ fn memory_pump_out(
                     .with_context(|| format!("{func} stdout pipe flush failed"))?;
             }
             Err(err) => {
-                return Err(anyhow!("{func} memory pipe read failed: {err}"));
+                return Err(anyhow::Error::new(net_diag::pump_memory_pipe_read_failed(
+                    func, &err,
+                )));
             }
         }
     }
@@ -476,7 +487,9 @@ pub fn pump_memory<P: ProcessManager>(
         Some(err) => Err(err),
         None => {
             if cancel.load(Ordering::SeqCst) {
-                anyhow::bail!("{func} interrupted by cancellation");
+                return Err(anyhow::Error::new(
+                    net_diag::pump_interrupted_by_cancellation(func),
+                ));
             }
             Ok(())
         }

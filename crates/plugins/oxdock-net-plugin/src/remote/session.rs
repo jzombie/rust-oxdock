@@ -20,7 +20,9 @@
 //! Declared transfers stream straight between disk and wire with O(chunk)
 //! memory through spill staging: no transfer size cap exists anywhere.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+
+use crate::diagnostics as net_diag;
 use futures_util::StreamExt;
 use muxio_core::rpc::RpcRequest;
 use muxio_core::rpc::rpc_internals::{RpcStreamEncoder, rpc_trait::RpcEmit};
@@ -91,7 +93,9 @@ impl StdioSession {
 impl RemoteRunner for StdioSession {
     fn run_remote(&self, request: RemoteRequest, fs: &dyn WorkspaceFs) -> Result<RemoteResponse> {
         if self.config.argv.is_empty() {
-            bail!("REMOTE transport command is empty");
+            return Err(anyhow::Error::new(
+                net_diag::remote_transport_command_empty(),
+            ));
         }
         let mut argv: Vec<&str> = self.config.argv.iter().map(String::as_str).collect();
         let program = argv.remove(0);
@@ -215,7 +219,7 @@ impl MuxioSession {
 
     fn check_cancelled(&self) -> Result<()> {
         if self.cancelled.load(Ordering::SeqCst) {
-            bail!("REMOTE block cancelled");
+            return Err(anyhow::Error::new(net_diag::remote_block_cancelled()));
         }
         Ok(())
     }
@@ -298,7 +302,9 @@ impl MuxioSession {
             tag if tag == channel::TAG_STDOUT => self.route_stdout(&item[1..]),
             tag if tag == channel::TAG_STDERR => self.route_stderr(&item[1..]),
             tag if tag == channel::TAG_RESULT => self.route_result(&item[1..]),
-            tag => bail!("REMOTE target sent unknown response tag {tag}"),
+            tag => Err(anyhow::Error::new(net_diag::remote_unknown_response_tag(
+                tag,
+            ))),
         }
     }
 
@@ -325,7 +331,9 @@ impl MuxioSession {
     fn write_result_tar(&mut self, bytes: &[u8]) -> Result<()> {
         use sha2::Digest;
         let Some(stage) = self.result_stage.as_mut() else {
-            bail!("REMOTE result arrived with no staged tarball");
+            return Err(anyhow::Error::new(
+                net_diag::remote_result_no_staged_tarball(),
+            ));
         };
         stage.write_all(bytes)?;
         if let Some(hash) = self.result_hash.as_mut() {
@@ -473,29 +481,24 @@ impl MuxioSession {
         let verdict: types::HandshakeVerdict =
             serde_json::from_slice(&verdict_bytes).context("REMOTE verdict decode failed")?;
         if !verdict.accepted {
-            bail!(
-                "REMOTE target '{}' rejected the handshake: {}",
-                request.target,
-                verdict
-                    .error
-                    .unwrap_or_else(|| "no reason given".to_string())
-            );
+            return Err(anyhow::Error::new(net_diag::remote_handshake_rejected(
+                &request.target,
+                verdict.error.as_deref(),
+            )));
         }
         if verdict.proto_digest != *oxdock_remote_proto::PROTO_DIGEST {
-            bail!(
-                "REMOTE target '{}' protocol digest mismatch (host {} guest {}): rebuild and reinstall matching oxdock on the guest",
-                request.target,
+            return Err(anyhow::Error::new(net_diag::remote_proto_digest_mismatch(
+                &request.target,
                 oxdock_remote_proto::PROTO_DIGEST.as_str(),
-                verdict.proto_digest
-            );
+                &verdict.proto_digest,
+            )));
         }
         if verdict.module_hash != config.module_hash {
-            bail!(
-                "REMOTE target '{}' language surface mismatch (host {} guest {}): rebuild and reinstall matching oxdock on the guest",
-                request.target,
-                config.module_hash,
-                verdict.module_hash
-            );
+            return Err(anyhow::Error::new(net_diag::remote_language_mismatch(
+                &request.target,
+                &config.module_hash,
+                &verdict.module_hash,
+            )));
         }
 
         // Declared fetch in: stage to spill, then stream the staged
@@ -556,7 +559,9 @@ impl MuxioSession {
             match next {
                 Some(Ok(item)) => self.on_response_item(&item)?,
                 Some(Err(err)) => {
-                    bail!("REMOTE response failed: {err:#}");
+                    return Err(anyhow::Error::new(net_diag::remote_response_failed(
+                        &anyhow::Error::new(err),
+                    )));
                 }
                 None => {
                     return self.finish_exec(request, fs, result_scratch);
@@ -577,7 +582,9 @@ impl MuxioSession {
         _result_scratch: TransferScratch,
     ) -> Result<RemoteResponse> {
         let Some(result_json) = self.result_json.take() else {
-            bail!("REMOTE target '{}' sent no result frame", request.target);
+            return Err(anyhow::Error::new(net_diag::remote_no_result_frame(
+                &request.target,
+            )));
         };
         let result: types::ExecResult =
             serde_json::from_slice(&result_json).context("REMOTE result decode failed")?;
@@ -590,21 +597,17 @@ impl MuxioSession {
                     format!("REMOTE target '{}' exited with code {code}", request.target)
                 });
             }
-            bail!(
-                "REMOTE target '{}' failed: {}",
-                request.target,
-                result
-                    .error
-                    .unwrap_or_else(|| "no reason given".to_string())
-            );
+            return Err(anyhow::Error::new(net_diag::remote_target_failed(
+                &request.target,
+                result.error.as_deref(),
+            )));
         }
         // End-to-end integrity over the bytes each side actually saw.
         let script_hash = oxdock_utils::sha256_hex(request.script_text.as_bytes());
         if result.script_sha256 != script_hash {
-            bail!(
-                "REMOTE target '{}' executed different script bytes than shipped (transport corruption)",
-                request.target
-            );
+            return Err(anyhow::Error::new(net_diag::remote_script_sha_mismatch(
+                &request.target,
+            )));
         }
         let stdout_hash = {
             use sha2::Digest;
@@ -612,23 +615,23 @@ impl MuxioSession {
             hex_encode(digest.finalize())
         };
         if result.stdout_sha256 != stdout_hash {
-            bail!(
-                "REMOTE target '{}' stdout hash mismatch (transport corruption)",
-                request.target
-            );
+            return Err(anyhow::Error::new(net_diag::remote_stdout_sha_mismatch(
+                &request.target,
+            )));
         }
         let Some(mut stage) = self.result_stage.take() else {
-            bail!("REMOTE target '{}' sent no result tarball", request.target);
+            return Err(anyhow::Error::new(net_diag::remote_no_result_tarball(
+                &request.target,
+            )));
         };
         let result_hash = self.result_hash.take().map(|hasher| {
             use sha2::Digest;
             hex_encode(hasher.finalize())
         });
         if result_hash.as_deref() != Some(result.result_tar_sha256.as_str()) {
-            bail!(
-                "REMOTE target '{}' push tarball sha256 mismatch (transport corruption)",
-                request.target
-            );
+            return Err(anyhow::Error::new(
+                net_diag::remote_push_tarball_sha_mismatch(&request.target),
+            ));
         }
         stage.rewind()?;
         Self::apply_push_tar(request, fs, &mut stage)?;
@@ -657,19 +660,13 @@ impl MuxioSession {
         tar::unpack_from(stage, &mut |entry| match entry {
             tar::StreamedEntry::Dir { path, .. } => {
                 let host_rel = map_push_path(&request.push_decls, &path).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "REMOTE target '{}' returned undeclared path {path:?}",
-                        request.target
-                    )
+                    anyhow::Error::new(net_diag::remote_undeclared_path(&request.target, &path))
                 })?;
                 oxdock_core::apply_push_dir(fs, &root, &host_rel)
             }
             tar::StreamedEntry::File { path, reader, .. } => {
                 let host_rel = map_push_path(&request.push_decls, &path).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "REMOTE target '{}' returned undeclared path {path:?}",
-                        request.target
-                    )
+                    anyhow::Error::new(net_diag::remote_undeclared_path(&request.target, &path))
                 })?;
                 // Entry bytes stream straight into place: apply_push_file
                 // pumps O(chunk) itself, so no staging sits between the
@@ -678,10 +675,7 @@ impl MuxioSession {
             }
             tar::StreamedEntry::Symlink { path, target } => {
                 let host_rel = map_push_path(&request.push_decls, &path).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "REMOTE target '{}' returned undeclared path {path:?}",
-                        request.target
-                    )
+                    anyhow::Error::new(net_diag::remote_undeclared_path(&request.target, &path))
                 })?;
                 oxdock_core::apply_push_symlink(fs, &root, &host_rel, &target)
             }
