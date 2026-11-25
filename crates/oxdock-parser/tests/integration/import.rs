@@ -195,6 +195,79 @@ fn func_cannot_shadow_module_function() {
 }
 
 #[test]
+fn export_multiline_list_with_comments_fails_with_full_error() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    // Baseline: a multi-line bracket list with no comments parses.
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            FUNC FOO(): STRING {
+                RETURN "x"
+            }
+            FUNC BAR(): STRING {
+                RETURN "y"
+            }
+            EXPORT [
+                FOO,
+                BAR,
+            ]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("comment-free multiline export parses");
+    assert_eq!(
+        parsed.exports.funcs,
+        vec!["FOO".to_string(), "BAR".to_string()]
+    );
+
+    // Comments inside the bracket list miss the `EXPORT` shape, so the
+    // whole statement fails structural parsing: the error points at
+    // the `EXPORT [` head line, not at the comment itself, and carries
+    // no stable diagnostic key. Both comment spellings fail with this
+    // entire error, byte for byte.
+    let expected =
+        "unexpected line break in argument\n  --> line 7, col 1-8\n  7 | EXPORT [\n    | ^^^^^^^^";
+    let commented = [
+        indoc! {r#"
+            FUNC FOO(): STRING {
+                RETURN "x"
+            }
+            FUNC BAR(): STRING {
+                RETURN "y"
+            }
+            EXPORT [
+                # leading comment
+                FOO,
+                # middle comment
+                BAR,
+            ]
+        "#},
+        indoc! {r#"
+            FUNC FOO(): STRING {
+                RETURN "x"
+            }
+            FUNC BAR(): STRING {
+                RETURN "y"
+            }
+            EXPORT [
+                // leading comment
+                FOO,
+                // middle comment
+                BAR,
+            ]
+        "#},
+    ];
+    for script in commented {
+        let err =
+            parse_script_with_modules_and_exports(script, mock_lower, HashSet::new(), table())
+                .expect_err("commented export must fail");
+        assert_eq!(err.to_string(), expected, "entire error differs");
+        assert_eq!(err.key(), None, "commented export has no keyed diagnostic");
+    }
+}
+
+#[test]
 fn export_single_and_list_forms() {
     use oxdock_parser::parse_script_with_modules_and_exports;
     let parsed = parse_script_with_modules_and_exports(
