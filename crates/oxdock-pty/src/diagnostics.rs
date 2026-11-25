@@ -16,6 +16,7 @@ use oxdock_diagnostics::Diagnostic;
 /// one edit.
 const FIELD_FUNC: &str = "func";
 const FIELD_ERR: &str = "err";
+const FIELD_REASON: &str = "reason";
 const FIELD_WORKER: &str = "worker";
 const FIELD_PANIC: &str = "panic";
 
@@ -120,6 +121,56 @@ pub fn needs_program(func: &str) -> Diagnostic {
     )
 }
 
+/// Pty allocation failed. Takes the caller label plus the underlying
+/// portable-pty failure; `{reason:#}` formatting lives here so call
+/// sites stay `format!`-free. Third-party failures ride the anyhow
+/// passthrough and never attach a source.
+pub fn pty_alloc_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{func} pty allocation failed: {reason_text}");
+    Diagnostic::new(
+        "pty.run.alloc_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_REASON, reason_text.as_str())]),
+    )
+}
+
+/// Master-terminal reader clone failed. Takes the caller label plus
+/// the underlying portable-pty failure; rendering lives here.
+pub fn pty_master_reader_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{func} pty master reader failed: {reason_text}");
+    Diagnostic::new(
+        "pty.run.master_reader_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_REASON, reason_text.as_str())]),
+    )
+}
+
+/// Master-terminal writer take failed. Takes the caller label plus
+/// the underlying portable-pty failure; rendering lives here.
+pub fn pty_master_writer_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{func} pty master writer failed: {reason_text}");
+    Diagnostic::new(
+        "pty.run.master_writer_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_REASON, reason_text.as_str())]),
+    )
+}
+
+/// Child spawn under the pty slave failed. Takes the caller label
+/// plus the underlying portable-pty failure; rendering lives here.
+pub fn pty_spawn_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{func} pty spawn failed: {reason_text}");
+    Diagnostic::new(
+        "pty.run.spawn_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_REASON, reason_text.as_str())]),
+    )
+}
+
 /// Pump worker panicked. Takes the caller label, the worker name
 /// (`"input"` / `"output"`), and the panic payload; `Debug` rendering
 /// lives here. Shared by both workers: one key, one mode.
@@ -156,6 +207,10 @@ mod tests {
             input_read_failed("FUNC", &err).key(),
             sink_lock_poisoned("FUNC").key(),
             needs_program("FUNC").key(),
+            pty_alloc_failed("FUNC", &anyhow::anyhow!("boom")).key(),
+            pty_master_reader_failed("FUNC", &anyhow::anyhow!("boom")).key(),
+            pty_master_writer_failed("FUNC", &anyhow::anyhow!("boom")).key(),
+            pty_spawn_failed("FUNC", &anyhow::anyhow!("boom")).key(),
             worker_panicked("FUNC", "input", &"boom").key(),
         ];
         let mut seen = std::collections::HashSet::new();
@@ -203,6 +258,22 @@ mod tests {
         assert_eq!(
             needs_program("SSH_PTY_RUN").message(),
             "SSH_PTY_RUN needs at least a program"
+        );
+        assert_eq!(
+            pty_alloc_failed("SSH_PTY_RUN", &anyhow::anyhow!("boom")).message(),
+            "SSH_PTY_RUN pty allocation failed: boom"
+        );
+        assert_eq!(
+            pty_master_reader_failed("SSH_PTY_RUN", &anyhow::anyhow!("boom")).message(),
+            "SSH_PTY_RUN pty master reader failed: boom"
+        );
+        assert_eq!(
+            pty_master_writer_failed("SSH_PTY_RUN", &anyhow::anyhow!("boom")).message(),
+            "SSH_PTY_RUN pty master writer failed: boom"
+        );
+        assert_eq!(
+            pty_spawn_failed("SSH_PTY_RUN", &anyhow::anyhow!("boom")).message(),
+            "SSH_PTY_RUN pty spawn failed: boom"
         );
         assert_eq!(
             worker_panicked("SSH_PTY_RUN", "input", &"boom").message(),

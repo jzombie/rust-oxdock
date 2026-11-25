@@ -569,6 +569,15 @@ transport, so this phase is mechanical:
    into the anyhow ChildDone channel. Run_pty_session spawn and
    alloc paths stay on anyhow Result until spawn ctors land.
    Pty 19 plus core 408 green; clippy and fmt clean.
+   Pty spawn step 2026-11-26: four new passthrough ctors
+   (pty_alloc_failed, pty_master_reader_failed,
+   pty_master_writer_failed, pty_spawn_failed) replace the
+   with_context format-string wraps; third-party portable-pty
+   errors (already anyhow) ride `{reason:#}` inline with no
+   source, messages byte-identical. Run_pty_session keeps its
+   anyhow Result (worker accumulation still anyhow-native);
+   Context import dropped. Pty 19 plus core 408 green;
+   clippy and fmt clean.
    Process step 2026-11-26: format_value_for_string now returns
    DiagnosticResult with three bare Err ctors (pipe,
    semaphore, permit); recursive collect flips to

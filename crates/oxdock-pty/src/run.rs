@@ -23,7 +23,7 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use oxdock_diagnostics::DiagnosticResult;
 
 use crate::diagnostics as pty_diag;
@@ -425,17 +425,17 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
             req.initial_size.rows,
             req.initial_size.cols,
         ))
-        .with_context(|| format!("{func} pty allocation failed"))?;
+        .map_err(|e| pty_diag::pty_alloc_failed(func, &e))?;
     let mut master_reader = pair
         .master
         .try_clone_reader()
-        .with_context(|| format!("{func} pty master reader failed"))?;
+        .map_err(|e| pty_diag::pty_master_reader_failed(func, &e))?;
     // Shared with the output worker, which answers ConPTY setup
     // queries through it while the input worker pumps pipe bytes.
     let master_writer = Arc::new(Mutex::new(
         pair.master
             .take_writer()
-            .with_context(|| format!("{func} pty master writer failed"))?,
+            .map_err(|e| pty_diag::pty_master_writer_failed(func, &e))?,
     ));
     // Console teardown handle. Released once the drain is due: ConPTY
     // holds the output pipe open until close, which lives in this
@@ -455,7 +455,7 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
     let child = pair
         .slave
         .spawn_command(builder)
-        .with_context(|| format!("{func} pty spawn failed"))?;
+        .map_err(|e| pty_diag::pty_spawn_failed(func, &e))?;
     drop(pair.slave);
 
     let mut killer = child.clone_killer();
