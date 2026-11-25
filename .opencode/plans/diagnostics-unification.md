@@ -778,6 +778,16 @@ transport, so this phase is mechanical:
    (including the with_context fill site, since anyhow
    Context covers Diagnostic). Core 408 green; clippy
    and fmt clean.
+   Define-script leaf step 2026-11-26: no new ctors;
+   define_script plus define_file_func now return
+   DiagnosticResult with bare Err ctors (shadow_reserved
+   plus duplicate_in_scope, both already keyed; the
+   check_script_param_tags call holds directly now that
+   it is Diagnostic). The infallible param-vec collect
+   re-targets its turbofish to DiagnosticResult.
+   Handlers plus import callers (four bare-? sites, all
+   still anyhow) hold unchanged via blanket From. Core
+   408 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

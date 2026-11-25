@@ -1594,7 +1594,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         body: &[Step],
         module: Option<&str>,
         def_jail: Option<(WorkspaceSelection, GuardedPath)>,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         let qualified = qualify(SCRIPT_MODULE_NAME, name);
         let shadowable = matches!(
             self.entries.get(&qualified).map(|entry| &entry.body),
@@ -1609,14 +1609,14 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 && !matches!(entry.body, FuncBody::Script(_))
         });
         if reserved && !shadowable {
-            return Err(anyhow::Error::new(std_diag::func_shadow_reserved(name)));
+            return Err(std_diag::func_shadow_reserved(name));
         }
         if self
             .scopes
             .last()
             .is_some_and(|frame| frame.defined.contains(&qualified))
         {
-            return Err(anyhow::Error::new(std_diag::func_duplicate_in_scope(name)));
+            return Err(std_diag::func_duplicate_in_scope(name));
         }
         check_script_param_tags(name, params)?;
         let old = self.entries.insert(
@@ -1641,7 +1641,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                                     optional: *optional,
                                 })
                             })
-                            .collect::<Result<_>>()?,
+                            .collect::<DiagnosticResult<_>>()?,
                     ),
                     returns: Some(return_type.clone()),
                     rpn: false,
@@ -1684,7 +1684,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         is_async: bool,
         body: &[Step],
         defining: &str,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         // The importer alias selects the defining file at dispatch;
         // the key itself names the defining file so units never share
         // entries.
@@ -1701,7 +1701,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 && !matches!(entry.body, FuncBody::Script(_))
         });
         if reserved && !shadowable {
-            return Err(anyhow::Error::new(std_diag::func_shadow_reserved(name)));
+            return Err(std_diag::func_shadow_reserved(name));
         }
         // File entries live in the global frame (index 0, never
         // popped): eviction on scope exit would strand the module
@@ -1712,7 +1712,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             .get(frame_idx)
             .is_some_and(|frame| frame.defined.contains(&qualified))
         {
-            return Err(anyhow::Error::new(std_diag::func_duplicate_in_scope(name)));
+            return Err(std_diag::func_duplicate_in_scope(name));
         }
         check_script_param_tags(name, params)?;
         let old = self.entries.insert(
@@ -1735,7 +1735,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                                     optional: *optional,
                                 })
                             })
-                            .collect::<Result<_>>()?,
+                            .collect::<DiagnosticResult<_>>()?,
                     ),
                     returns: Some(return_type.clone()),
                     rpn: false,
