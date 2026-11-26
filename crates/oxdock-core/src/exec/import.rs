@@ -748,7 +748,7 @@ fn resolve_own_type_harvests<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     steps: &[Step],
     resolved: &GuardedPath,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let pushed = if cx.state.import_stack.iter().any(|p| p == resolved) {
         false
     } else {
@@ -765,7 +765,7 @@ fn resolve_own_type_harvests<P: ProcessManager>(
 fn resolve_own_type_harvests_inner<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     steps: &[Step],
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     for step in steps {
         let StepKind::ImportFuncs {
             path: harvest_path,
@@ -788,11 +788,11 @@ fn resolve_own_type_harvests_inner<P: ProcessManager>(
             if !file_exists && cx.state.module_table.modules.contains_key(harvest_path) {
                 for name in harvest_types {
                     cx.state.resolve_tag(name).map_err(|e| {
-                        anyhow::Error::new(import_diag::import_unknown_type(
+                        import_diag::import_unknown_type(
                             harvest_path,
                             name,
                             Some(&anyhow::Error::new(e)),
-                        ))
+                        )
                     })?;
                 }
                 continue;
@@ -812,11 +812,7 @@ fn resolve_own_type_harvests_inner<P: ProcessManager>(
                 harvest_path,
             )?;
             let Some(target) = file_aliases.get(name) else {
-                return Err(anyhow::Error::new(import_diag::import_unknown_type(
-                    harvest_path,
-                    name,
-                    None,
-                )));
+                return Err(import_diag::import_unknown_type(harvest_path, name, None));
             };
             insert_imported_type(
                 cx.state,
@@ -1851,7 +1847,7 @@ impl<P: ProcessManager> super::native::FuncFrameView for RuntimeFrame<'_, P> {
 pub(super) fn find_script_site<P: ProcessManager>(
     state: &ExecState<P>,
     name: &str,
-) -> Result<Option<ScriptSite<P>>> {
+) -> DiagnosticResult<Option<ScriptSite<P>>> {
     use super::native::FuncFrameView;
     let base = match name.split_once(MODULE_SEPARATOR) {
         Some((module, base)) if module == oxdock_parser::SCRIPT_MODULE_NAME => base,

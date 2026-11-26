@@ -1550,6 +1550,24 @@ transport, so this phase is mechanical:
    import_funcs/import_file runtime paths,
    dry-run tests). Core 409 plus integration 629
    green; clippy and fmt clean.
+   Own-type-harvest bulk step 2026-11-26: no new
+   ctors, all wordings already pinned. Three
+   signatures flip in exec/import.rs:
+   resolve_own_type_harvests plus
+   resolve_own_type_harvests_inner plus
+   find_script_site return DiagnosticResult.
+   Bodies drop two outer anyhow::Error::new
+   wrappers (import_unknown_type with and without
+   reason; inner anyhow::Error::new(e) reason
+   wraps stay per contract). find_script_site is
+   an infallible body (match plus frame walk).
+   Callees already Diagnostic (load_import,
+   collect_type_aliases, gate_harvested_name,
+   insert_imported_type, resolve_tag); callers
+   hold via the blanket conversion
+   (import_file/ensure_module_init runtime paths,
+   handlers call dispatch). Core 409 plus
+   integration 629 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
