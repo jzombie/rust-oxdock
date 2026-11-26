@@ -2753,7 +2753,7 @@ fn rand<P: ProcessManager>(
     let seed = options
         .get("seed")
         .map(|value| value.as_i64().expect("check_options verified INT"));
-    super::args::rand_float_from_value(seed)
+    Ok(super::args::rand_float_from_value(seed)?)
 }
 
 /// Encode a STRING as standard base64.
@@ -2844,7 +2844,7 @@ fn type_of(
     /// Value whose word to name.
     value: Value,
 ) -> Result<Value> {
-    super::args::type_of_from_value(value)
+    Ok(super::args::type_of_from_value(value)?)
 }
 
 /// Merge a LIST of MAPs in order under one duplicate policy.

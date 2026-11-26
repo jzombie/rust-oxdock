@@ -501,7 +501,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         // ordinary reads.
         Expr::Inspect { name } => {
             let _ = load_var_binding(cx.state, name)?;
-            evaluate_inspect_var(name, cx)
+            Ok(evaluate_inspect_var(name, cx)?)
         }
         // Bare `LET $p: PIPE`: mint a fresh unbound handle tagged with
         // the declaring task. Backends materialize lazily on first
@@ -559,7 +559,10 @@ pub(crate) fn is_truthy(val: &Value) -> DiagnosticResult<bool> {
 /// `LOAD_JSON`/`LOAD_TOML`, this evaluates to a value without running
 /// script steps. The parser guarantees the argument is a `$variable`, so
 /// the snapshot can name what it describes.
-fn evaluate_inspect_var<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -> Result<Value> {
+fn evaluate_inspect_var<P: ProcessManager>(
+    var: &str,
+    cx: &mut StepCtx<'_, P>,
+) -> DiagnosticResult<Value> {
     super::handlers::inspect_var_map(cx, var).map(Value::map)
 }
 
@@ -1113,7 +1116,7 @@ pub(crate) fn merge_maps_from_value(maps: Value, policy: String) -> DiagnosticRe
 /// Returns the registered descriptor name, the same string arity and
 /// coercion errors print, so scripts branch on config shapes with the
 /// vocabulary the errors already teach.
-pub(crate) fn type_of_from_value(value: Value) -> Result<Value> {
+pub(crate) fn type_of_from_value(value: Value) -> DiagnosticResult<Value> {
     Ok(Value::string(value.type_name().to_string()))
 }
 
@@ -1123,7 +1126,7 @@ pub(crate) fn type_of_from_value(value: Value) -> Result<Value> {
 /// seed draws the same value on every run. Impure by design either
 /// way: unseeded calls differ, so this never rides the pure
 /// placeholder or RPN paths.
-pub(crate) fn rand_float_from_value(seed: Option<i64>) -> Result<Value> {
+pub(crate) fn rand_float_from_value(seed: Option<i64>) -> DiagnosticResult<Value> {
     use rand::{RngExt, SeedableRng};
     let draw = match seed {
         Some(n) => rand::rngs::StdRng::seed_from_u64(n as u64).random_range(0.0..1.0),

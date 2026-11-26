@@ -1619,6 +1619,28 @@ transport, so this phase is mechanical:
    blanket conversion (execute_steps plus
    execute_steps_inner). Core 409 plus
    integration 629 green; clippy and fmt clean.
+   Inspect/value-core bulk step 2026-11-26: no
+   new ctors, reuses the single undefined-var
+   owner per the same-failure-mode rule. Four
+   signatures flip: args.rs
+   evaluate_inspect_var plus type_of_from_value
+   plus rand_float_from_value return
+   DiagnosticResult (infallible bodies for the
+   latter two; inspect delegates to the handler);
+   handlers.rs inspect_var_map returns
+   DiagnosticResult (single bail! site becomes
+   return Err(diag::eval_undefined_var);
+   message consolidates from "variable 'x' is
+   not defined" to the pinned "undefined
+   variable $x", matching load_var_binding and
+   the integration expectations). Anyhow
+   boundaries use Ok(f(...)?): evaluate_expr
+   Inspect arm plus the two #[oxdock_func]
+   macro wrappers (TYPE_OF, RAND) stay anyhow
+   per the macro guard. Compiled-math Inspect
+   op holds via the blanket conversion. Core
+   409 plus integration 629 green; clippy and
+   fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

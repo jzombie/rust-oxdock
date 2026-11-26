@@ -1450,10 +1450,10 @@ pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -
 pub(super) fn inspect_var_map<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     var: &str,
-) -> Result<BTreeMap<String, Value>> {
+) -> oxdock_diagnostics::DiagnosticResult<BTreeMap<String, Value>> {
     let clean_var = var.trim_start_matches('$').to_string();
     let Some((decl_type, value)) = cx.state.get_var_typed(&clean_var) else {
-        bail!("variable '${clean_var}' is not defined");
+        return Err(diag::eval_undefined_var(&clean_var));
     };
     let mut map = BTreeMap::new();
     map.insert(
