@@ -1021,12 +1021,12 @@ pub fn resolve_script_params<P: ProcessManager>(
         let clean = pname.trim_start_matches('$').to_string();
         let tag = state
             .resolve_tag(ptype)
-            .map_err(|err| std_diag::func_param_type(func_name, &anyhow::Error::new(err)))?;
+            .map_err(|err| std_diag::func_param_type(func_name, err))?;
         state.check_declaration_tag(&format!("function `{func_name}` param `${clean}`"), &tag)?;
         if *optional {
-            optional_zero_value(&tag).map(|_| ()).map_err(|err| {
-                std_diag::func_optional_param(func_name, &clean, &anyhow::Error::new(err))
-            })?;
+            optional_zero_value(&tag)
+                .map(|_| ())
+                .map_err(|err| std_diag::func_optional_param(func_name, &clean, err))?;
         }
         resolved.push((clean, tag, *optional));
     }
@@ -1041,9 +1041,9 @@ pub fn check_script_param_tags(
 ) -> DiagnosticResult<()> {
     for (pname, tag, optional) in params {
         if *optional {
-            optional_zero_value(tag).map(|_| ()).map_err(|err| {
-                std_diag::func_optional_param(func_name, pname, &anyhow::Error::new(err))
-            })?;
+            optional_zero_value(tag)
+                .map(|_| ())
+                .map_err(|err| std_diag::func_optional_param(func_name, pname, err))?;
         }
     }
     Ok(())

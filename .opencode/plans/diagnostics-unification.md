@@ -2500,6 +2500,20 @@ transport, so this phase is mechanical:
    surfacing, so bytes are unchanged by construction. Core lib
    410 plus integration 629 green; clippy at baseline
    (3 pre-existing), fmt clean on both touched files.
+   func-param normalization 2026-11-27 (file-sized batch): two
+   ctors flipped from &anyhow::Error to by-value Diagnostic
+   (func_param_type, func_optional_param), per the
+   eval_prompt_bind_failed precedent. Outer messages go bare
+   ("function `F`", "function `F` optional param `$p`") with the
+   concrete diagnostic as chained source; `{err:#}` is
+   byte-identical (chain joins bare outer and inner with ": "
+   exactly where the old inline put it), proven by a new
+   alternate-Display pin. Three native.rs sites drop the
+   anyhow::Error::new round-trip and pass `err` directly; key
+   pins now ride real diagnostics (std_unknown_type,
+   func_zero_value_missing). Core lib 410 plus integration 629
+   green; clippy at baseline (3 pre-existing), fmt clean on both
+   touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

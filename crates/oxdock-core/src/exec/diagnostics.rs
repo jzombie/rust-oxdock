@@ -717,22 +717,31 @@ pub fn func_zero_value_missing(rendered: &str) -> Diagnostic {
 }
 
 /// Function parameter type resolution failure. Takes the function
-/// name and the underlying failure.
-pub fn func_param_type(func: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
-    let message = format!("function `{func}`: {reason_text}");
+/// name and the underlying diagnostic by value. Bare outer context
+/// plus the concrete diagnostic as chained source (no flattening
+/// through `anyhow`), so the snapshot renderer keeps every layer.
+/// The `{err:#}` rendering is unchanged: the chain joins the bare
+/// outer and the inner message with `": "` exactly where the old
+/// inlined text put it.
+pub fn func_param_type(func: &str, reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    let message = format!("function `{func}`");
     Diagnostic::new(
         "dsl.func.param_type",
         message,
         Diagnostic::make_fields(&[("function", func), ("reason", &reason_text)]),
     )
+    .with_source(std::sync::Arc::new(reason))
 }
 
 /// Optional function parameter without a zero value. Takes the
-/// function and parameter names plus the underlying failure.
-pub fn func_optional_param(func: &str, param: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
-    let message = format!("function `{func}` optional param `${param}`: {reason_text}");
+/// function and parameter names plus the underlying diagnostic by
+/// value. Bare outer context plus the concrete diagnostic as
+/// chained source; `{err:#}` rendering is unchanged per
+/// `func_param_type`.
+pub fn func_optional_param(func: &str, param: &str, reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    let message = format!("function `{func}` optional param `${param}`");
     Diagnostic::new(
         "dsl.func.optional_param",
         message,
@@ -742,6 +751,7 @@ pub fn func_optional_param(func: &str, param: &str, reason: &anyhow::Error) -> D
             ("reason", &reason_text),
         ]),
     )
+    .with_source(std::sync::Arc::new(reason))
 }
 
 /// Shadowing a reserved (native/host) function.
@@ -6414,8 +6424,8 @@ mod tests {
             check_block_fallthrough("step 1").key(),
             import_flow_crosses_boundary("BREAK", 3, "f").key(),
             func_zero_value_missing("MAP").key(),
-            func_param_type("F", &anyhow::anyhow!("x")).key(),
-            func_optional_param("F", "p", &anyhow::anyhow!("x")).key(),
+            func_param_type("F", std_unknown_type("T")).key(),
+            func_optional_param("F", "p", func_zero_value_missing("INT")).key(),
             func_shadow_reserved("F").key(),
             func_duplicate_in_scope("F").key(),
             func_param_values_without_type("p", "F").key(),
@@ -6892,6 +6902,21 @@ mod tests {
         assert_eq!(
             eval_call_zero_value_failed("F", "p", eval_remove_missing("x")).message(),
             "function `F` optional param `$p` has no zero value"
+        );
+        assert_eq!(
+            func_param_type("F", std_unknown_type("T")).message(),
+            "function `F`"
+        );
+        assert_eq!(
+            func_optional_param("F", "p", func_zero_value_missing("INT")).message(),
+            "function `F` optional param `$p`"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(func_param_type("F", std_unknown_type("T")))
+            ),
+            "function `F`: unknown type `T`"
         );
         assert_eq!(
             eval_call_flow_crosses_func(3, "BREAK", "F").message(),
