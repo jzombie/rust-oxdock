@@ -291,6 +291,126 @@ pub fn pump_func_input_read_failed(func: &str, err: &std::io::Error) -> Diagnost
     )
 }
 
+/// SSH pump output pipe write failed. Takes the concrete I/O
+/// failure by value; bare outer message plus chained source so
+/// `{err:#}` keeps the legacy `": "` join.
+pub fn pump_output_write_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.pump.output_write_failed",
+        "SSH pump output pipe write failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// SSH pump output pipe flush failed. Takes the concrete I/O
+/// failure by value; bare outer plus chained source.
+pub fn pump_output_flush_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.pump.output_flush_failed",
+        "SSH pump output pipe flush failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// SSH pump cannot borrow the input pipe. Takes the underlying
+/// typed failure by value; bare outer plus chained source so the
+/// inner key survives traversal.
+pub fn pump_borrow_input_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.pump.borrow_input_failed",
+        "SSH pump cannot borrow the input pipe".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// SSH pump cannot borrow the output pipe. Takes the underlying
+/// typed failure by value; bare outer plus chained source.
+pub fn pump_borrow_output_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.pump.borrow_output_failed",
+        "SSH pump cannot borrow the output pipe".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// SSH pump wait runtime failed to build. Takes the concrete
+/// failure by value; bare outer plus chained source.
+pub fn pump_wait_runtime_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.pump.wait_runtime_failed",
+        "SSH pump wait runtime failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// `SSH_PUMP` cannot borrow the source pipe. Takes the underlying
+/// typed failure by value; bare outer plus chained source.
+pub fn pump_borrow_source_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.pump.borrow_source_failed",
+        "SSH_PUMP cannot borrow the source pipe".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// `SSH_PUMP` cannot borrow the target pipe. Takes the underlying
+/// typed failure by value; bare outer plus chained source.
+pub fn pump_borrow_target_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.pump.borrow_target_failed",
+        "SSH_PUMP cannot borrow the target pipe".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// `SSH_PUMP` target pipe write failed. Takes the concrete failure
+/// by value; bare outer plus chained source.
+pub fn pump_target_write_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.pump.target_write_failed",
+        "SSH_PUMP target pipe write failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// `SSH_PUMP` target pipe flush failed. Takes the concrete failure
+/// by value; bare outer plus chained source.
+pub fn pump_target_flush_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.pump.target_flush_failed",
+        "SSH_PUMP target pipe flush failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
 /// Authentication rejected. Takes the invoking func (`SSH_EXEC` /
 /// `SSH_CONNECT`: same failure mode, one key); rendering lives
 /// here.
@@ -401,6 +521,34 @@ pub fn run_child_read_failed(name: &str, err: &std::io::Error) -> Diagnostic {
         message,
         Diagnostic::make_fields(&[(FIELD_NAME, name), (FIELD_ERR, err_text.as_str())]),
     )
+}
+
+/// SSH run output pipe write failed. Takes the concrete failure by
+/// value; bare outer plus chained source.
+pub fn run_output_write_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.run.output_write_failed",
+        "SSH run output pipe write failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// SSH run output pipe flush failed. Takes the concrete failure by
+/// value; bare outer plus chained source.
+pub fn run_output_flush_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.run.output_flush_failed",
+        "SSH run output pipe flush failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
 }
 
 /// SSH run output lock poisoned. Parameterless: the wording is
@@ -691,6 +839,15 @@ mod tests {
             pump_source_read_failed(&err).key(),
             pump_target_lock_poisoned().key(),
             pump_func_input_read_failed("SSH run", &err).key(),
+            pump_output_write_failed(io_err("boom")).key(),
+            pump_output_flush_failed(io_err("boom")).key(),
+            pump_borrow_input_failed(pump_output_lock_poisoned()).key(),
+            pump_borrow_output_failed(pump_output_lock_poisoned()).key(),
+            pump_wait_runtime_failed(io_err("boom")).key(),
+            pump_borrow_source_failed(pump_output_lock_poisoned()).key(),
+            pump_borrow_target_failed(pump_output_lock_poisoned()).key(),
+            pump_target_write_failed(io_err("boom")).key(),
+            pump_target_flush_failed(io_err("boom")).key(),
             authentication_rejected("SSH_EXEC").key(),
             session_pump_already_finished().key(),
             session_wire_queue_saturated().key(),
@@ -702,6 +859,8 @@ mod tests {
             channel_request_unknown().key(),
             channel_already_announced().key(),
             run_child_read_failed("stdout", &err).key(),
+            run_output_write_failed(io_err("boom")).key(),
+            run_output_flush_failed(io_err("boom")).key(),
             run_output_lock_poisoned().key(),
             run_needs_program().key(),
             run_spawn_lost_stderr().key(),
@@ -908,6 +1067,105 @@ mod tests {
             "SSH run input pipe read failed: boom"
         );
         assert_eq!(
+            pump_output_write_failed(io_err("boom")).message(),
+            "SSH pump output pipe write failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(pump_output_write_failed(io_err("boom")))
+            ),
+            "SSH pump output pipe write failed: boom"
+        );
+        assert_eq!(
+            pump_output_flush_failed(io_err("boom")).message(),
+            "SSH pump output pipe flush failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(pump_output_flush_failed(io_err("boom")))
+            ),
+            "SSH pump output pipe flush failed: boom"
+        );
+        assert_eq!(
+            pump_borrow_input_failed(pump_output_lock_poisoned()).message(),
+            "SSH pump cannot borrow the input pipe"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(pump_borrow_input_failed(pump_output_lock_poisoned()))
+            ),
+            "SSH pump cannot borrow the input pipe: SSH pump output lock poisoned"
+        );
+        assert_eq!(
+            pump_borrow_output_failed(pump_output_lock_poisoned()).message(),
+            "SSH pump cannot borrow the output pipe"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(pump_borrow_output_failed(pump_output_lock_poisoned()))
+            ),
+            "SSH pump cannot borrow the output pipe: SSH pump output lock poisoned"
+        );
+        assert_eq!(
+            pump_wait_runtime_failed(io_err("boom")).message(),
+            "SSH pump wait runtime failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(pump_wait_runtime_failed(io_err("boom")))
+            ),
+            "SSH pump wait runtime failed: boom"
+        );
+        assert_eq!(
+            pump_borrow_source_failed(pump_output_lock_poisoned()).message(),
+            "SSH_PUMP cannot borrow the source pipe"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(pump_borrow_source_failed(pump_output_lock_poisoned()))
+            ),
+            "SSH_PUMP cannot borrow the source pipe: SSH pump output lock poisoned"
+        );
+        assert_eq!(
+            pump_borrow_target_failed(pump_output_lock_poisoned()).message(),
+            "SSH_PUMP cannot borrow the target pipe"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(pump_borrow_target_failed(pump_output_lock_poisoned()))
+            ),
+            "SSH_PUMP cannot borrow the target pipe: SSH pump output lock poisoned"
+        );
+        assert_eq!(
+            pump_target_write_failed(io_err("boom")).message(),
+            "SSH_PUMP target pipe write failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(pump_target_write_failed(io_err("boom")))
+            ),
+            "SSH_PUMP target pipe write failed: boom"
+        );
+        assert_eq!(
+            pump_target_flush_failed(io_err("boom")).message(),
+            "SSH_PUMP target pipe flush failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(pump_target_flush_failed(io_err("boom")))
+            ),
+            "SSH_PUMP target pipe flush failed: boom"
+        );
+        assert_eq!(
             authentication_rejected("SSH_EXEC").message(),
             "SSH_EXEC authentication rejected"
         );
@@ -944,6 +1202,28 @@ mod tests {
         assert_eq!(
             run_child_read_failed("stdout", &err).message(),
             "SSH run child stdout read failed: boom"
+        );
+        assert_eq!(
+            run_output_write_failed(io_err("boom")).message(),
+            "SSH run output pipe write failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(run_output_write_failed(io_err("boom")))
+            ),
+            "SSH run output pipe write failed: boom"
+        );
+        assert_eq!(
+            run_output_flush_failed(io_err("boom")).message(),
+            "SSH run output pipe flush failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(run_output_flush_failed(io_err("boom")))
+            ),
+            "SSH run output pipe flush failed: boom"
         );
         assert_eq!(
             run_output_lock_poisoned().message(),

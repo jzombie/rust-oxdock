@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
+use oxdock_diagnostics::Diagnostic;
 
 use crate::diagnostics as ssh_diag;
 use oxdock_core::{StepCtx, Value};
@@ -32,24 +33,22 @@ fn pump_fd_to_pipe(
     stream: &mut Box<dyn Read + Send>,
     writer: &SharedOutput,
     name: &str,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let mut buffer = [0u8; PUMP_CHUNK];
     loop {
         match stream.read(&mut buffer) {
             Err(err) => {
-                return Err(anyhow::Error::new(ssh_diag::run_child_read_failed(
-                    name, &err,
-                )));
+                return Err(ssh_diag::run_child_read_failed(name, &err));
             }
             Ok(0) => break,
             Ok(count) => {
                 let mut guard = writer
                     .lock()
-                    .map_err(|_| anyhow::Error::new(ssh_diag::run_output_lock_poisoned()))?;
+                    .map_err(|_| ssh_diag::run_output_lock_poisoned())?;
                 guard
                     .write_all(&buffer[..count])
-                    .context("SSH run output pipe write failed")?;
-                guard.flush().context("SSH run output pipe flush failed")?;
+                    .map_err(ssh_diag::run_output_write_failed)?;
+                guard.flush().map_err(ssh_diag::run_output_flush_failed)?;
             }
         }
     }
@@ -111,7 +110,7 @@ fn handle_run_event(
     event: RunEvent,
     in_done: &mut bool,
     outputs: &mut [(bool, DeferredClose<'_>)],
-    failed: &mut Option<anyhow::Error>,
+    failed: &mut Option<Diagnostic>,
     exit_code: &mut Option<i64>,
     in_backend: &Option<Arc<oxdock_pipe::PipeInner>>,
 ) {
@@ -224,7 +223,7 @@ pub fn pump_run_session<P: ProcessManager>(
     let cancel = Arc::new(AtomicBool::new(false));
     let in_backend = cx.pipe_backend(in_pipe);
     let (event_tx, event_rx) = std::sync::mpsc::channel::<RunEvent>();
-    let mut failed: Option<anyhow::Error> = None;
+    let mut failed: Option<Diagnostic> = None;
     let mut in_done = false;
     let mut exit_code: Option<i64> = None;
     let mut outputs = [
@@ -344,7 +343,7 @@ pub fn pump_run_session<P: ProcessManager>(
         (_, seen) = hub.wait(seen);
     }
     match failed {
-        Some(err) => Err(err),
+        Some(err) => Err(anyhow::Error::new(err)),
         None => {
             if cancel.load(Ordering::SeqCst) {
                 return Err(anyhow::Error::new(

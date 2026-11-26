@@ -2593,6 +2593,24 @@ transport, so this phase is mechanical:
    passes. ssh lib 13 plus parser 267+303 plus core lib 410
    plus integration 629 green; ssh clippy zero, fmt clean on
    both touched files.
+   ssh-bridge bulk 2026-11-27 (bridge.rs plus run pump core
+   plus ssh diagnostics): eleven new ssh.* ctors with key plus
+   wording plus {:#} chain pins (pump output_write/flush,
+   borrow_input/output, wait_runtime, borrow_source/target,
+   target_write/flush, run output_write/flush). All nine
+   bridge .context sites go bare-outer plus chained source
+   (concrete io by value via Arc, Diagnostic inners by value
+   via Arc) matching the eval_archive_failed shape; three
+   pre-wrapped anyhow::Error::new sites drop the wrap. bridge
+   flips pump_out/pump_in/pump_session/pump_pipe_to_pipe/
+   pump_pipe_to_sink plus note_failure/ChildDone/SessionDone
+   to DiagnosticResult; run flips pump_fd_to_pipe plus
+   handle_run_event/failed to Diagnostic (pump_run_session
+   keeps anyhow return via Error::new conversion for the next
+   bulk). funcs.rs pump_session callers hold via blanket From.
+   ssh lib 13 plus invalid_host_key pin plus parser 267+303
+   plus core lib 410 plus integration 629 green; ssh clippy
+   zero, fmt clean on three touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
