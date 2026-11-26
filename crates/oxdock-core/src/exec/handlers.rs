@@ -15,10 +15,9 @@ use oxdock_fs::to_forward_slashes;
 use oxdock_parser::constants::KEYWORD_RUN;
 use oxdock_parser::constants::{
     KEYWORD_APPEND, KEYWORD_ARCHIVE, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL,
-    KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_EXPAND, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_INSTALL,
-    KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_PROMPT, KEYWORD_READ,
-    KEYWORD_READ_LINE, KEYWORD_RETURN, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE,
-    KEYWORD_WITH_IO, KEYWORD_WRITE,
+    KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_EXPAND, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_ISOLATED,
+    KEYWORD_LET, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_RETURN, KEYWORD_TIMEOUT, KEYWORD_TYPE,
+    KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WRITE,
 };
 use oxdock_parser::{
     Arg, Command, Expr, IoBinding, IoStream, MAP_TYPE_NAME, PIPE_TYPE_NAME, PipeTarget,
@@ -4049,16 +4048,16 @@ pub(super) fn install<P: ProcessManager>(
         .state
         .fs
         .resolve_read(&cx.state.cwd, from)
-        .with_context(|| format!("{KEYWORD_INSTALL} {from} {to}"))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_install_failed(from, to, &e)))?;
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| format!("{KEYWORD_INSTALL} {from} {to}"))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_install_failed(from, to, &e)))?;
     cx.state
         .fs
         .install_file_atomic(&from_abs, &to_abs, EXECUTABLE_MODE)
-        .with_context(|| format!("{KEYWORD_INSTALL} {from} {to}"))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_install_failed(from, to, &e)))?;
     Ok(())
 }
 
@@ -4162,7 +4161,7 @@ pub(super) fn prompt<P: ProcessManager>(
                 return Ok(());
             }
             None => {
-                bail!("{KEYWORD_PROMPT} {message}: non-TTY stdin has no answer and no default",);
+                return Err(anyhow::Error::new(diag::eval_prompt_no_answer(message)));
             }
         }
     }
@@ -4171,16 +4170,16 @@ pub(super) fn prompt<P: ProcessManager>(
         use std::io::Write;
         let mut err = std::io::stderr().lock();
         err.write_all(rendered.as_bytes())
-            .with_context(|| format!("{KEYWORD_PROMPT} {message}: failed to write prompt"))?;
+            .map_err(|e| anyhow::Error::new(diag::eval_prompt_write_failed(message, &e)))?;
         err.flush()
-            .with_context(|| format!("{KEYWORD_PROMPT} {message}: failed to flush prompt"))?;
+            .map_err(|e| anyhow::Error::new(diag::eval_prompt_flush_failed(message, &e)))?;
     }
     let mut line = String::new();
     let n = std::io::stdin()
         .read_line(&mut line)
-        .with_context(|| format!("{KEYWORD_PROMPT} {message}: failed reading stdin"))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_prompt_read_failed(message, &e)))?;
     if n == 0 && line.is_empty() {
-        bail!("{KEYWORD_PROMPT} {message}: EOF on stdin before any input",);
+        return Err(anyhow::Error::new(diag::eval_prompt_eof(message)));
     }
     let trimmed = line
         .strip_suffix("\r\n")
@@ -4200,11 +4199,11 @@ fn bind_prompt_var<P: ProcessManager>(
     if cx.state.get_var_typed(clean_var).is_some() {
         cx.state
             .mutate_var(clean_var, text)
-            .with_context(|| format!("{KEYWORD_PROMPT} ${clean_var}"))?;
+            .map_err(|e| anyhow::Error::new(diag::eval_prompt_bind_failed(clean_var, e)))?;
     } else {
         cx.state
             .declare_var(clean_var.to_string(), TypeTag::String, text)
-            .with_context(|| format!("{KEYWORD_PROMPT} ${clean_var}"))?;
+            .map_err(|e| anyhow::Error::new(diag::eval_prompt_bind_failed(clean_var, e)))?;
     }
     Ok(())
 }
@@ -4240,7 +4239,7 @@ pub(super) fn push_into<P: ProcessManager>(
 ) -> Result<()> {
     cx.state
         .push_into_list(var, item)
-        .with_context(|| format!("{KEYWORD_LIST_APPEND} ${var}"))
+        .map_err(|e| anyhow::Error::new(diag::eval_list_append_failed(var, e)))
 }
 
 pub(crate) fn dispatch_push_into_step<P: ProcessManager>(

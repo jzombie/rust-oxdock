@@ -2269,9 +2269,46 @@ transport, so this phase is mechanical:
    single ownership holding for the shared failed to open
    wording. The chunk-read site wraps its std io Error
    with anyhow Error new at the call site. Bytes identical.
-   Core 410 plus integration 629 green; clippy at
-   baseline (3 pre-existing), fmt clean on both
-   touched files.
+   Core 410 plus integration 629 green; clippy at baseline
+   (3 pre-existing), fmt clean on both touched files.
+   INSTALL/PROMPT bulk step 2026-11-27 (file-sized batch):
+   six new dsl.eval.* ctors with key plus wording pins
+   (install_failed with from plus to, one key covering
+   all three resolve plus atomic-install sites;
+   prompt_no_answer plus prompt_eof with message and no
+   source for the pre-I/O guards; prompt_write_failed,
+   prompt_flush_failed, and prompt_read_failed with
+   message plus ref-io-Error for the stderr and stdin
+   failures). Eight sites re-keyed across install/prompt
+   via map_err plus anyhow Error new (non-tail bails
+   become explicit return Err). Unused KEYWORD_INSTALL
+   import dropped from handlers; KEYWORD_PROMPT stays
+   for the bind_prompt_var sites in a later batch.
+   Bytes identical (non-TTY pin passes). Core 410 plus
+   integration 629 green; clippy at baseline
+   (3 pre-existing), fmt clean on both touched files.
+   PROMPT-bind/LIST_APPEND bulk step 2026-11-27
+   (file-sized batch): two new dsl.eval.* ctors with key
+   plus wording pins (prompt_bind_failed with var, one key
+   covering the mutate plus declare arms; list_append_failed
+   with var). Three sites re-keyed across bind_prompt_var
+   plus push_into via map_err plus anyhow Error new.
+   Type note: mutate_var, declare_var, and push_into_list
+   return DiagnosticResult, so the sites convert with
+   anyhow Error from at the call site for the ref-anyhow
+   param, per the args.rs precedent. PROMPT is now fully
+   migrated: unused KEYWORD_PROMPT plus KEYWORD_LIST_APPEND
+   imports dropped from handlers. Bytes identical. Core 410
+   plus integration 629 green; clippy at baseline
+   (3 pre-existing), fmt clean on both touched files.
+   AMEND 2026-11-27 (review-directed, SEV-2): eval_prompt_bind_failed
+   plus eval_list_append_failed now take the inner Diagnostic by
+   value instead of ref-anyhow-Error. The reason field carries the
+   inner message and the concrete diagnostic rides as the chained
+   source with key, fields, and chain intact (no anyhow round-trip,
+   no Other-kind flattening). Call sites pass e directly. First
+   by-value precedent in the exec diagnostics; applies wherever the
+   callee already returns DiagnosticResult. Gates stay green.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

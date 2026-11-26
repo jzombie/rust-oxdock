@@ -13,12 +13,12 @@ use oxdock_parser::{
     KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT,
     KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT, KEYWORD_ENV,
     KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV,
-    KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_READ,
-    KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN,
-    KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TYPE,
-    KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE, LIST_TYPE_NAME, MAP_TYPE_NAME,
-    PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag,
-    VOID_TYPE_NAME, render_structural,
+    KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR,
+    KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE,
+    KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH,
+    KEYWORD_SYMLINK, KEYWORD_TYPE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE, LIST_TYPE_NAME,
+    MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME,
+    Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
 };
 
 use super::function_names::{
@@ -2675,6 +2675,115 @@ pub fn eval_expand_needs_stdin() -> Diagnostic {
         message,
         Diagnostic::make_fields(&[]),
     )
+}
+
+/// `INSTALL` transport failure (read-resolve, write-resolve, or
+/// atomic install). Takes the source, destination, and the underlying
+/// failure; one key covers all three sites since the outer text is
+/// identical.
+pub fn eval_install_failed(from: &str, to: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_INSTALL} {from} {to}");
+    Diagnostic::new(
+        "dsl.eval.install_failed",
+        message,
+        Diagnostic::make_fields(&[("from", from), ("to", to), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `PROMPT` with no TTY answer and no default. Takes the rendered
+/// message; the guard fails before any I/O, so no source rides
+/// along.
+pub fn eval_prompt_no_answer(message: &str) -> Diagnostic {
+    let rendered =
+        format!("{KEYWORD_PROMPT} {message}: non-TTY stdin has no answer and no default");
+    Diagnostic::new(
+        "dsl.eval.prompt_no_answer",
+        rendered,
+        Diagnostic::make_fields(&[("message", message)]),
+    )
+}
+
+/// `PROMPT` banner-write failure. Takes the rendered message and the
+/// underlying I/O failure. Bare outer context plus chained source.
+pub fn eval_prompt_write_failed(message: &str, reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let rendered = format!("{KEYWORD_PROMPT} {message}: failed to write prompt");
+    Diagnostic::new(
+        "dsl.eval.prompt_write_failed",
+        rendered,
+        Diagnostic::make_fields(&[("message", message), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `PROMPT` banner-flush failure. Takes the rendered message and the
+/// underlying I/O failure. Bare outer context plus chained source.
+pub fn eval_prompt_flush_failed(message: &str, reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let rendered = format!("{KEYWORD_PROMPT} {message}: failed to flush prompt");
+    Diagnostic::new(
+        "dsl.eval.prompt_flush_failed",
+        rendered,
+        Diagnostic::make_fields(&[("message", message), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `PROMPT` answer-read failure. Takes the rendered message and the
+/// underlying I/O failure. Bare outer context plus chained source.
+pub fn eval_prompt_read_failed(message: &str, reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let rendered = format!("{KEYWORD_PROMPT} {message}: failed reading stdin");
+    Diagnostic::new(
+        "dsl.eval.prompt_read_failed",
+        rendered,
+        Diagnostic::make_fields(&[("message", message), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `PROMPT` hitting EOF before any input. Takes the rendered
+/// message; EOF is validation, so no source rides along.
+pub fn eval_prompt_eof(message: &str) -> Diagnostic {
+    let rendered = format!("{KEYWORD_PROMPT} {message}: EOF on stdin before any input");
+    Diagnostic::new(
+        "dsl.eval.prompt_eof",
+        rendered,
+        Diagnostic::make_fields(&[("message", message)]),
+    )
+}
+
+/// `PROMPT` variable binding failure (mutate or declare). Takes the
+/// cleaned variable name and the underlying diagnostic by value; one
+/// key covers both arms since the outer text is identical. The inner
+/// diagnostic rides as the chained source with its key, fields, and
+/// chain intact (no flattening through `anyhow`), so the snapshot
+/// renderer keeps every layer.
+pub fn eval_prompt_bind_failed(var: &str, reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    let message = format!("{KEYWORD_PROMPT} ${var}");
+    Diagnostic::new(
+        "dsl.eval.prompt_bind_failed",
+        message,
+        Diagnostic::make_fields(&[("var", var), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// `LIST_APPEND` binding failure. Takes the script spelling and the
+/// underlying diagnostic by value. Bare outer context plus the
+/// concrete diagnostic as chained source.
+pub fn eval_list_append_failed(var: &str, reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    let message = format!("{KEYWORD_LIST_APPEND} ${var}");
+    Diagnostic::new(
+        "dsl.eval.list_append_failed",
+        message,
+        Diagnostic::make_fields(&[("var", var), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
 }
 
 /// `int`-typed argument whose resolution failed. Takes the underlying
@@ -5518,6 +5627,14 @@ mod tests {
             eval_expand_read_failed("p", &anyhow::anyhow!("x")).key(),
             eval_expand_write_failed(&std::io::Error::other("x")).key(),
             eval_expand_needs_stdin().key(),
+            eval_install_failed("a", "b", &anyhow::anyhow!("x")).key(),
+            eval_prompt_no_answer("m").key(),
+            eval_prompt_write_failed("m", &std::io::Error::other("x")).key(),
+            eval_prompt_flush_failed("m", &std::io::Error::other("x")).key(),
+            eval_prompt_read_failed("m", &std::io::Error::other("x")).key(),
+            eval_prompt_eof("m").key(),
+            eval_prompt_bind_failed("v", eval_remove_missing("x")).key(),
+            eval_list_append_failed("v", eval_remove_missing("x")).key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -6148,6 +6265,38 @@ mod tests {
         assert_eq!(
             eval_expand_needs_stdin().message(),
             "EXPAND requires stdin when no file path is given (use WITH_IO [stdin=...] EXPAND)"
+        );
+        assert_eq!(
+            eval_install_failed("a", "b", &anyhow::anyhow!("boom")).message(),
+            "INSTALL a b"
+        );
+        assert_eq!(
+            eval_prompt_no_answer("hi").message(),
+            "PROMPT hi: non-TTY stdin has no answer and no default"
+        );
+        assert_eq!(
+            eval_prompt_write_failed("hi", &std::io::Error::other("boom")).message(),
+            "PROMPT hi: failed to write prompt"
+        );
+        assert_eq!(
+            eval_prompt_flush_failed("hi", &std::io::Error::other("boom")).message(),
+            "PROMPT hi: failed to flush prompt"
+        );
+        assert_eq!(
+            eval_prompt_read_failed("hi", &std::io::Error::other("boom")).message(),
+            "PROMPT hi: failed reading stdin"
+        );
+        assert_eq!(
+            eval_prompt_eof("hi").message(),
+            "PROMPT hi: EOF on stdin before any input"
+        );
+        assert_eq!(
+            eval_prompt_bind_failed("v", eval_remove_missing("x")).message(),
+            "PROMPT $v"
+        );
+        assert_eq!(
+            eval_list_append_failed("v", eval_remove_missing("x")).message(),
+            "LIST_APPEND $v"
         );
         assert!(
             eval_run_exit_status("echo hi", &exit_status_sample())
