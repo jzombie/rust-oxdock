@@ -28,6 +28,7 @@ use oxdock_utils::sha256_hex;
 use oxdock_utils::tar::{StreamedEntry, sanitize_rel, unpack_auto_from};
 
 use super::args::parse_bool_str;
+use super::diagnostics as diag;
 use super::fs_ops::copy_entry;
 use super::io::{StreamHandle, TaskTee, TeeStream, write_stderr, write_stdout};
 use super::native::FuncBody;
@@ -1913,7 +1914,7 @@ fn exact_stdout_bytes<P: ProcessManager>(
         .state
         .exact_stdout
         .lock()
-        .map_err(|_| anyhow!("exact_stdout poisoned"))?;
+        .map_err(|_| anyhow::Error::new(diag::std_assert_lock_poisoned("exact_stdout")))?;
     match captures.get(&generation) {
         Some(entry) if entry.overflowed => bail!(
             "{verb} stdout overflowed the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout",
@@ -2002,11 +2003,9 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 }
             }
             // Mode 2: pre-registered stdout window for this step.
-            let windows = cx
-                .state
-                .assert_windows
-                .lock()
-                .map_err(|_| anyhow!("assert_windows poisoned"))?;
+            let windows = cx.state.assert_windows.lock().map_err(|_| {
+                anyhow::Error::new(diag::std_assert_lock_poisoned("assert_windows"))
+            })?;
             match windows.get(&(generation, idx_step)) {
                 Some(w) if w.matched => Ok(()),
                 Some(w) => {
@@ -2023,11 +2022,9 @@ pub(super) fn assert_contains<P: ProcessManager>(
         ResolvedAssertTarget::Stderr => {
             // Stderr has no piped-stdin consumption mode: stdin bytes
             // belong to a different stream and are left alone.
-            let windows = cx
-                .state
-                .assert_windows_stderr
-                .lock()
-                .map_err(|_| anyhow!("assert_windows_stderr poisoned"))?;
+            let windows = cx.state.assert_windows_stderr.lock().map_err(|_| {
+                anyhow::Error::new(diag::std_assert_lock_poisoned("assert_windows_stderr"))
+            })?;
             match windows.get(&(generation, idx_step)) {
                 Some(w) if w.matched => Ok(()),
                 Some(w) => {

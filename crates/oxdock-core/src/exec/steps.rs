@@ -295,18 +295,26 @@ pub(super) fn pre_register_assertions<P: ProcessManager>(
     state: &mut ExecState<P>,
     steps: &[Step],
     generation: usize,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut windows = match state.assert_windows.lock() {
         Ok(guard) => guard,
-        Err(_) => bail!("assert_windows poisoned"),
+        Err(_) => {
+            return Err(super::diagnostics::std_assert_lock_poisoned(
+                "assert_windows",
+            ));
+        }
     };
     let mut stderr_windows = match state.assert_windows_stderr.lock() {
         Ok(guard) => guard,
-        Err(_) => bail!("assert_windows_stderr poisoned"),
+        Err(_) => {
+            return Err(super::diagnostics::std_assert_lock_poisoned(
+                "assert_windows_stderr",
+            ));
+        }
     };
     let mut exact = match state.exact_stdout.lock() {
         Ok(guard) => guard,
-        Err(_) => bail!("exact_stdout poisoned"),
+        Err(_) => return Err(super::diagnostics::std_assert_lock_poisoned("exact_stdout")),
     };
     for (idx, step) in steps.iter().enumerate() {
         if let Some((stream, arg)) = extract_stream_needle(&step.kind) {
@@ -334,14 +342,22 @@ pub(super) fn sync_iteration_assert_needles<P: ProcessManager>(
     state: &ExecState<P>,
     steps: &[Step],
     generation: usize,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut windows = match state.assert_windows.lock() {
         Ok(guard) => guard,
-        Err(_) => bail!("assert_windows poisoned"),
+        Err(_) => {
+            return Err(super::diagnostics::std_assert_lock_poisoned(
+                "assert_windows",
+            ));
+        }
     };
     let mut stderr_windows = match state.assert_windows_stderr.lock() {
         Ok(guard) => guard,
-        Err(_) => bail!("assert_windows_stderr poisoned"),
+        Err(_) => {
+            return Err(super::diagnostics::std_assert_lock_poisoned(
+                "assert_windows_stderr",
+            ));
+        }
     };
     for (idx, step) in steps.iter().enumerate() {
         if let Some((stream, arg)) = extract_stream_needle(&step.kind) {
@@ -686,20 +702,28 @@ pub(super) fn execute_steps<P: ProcessManager>(
 fn cleanup_assertion_generation<P: ProcessManager>(
     state: &mut ExecState<P>,
     generation: usize,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut windows = match state.assert_windows.lock() {
         Ok(guard) => guard,
-        Err(_) => bail!("assert_windows poisoned"),
+        Err(_) => {
+            return Err(super::diagnostics::std_assert_lock_poisoned(
+                "assert_windows",
+            ));
+        }
     };
     windows.retain(|(g, _), _| *g != generation);
     let mut stderr_windows = match state.assert_windows_stderr.lock() {
         Ok(guard) => guard,
-        Err(_) => bail!("assert_windows_stderr poisoned"),
+        Err(_) => {
+            return Err(super::diagnostics::std_assert_lock_poisoned(
+                "assert_windows_stderr",
+            ));
+        }
     };
     stderr_windows.retain(|(g, _), _| *g != generation);
     let mut exact = match state.exact_stdout.lock() {
         Ok(guard) => guard,
-        Err(_) => bail!("exact_stdout poisoned"),
+        Err(_) => return Err(super::diagnostics::std_assert_lock_poisoned("exact_stdout")),
     };
     exact.retain(|g, _| *g != generation);
     Ok(())

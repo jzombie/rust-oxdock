@@ -1599,6 +1599,26 @@ transport, so this phase is mechanical:
    paths, SSH pipe bridges, test harnesses).
    Core 409 plus integration 629 green; clippy
    and fmt clean.
+   Assert-lock bulk step 2026-11-26: one new
+   ctor in exec/diagnostics.rs with key plus
+   wording pin (std_assert_lock_poisoned(lock)
+   shares one key across all three locks per the
+   same-failure-mode rule; messages stay
+   byte-identical). Three signatures flip in
+   exec/steps.rs: pre_register_assertions plus
+   sync_iteration_assert_needles plus
+   cleanup_assertion_generation return
+   DiagnosticResult (resolve_arg_state already
+   Diagnostic; retain/insert/update_needle
+   infallible). Bodies drop eight bail! sites
+   for return Err with the shared ctor.
+   Handlers keeps three anyhow-outer sites on
+   the same key via anyhow::Error::new wrap
+   (exact_stdout_bytes plus assert_contains
+   stdout/stderr windows). Callers hold via the
+   blanket conversion (execute_steps plus
+   execute_steps_inner). Core 409 plus
+   integration 629 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

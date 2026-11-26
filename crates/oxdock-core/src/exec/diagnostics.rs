@@ -1684,6 +1684,18 @@ pub fn std_pipe_close_needs_script() -> Diagnostic {
     )
 }
 
+/// Assertion-observer lock poisoned (a worker thread panicked while
+/// holding it). Takes the lock name; every site reports the same
+/// shape, so one key covers all three locks.
+pub fn std_assert_lock_poisoned(lock: &str) -> Diagnostic {
+    let message = format!("{lock} poisoned");
+    Diagnostic::new(
+        "dsl.std.assert_lock_poisoned",
+        message,
+        Diagnostic::make_fields(&[("lock", lock)]),
+    )
+}
+
 /// Chunk read failure inside the eager-read loop. Takes the invoking
 /// function and the underlying I/O failure with `Display` rendering:
 /// the loop reports `{e}`, while the outer open reports `{e:#}`, so
@@ -3933,6 +3945,7 @@ mod tests {
             std_pipe_handle_spent().key(),
             std_pipe_needs_pipe("TEXT_REPLACE", "STRING").key(),
             std_pipe_close_needs_script().key(),
+            std_assert_lock_poisoned("TEXT_REPLACE").key(),
             std_pipe_chunk_read_failed("TEXT_REPLACE", &std::io::Error::other("x")).key(),
             std_pipe_input_not_utf8("TEXT_REPLACE").key(),
             std_pipe_spill_failed("TEXT_REPLACE", &std::io::Error::other("x")).key(),
@@ -4285,6 +4298,10 @@ mod tests {
         assert_eq!(
             std_pipe_close_needs_script().message(),
             "host close_pipe needs a script-materialized pipe (unbound and OS handles cannot be force-closed)"
+        );
+        assert_eq!(
+            std_assert_lock_poisoned("TEXT_REPLACE").message(),
+            "TEXT_REPLACE poisoned"
         );
         assert_eq!(
             std_pipe_chunk_read_failed("TEXT_REPLACE", &std::io::Error::other("denied"),).message(),
