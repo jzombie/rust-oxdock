@@ -1359,6 +1359,24 @@ transport, so this phase is mechanical:
    plus load_import stay anyhow for the dry-run and
    runtime paths. Core 409 plus integration 629
    green; clippy and fmt clean.
+   Harvest-merge step 2026-11-26: no new ctors,
+   all wordings already pinned. Four signatures
+   flip to DiagnosticResult: import
+   insert_imported_type plus gate_harvested_name
+   plus static_check merge_harvest plus
+   merge_harvests_in. Bodies drop seven
+   anyhow::Error::new wrappers; the resolve_tag
+   site keeps its inner anyhow::Error::new(err)
+   reason wrap (the callee is already Diagnostic,
+   the ctor takes &anyhow::Error) and only sheds
+   the outer wrap. Callers hold via the blanket
+   Diagnostic-into-anyhow conversion: anyhow
+   import_funcs and validate_script_closure plus
+   Checker sites call the flipped fns with no
+   change. Core 409 plus integration 629 green;
+   clippy shows only the pre-existing
+   needless_borrow warnings elsewhere in the file;
+   fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

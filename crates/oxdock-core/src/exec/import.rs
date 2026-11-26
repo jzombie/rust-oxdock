@@ -412,7 +412,7 @@ pub(crate) fn gate_harvested_name(
     exports: &Exports,
     name: &str,
     path: &str,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let (exported, kind, noun, defined) = match kind {
         ExportKind::Func => (
             &exports.funcs,
@@ -437,14 +437,10 @@ pub(crate) fn gate_harvested_name(
         ExportKind::Const => (&exports.consts, "CONST", "CONST", true),
     };
     if !exported.iter().any(|e| e == name) {
-        return Err(anyhow::Error::new(import_diag::import_missing_export(
-            path, kind, name,
-        )));
+        return Err(import_diag::import_missing_export(path, kind, name));
     }
     if !defined {
-        return Err(anyhow::Error::new(import_diag::import_unknown_member(
-            path, noun, name,
-        )));
+        return Err(import_diag::import_unknown_member(path, noun, name));
     }
     Ok(())
 }
@@ -728,16 +724,16 @@ pub(crate) fn insert_imported_type<P: ProcessManager>(
     target: &str,
     alias: Option<&str>,
     path: &str,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let key = match alias {
         Some(alias) => qualify(alias, name),
         None => name.to_string(),
     };
     if let Some(existing) = state.type_aliases.get(&key) {
         if existing != target {
-            return Err(anyhow::Error::new(import_diag::import_type_collision(
+            return Err(import_diag::import_type_collision(
                 path, name, existing, target,
-            )));
+            ));
         }
     } else {
         state.register_alias(key, target.to_string());

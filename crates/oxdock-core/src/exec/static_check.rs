@@ -78,6 +78,7 @@ use std::collections::{HashMap, HashSet};
 type HomeFuncs = HashMap<(String, String), Vec<(Option<GuardExpr>, FuncInfo)>>;
 
 use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::GuardedPath;
 use oxdock_parser::constants::{
     KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_IMPORT, KEYWORD_LET, MODULE_SEPARATOR,
@@ -677,7 +678,7 @@ fn merge_harvest<P: ProcessManager>(
     alias: Option<&str>,
     type_names: &[String],
     is_entry: bool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     // Entry-first resolution shared with expansion: `resolve_static_top_level`
     // probes the entry dir before `dir` for entry-unit imports, so an
     // outside-workspace entry finds its sibling lib instead of aborting
@@ -690,19 +691,15 @@ fn merge_harvest<P: ProcessManager>(
         if exec.module_table.modules.contains_key(path) {
             for name in type_names {
                 exec.resolve_tag(name).map_err(|err| {
-                    anyhow::Error::new(check_diag::import_unknown_type(
-                        path,
-                        name,
-                        Some(&anyhow::Error::new(err)),
-                    ))
+                    check_diag::import_unknown_type(path, name, Some(&anyhow::Error::new(err)))
                 })?;
             }
             return Ok(());
         }
-        return Err(anyhow::Error::new(check_diag::import_not_in_closure(path)));
+        return Err(check_diag::import_not_in_closure(path));
     };
     let Some(file) = files.iter().find(|f| f.key == key) else {
-        return Err(anyhow::Error::new(check_diag::import_not_in_closure(path)));
+        return Err(check_diag::import_not_in_closure(path));
     };
     let aliases = super::typing::collect_type_aliases(&file.steps, exec)?;
     for name in type_names {
@@ -718,9 +715,7 @@ fn merge_harvest<P: ProcessManager>(
             path,
         )?;
         let Some(target) = aliases.get(name) else {
-            return Err(anyhow::Error::new(check_diag::import_unknown_type(
-                path, name, None,
-            )));
+            return Err(check_diag::import_unknown_type(path, name, None));
         };
         super::import::insert_imported_type(exec, name, target, alias, path)?;
     }
@@ -784,7 +779,7 @@ fn merge_harvests_in<P: ProcessManager>(
     dir: &GuardedPath,
     steps: &[Step],
     is_entry: bool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     for step in steps {
         if let StepKind::ImportFuncs {
             path,
