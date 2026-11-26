@@ -1528,6 +1528,28 @@ transport, so this phase is mechanical:
    change (mcp init, finish_run, CLI dry-run,
    expect_err tests). Core 409 plus integration
    629 green; clippy and fmt clean.
+   Import dry-run bulk step 2026-11-26 (per user
+   file-sized batches): no new ctors, all
+   wordings already pinned. Eight signatures flip
+   in exec/import.rs: dry_run_closure plus
+   dry_run_walk plus dry_run_load plus
+   dry_run_resolve plus dry_run_walk_top_imports
+   plus dry_run_walk_kind plus read_and_parse_import
+   plus load_import return DiagnosticResult.
+   Bodies drop outer anyhow::Error::new wrappers
+   (import_cycle, import_depth_limit,
+   import_cannot_read, import_bad_utf8,
+   import_parse_failed keep inner
+   anyhow::Error::new(e) reason wraps per
+   contract); dry_run_resolve plus load_import
+   shed map_err(anyhow::Error::from) after both
+   sides flipped. read_import_bytes stays anyhow
+   (raw io without path context; callers add it
+   via import_cannot_read). Outside callers hold
+   via the blanket conversion (CLI dry-run,
+   import_funcs/import_file runtime paths,
+   dry-run tests). Core 409 plus integration 629
+   green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

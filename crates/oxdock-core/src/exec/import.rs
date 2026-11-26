@@ -95,7 +95,7 @@ pub fn dry_run_closure(
     base: &GuardedPath,
     fs: &dyn WorkspaceFs,
     table: &ModuleTable,
-) -> Result<Vec<DryRunStep>> {
+) -> DiagnosticResult<Vec<DryRunStep>> {
     let mut out = Vec::new();
     let mut stack: Vec<String> = Vec::new();
     let mut cache: HashMap<String, Vec<Step>> = HashMap::new();
@@ -122,7 +122,7 @@ fn dry_run_walk(
     stack: &mut Vec<String>,
     cache: &mut HashMap<String, Vec<Step>>,
     out: &mut Vec<DryRunStep>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     for step in steps {
         out.push(DryRunStep {
             file: file.to_string(),
@@ -188,7 +188,7 @@ fn dry_run_load(
     table: &ModuleTable,
     stack: &[String],
     cache: &mut HashMap<String, Vec<Step>>,
-) -> Result<(String, Vec<Step>, GuardedPath)> {
+) -> DiagnosticResult<(String, Vec<Step>, GuardedPath)> {
     // Same workspace-side join as execution: imported files live in the
     // source tree, never the snapshot. Top-level staged scripts (entry
     // outside the workspace) fall back to the workspace root like
@@ -198,13 +198,10 @@ fn dry_run_load(
     if stack.iter().any(|p| p == &key) {
         let mut chain = stack.to_vec();
         chain.push(key);
-        return Err(anyhow::Error::new(import_diag::import_cycle(&chain)));
+        return Err(import_diag::import_cycle(&chain));
     }
     if stack.len() >= MAX_IMPORT_DEPTH {
-        return Err(anyhow::Error::new(import_diag::import_depth_limit(
-            MAX_IMPORT_DEPTH,
-            path,
-        )));
+        return Err(import_diag::import_depth_limit(MAX_IMPORT_DEPTH, path));
     }
     let nested_dir = resolved.parent().unwrap_or_else(|| dir.clone());
     if let Some(cached) = cache.get(&key) {
@@ -276,10 +273,9 @@ fn dry_run_resolve(
     dir: &GuardedPath,
     path: &str,
     is_top: bool,
-) -> Result<GuardedPath> {
+) -> DiagnosticResult<GuardedPath> {
     let fallback = workspace_fallback(fs);
     resolve_top_level_with(fs, dir, is_top, None, is_top.then_some(&fallback), path)
-        .map_err(anyhow::Error::from)
 }
 
 /// Preview a harvest target: only its top-level nested imports load,
@@ -294,7 +290,7 @@ fn dry_run_walk_top_imports(
     stack: &mut Vec<String>,
     cache: &mut HashMap<String, Vec<Step>>,
     out: &mut Vec<DryRunStep>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     for step in steps {
         match &step.kind {
             StepKind::ImportFile { .. } | StepKind::ImportFuncs { .. } => {
@@ -362,7 +358,7 @@ fn dry_run_walk_kind(
     stack: &mut Vec<String>,
     cache: &mut HashMap<String, Vec<Step>>,
     out: &mut Vec<DryRunStep>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     for body in child_bodies(kind) {
         dry_run_walk(body, file, dir, fs, table, stack, cache, out)?;
     }
@@ -376,23 +372,16 @@ fn read_and_parse_import(
     resolved: &GuardedPath,
     path: &str,
     table: &ModuleTable,
-) -> Result<Vec<Step>> {
-    let bytes = read_import_bytes(fs, resolved)
-        .map_err(|e| anyhow::Error::new(import_diag::import_cannot_read(path, &e)))?;
-    let text = std::str::from_utf8(&bytes).map_err(|e| {
-        anyhow::Error::new(import_diag::import_bad_utf8(path, &anyhow::Error::new(e)))
-    })?;
+) -> DiagnosticResult<Vec<Step>> {
+    let bytes =
+        read_import_bytes(fs, resolved).map_err(|e| import_diag::import_cannot_read(path, &e))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|e| import_diag::import_bad_utf8(path, &anyhow::Error::new(e)))?;
     let table = table.clone();
     let mut reserved = super::native::builtin_function_names();
     reserved.extend(table.reserved_base_names());
-    oxdock_parser::parse_script_with_modules(text, crate::lower_command, reserved, table).map_err(
-        |e| {
-            anyhow::Error::new(import_diag::import_parse_failed(
-                path,
-                &anyhow::Error::new(e),
-            ))
-        },
-    )
+    oxdock_parser::parse_script_with_modules(text, crate::lower_command, reserved, table)
+        .map_err(|e| import_diag::import_parse_failed(path, &anyhow::Error::new(e)))
 }
 
 /// Execute `IMPORT [[F, G FROM "<path>" (AS <ALIAS>)?]]`: load the
@@ -1602,10 +1591,13 @@ fn expand_load<P: ProcessManager>(
 /// reject cycles and depth overflow, and reuse the per-run parse cache.
 /// Returns the resolved file; the caller pushes the
 /// scope frame and the import-stack entry around execution.
-fn load_import<P: ProcessManager>(state: &mut ExecState<P>, path: &str) -> Result<LoadedFile> {
+fn load_import<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    path: &str,
+) -> DiagnosticResult<LoadedFile> {
     let base = import_base(state);
     let stack = state.import_stack.clone();
-    load_file(state, &base, &stack, path).map_err(anyhow::Error::from)
+    load_file(state, &base, &stack, path)
 }
 
 /// One resolved import target: the file, its parsed body, and its
