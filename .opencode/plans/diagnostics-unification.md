@@ -1405,6 +1405,17 @@ transport, so this phase is mechanical:
    integration 629 green; clippy shows only the
    pre-existing needless_borrow warnings elsewhere
    in the file; fmt clean.
+   Unify-traverse step 2026-11-26: no new ctors,
+   all wordings already pinned. Two signatures
+   flip to DiagnosticResult in static_check.rs:
+   unify plus traverse_static_keypath. Bodies drop
+   five anyhow::Error::new wrappers; both are pure
+   leaves (tags_equal match plus field/index
+   probes, no fallible callees). Callers hold via
+   the blanket Diagnostic-into-anyhow conversion:
+   anyhow infer_expr plus walk sites call with `?`
+   and no change. Core 409 plus integration 629
+   green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

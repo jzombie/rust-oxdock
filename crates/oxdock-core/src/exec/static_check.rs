@@ -1510,7 +1510,7 @@ fn is_compatible(actual: &TypeTag, declared: &TypeTag) -> bool {
 /// Unify two terminal types: equal stays, any `ANY` widens to `ANY`
 /// (unidirectional — `ANY` never narrows to concrete), disjoint
 /// concrete types fail naming both.
-fn unify(left: TypeTag, right: TypeTag, ctx: &str) -> Result<TypeTag> {
+fn unify(left: TypeTag, right: TypeTag, ctx: &str) -> DiagnosticResult<TypeTag> {
     if tags_equal(&left, &right) {
         return Ok(left);
     }
@@ -1544,9 +1544,7 @@ fn unify(left: TypeTag, right: TypeTag, ctx: &str) -> Result<TypeTag> {
     ) {
         return Ok(TypeTag::Map);
     }
-    Err(anyhow::Error::new(check_diag::check_cannot_unify(
-        ctx, &left, &right,
-    )))
+    Err(check_diag::check_cannot_unify(ctx, &left, &right))
 }
 
 fn classify_guard(guard: Option<&GuardExpr>) -> GuardClass {
@@ -1598,22 +1596,22 @@ fn check_var_binding_access(
 /// `""` in RPN); the empty-prefix RPN wording matches the historical
 /// runtime errors. `Map`/`List`/`Any` and traversable unions defer to
 /// `Any`, mirroring the evaluator's value-resolved misses.
-fn traverse_static_keypath(mut current: TypeTag, keys: &[String], prefix: &str) -> Result<TypeTag> {
+fn traverse_static_keypath(
+    mut current: TypeTag,
+    keys: &[String],
+    prefix: &str,
+) -> DiagnosticResult<TypeTag> {
     for part in keys {
         match current {
             TypeTag::Record(fields) => {
                 let Some(field) = fields.iter().find(|field| field.name == *part) else {
-                    return Err(anyhow::Error::new(check_diag::check_unknown_field(
-                        prefix, part, &fields,
-                    )));
+                    return Err(check_diag::check_unknown_field(prefix, part, &fields));
                 };
                 current = field.ty.clone();
             }
             TypeTag::ListOf(element) => {
                 if part.parse::<usize>().is_err() {
-                    return Err(anyhow::Error::new(check_diag::check_invalid_array_index(
-                        prefix, part,
-                    )));
+                    return Err(check_diag::check_invalid_array_index(prefix, part));
                 }
                 current = element.as_ref().clone();
             }
@@ -1636,16 +1634,12 @@ fn traverse_static_keypath(mut current: TypeTag, keys: &[String], prefix: &str) 
                     )
                 };
                 if members.iter().all(|member| !traversable(member)) {
-                    return Err(anyhow::Error::new(check_diag::check_cannot_traverse(
-                        prefix, part,
-                    )));
+                    return Err(check_diag::check_cannot_traverse(prefix, part));
                 }
                 return Ok(TypeTag::Any);
             }
             _ => {
-                return Err(anyhow::Error::new(check_diag::check_cannot_traverse(
-                    prefix, part,
-                )));
+                return Err(check_diag::check_cannot_traverse(prefix, part));
             }
         }
     }
