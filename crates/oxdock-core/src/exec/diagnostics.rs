@@ -553,8 +553,14 @@ pub fn import_unknown_type(path: &str, name: &str, reason: Option<Diagnostic>) -
     )
 }
 
-/// IMPORT body failing validation. Takes the underlying failure.
-pub fn import_failed_validation(path: &str, reason: &anyhow::Error) -> Diagnostic {
+/// IMPORT body failing validation. Takes the underlying failure
+/// verbatim: it already names the check and the cause, so no wrapper
+/// is added. By value: `validate_import_body_types` and
+/// `harvest_touches_module` only emit the static `check.*` /
+/// `typing_*` families, which carry zero `with_source`, so rendering
+/// the bare `Diagnostic` matches the retired anyhow-chain bytes
+/// exactly.
+pub fn import_failed_validation(path: &str, reason: Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_IMPORT} `{path}` failed validation: {reason_text}");
     Diagnostic::new(
@@ -6336,7 +6342,7 @@ mod tests {
             import_missing_export("f", "FUNC", "g").key(),
             import_unknown_member("f", "function", "g").key(),
             import_unknown_type("f", "T", None).key(),
-            import_failed_validation("f", &anyhow::anyhow!("x")).key(),
+            import_failed_validation("f", typing_max_depth(8, "X")).key(),
             import_stateful_harvest("f", "g").key(),
             import_unknown_function("f", "g").key(),
             import_type_collision("f", "T", "a", "b").key(),
@@ -8384,10 +8390,9 @@ mod tests {
                 .message()
                 .contains(": type spelling exceeds maximum generic depth of 8: `X`")
         );
-        assert!(
-            import_failed_validation("f", &anyhow::anyhow!("root"))
-                .message()
-                .contains("failed validation")
+        assert_eq!(
+            import_failed_validation("f", typing_max_depth(8, "X")).message(),
+            "IMPORT `f` failed validation: type spelling exceeds maximum generic depth of 8: `X`"
         );
         assert_eq!(
             import_stateful_harvest("f", "g").message(),

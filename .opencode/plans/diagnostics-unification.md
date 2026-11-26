@@ -3090,6 +3090,23 @@ transport, so this phase is mechanical:
    message pins added (windows pins cfg-gated, mirroring
    shell_temp_missing_parent). cli 50 plus 12 green;
    clippy zero; fmt clean.
+   core import-validation normalization 2026-11-27
+   (diagnostics.rs ctor plus import.rs 3 sites): by-value
+   Diagnostic, mirroring the eval_arg_expand_failed
+   precedent. Safe because validate_import_body_types and
+   harvest_touches_module only emit the static check.* /
+   typing_* families, audited zero with_source (the 42
+   with_source call sites are all runtime eval_* plus
+   func_param_type/func_optional_param, none reachable
+   from the static checker). Key list plus exact-message
+   pin updated (typing_max_depth leaf, assert_eq proving
+   byte-identity). check_ctx_wrap stays &anyhow::Error:
+   its line-1022 inner is already Diagnostic and the
+   bare render matches, but flipping it is a separate
+   static_check-owned bulk. import_const_forward_failed
+   stays &anyhow::Error (ForwardError redesign needed).
+   core lib 410 plus 629 plus 12 plus 2 green; clippy
+   pre-existing baseline only; fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
