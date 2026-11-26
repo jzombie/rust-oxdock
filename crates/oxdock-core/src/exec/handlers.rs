@@ -1980,7 +1980,11 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 if hay.contains(needle_str.as_str()) {
                     return Ok(());
                 }
-                bail!("{verb} did not contain '{}'; actual: {:?}", needle_str, hay);
+                return Err(anyhow::Error::new(diag::eval_assert_contains_str_mismatch(
+                    verb,
+                    &needle_str,
+                    hay,
+                )));
             }
             if let Some(items) = v.as_list() {
                 if items
@@ -1989,18 +1993,22 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 {
                     return Ok(());
                 }
-                bail!("{verb} did not contain '{}'; actual: {:?}", needle_str, v);
+                return Err(anyhow::Error::new(
+                    diag::eval_assert_contains_value_mismatch(verb, &needle_str, v),
+                ));
             }
             if let Some(map) = v.as_map() {
                 if map.contains_key(needle_str.as_str()) {
                     return Ok(());
                 }
-                bail!("{verb} did not contain '{}'", needle_str);
+                return Err(anyhow::Error::new(diag::eval_assert_contains_missing(
+                    verb,
+                    &needle_str,
+                )));
             }
-            bail!(
-                "{verb} needs a string, list, or map haystack, found {:?}",
-                v
-            );
+            Err(anyhow::Error::new(
+                diag::eval_assert_contains_needs_haystack(verb, v),
+            ))
         }
         ResolvedAssertTarget::Stdout => {
             // Mode 1: piped stdin is consumed through a local window and
@@ -2031,11 +2039,9 @@ pub(super) fn assert_contains<P: ProcessManager>(
                         return Ok(());
                     }
                     let emitted = String::from_utf8_lossy(&window.ring_buffer()).into_owned();
-                    bail!(
-                        "{verb} did not contain '{}'; emitted:\n{}",
-                        needle_str,
-                        emitted.trim_end()
-                    );
+                    return Err(anyhow::Error::new(
+                        diag::eval_assert_contains_emitted_mismatch(verb, &needle_str, &emitted),
+                    ));
                 }
             }
             // Mode 2: pre-registered stdout window for this step.
@@ -2046,13 +2052,14 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 Some(w) if w.matched => Ok(()),
                 Some(w) => {
                     let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
-                    bail!(
-                        "{verb} did not contain '{}'; emitted:\n{}",
-                        needle_str,
-                        emitted.trim_end()
-                    )
+                    Err(anyhow::Error::new(
+                        diag::eval_assert_contains_emitted_mismatch(verb, &needle_str, &emitted),
+                    ))
                 }
-                _ => bail!("{verb} did not contain '{}'", needle_str),
+                _ => Err(anyhow::Error::new(diag::eval_assert_contains_missing(
+                    verb,
+                    &needle_str,
+                ))),
             }
         }
         ResolvedAssertTarget::Stderr => {
@@ -2065,13 +2072,14 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 Some(w) if w.matched => Ok(()),
                 Some(w) => {
                     let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
-                    bail!(
-                        "{verb} did not contain '{}'; emitted:\n{}",
-                        needle_str,
-                        emitted.trim_end()
-                    )
+                    Err(anyhow::Error::new(
+                        diag::eval_assert_contains_emitted_mismatch(verb, &needle_str, &emitted),
+                    ))
                 }
-                _ => bail!("{verb} did not contain '{}'", needle_str),
+                _ => Err(anyhow::Error::new(diag::eval_assert_contains_missing(
+                    verb,
+                    &needle_str,
+                ))),
             }
         }
         ResolvedAssertTarget::Pipe(bytes) => {
@@ -2080,11 +2088,9 @@ pub(super) fn assert_contains<P: ProcessManager>(
             if hay.contains(needle_str.as_str()) {
                 Ok(())
             } else {
-                bail!(
-                    "{verb} did not contain '{}'; pipe held {:?}",
-                    needle_str,
-                    hay
-                );
+                Err(anyhow::Error::new(
+                    diag::eval_assert_contains_pipe_mismatch(verb, &needle_str, &hay),
+                ))
             }
         }
     }

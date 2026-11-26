@@ -1777,6 +1777,90 @@ pub fn eval_assert_pipe_unexpected_equal(verb: &str, expected: &str) -> Diagnost
     )
 }
 
+/// Containment mismatch over a string haystack. Takes the invoking
+/// verb, the needle, and the haystack text; `Debug` rendering of
+/// the haystack lives here.
+pub fn eval_assert_contains_str_mismatch(verb: &str, needle: &str, actual: &str) -> Diagnostic {
+    let message = format!("{verb} did not contain '{needle}'; actual: {actual:?}");
+    Diagnostic::new(
+        "dsl.eval.assert_contains_str_mismatch",
+        message,
+        Diagnostic::make_fields(&[("verb", verb), ("needle", needle), ("actual", actual)]),
+    )
+}
+
+/// Containment mismatch over a non-string value (list or the
+/// whole value). Takes the invoking verb, the needle, and the
+/// offending value; `Debug` rendering of the value lives here.
+pub fn eval_assert_contains_value_mismatch(
+    verb: &str,
+    needle: &str,
+    actual: &super::Value,
+) -> Diagnostic {
+    let message = format!("{verb} did not contain '{needle}'; actual: {actual:?}");
+    Diagnostic::new(
+        "dsl.eval.assert_contains_value_mismatch",
+        message,
+        Diagnostic::make_fields(&[
+            ("verb", verb),
+            ("needle", needle),
+            ("actual", &format!("{actual:?}")),
+        ]),
+    )
+}
+
+/// Containment miss with no emitted detail (map key miss, missing
+/// window). Takes the invoking verb and the needle.
+pub fn eval_assert_contains_missing(verb: &str, needle: &str) -> Diagnostic {
+    let message = format!("{verb} did not contain '{needle}'");
+    Diagnostic::new(
+        "dsl.eval.assert_contains_missing",
+        message,
+        Diagnostic::make_fields(&[("verb", verb), ("needle", needle)]),
+    )
+}
+
+/// Containment over a non-string/list/map haystack. Takes the
+/// invoking verb and the offending value; `Debug` rendering lives
+/// here.
+pub fn eval_assert_contains_needs_haystack(verb: &str, actual: &super::Value) -> Diagnostic {
+    let message = format!("{verb} needs a string, list, or map haystack, found {actual:?}");
+    Diagnostic::new(
+        "dsl.eval.assert_contains_needs_haystack",
+        message,
+        Diagnostic::make_fields(&[("verb", verb), ("actual", &format!("{actual:?}"))]),
+    )
+}
+
+/// Containment mismatch with emitted window detail. Takes the
+/// invoking verb, the needle, and the emitted buffer; trimming
+/// lives here so all three call sites share one wording.
+pub fn eval_assert_contains_emitted_mismatch(
+    verb: &str,
+    needle: &str,
+    emitted: &str,
+) -> Diagnostic {
+    let trimmed = emitted.trim_end();
+    let message = format!("{verb} did not contain '{needle}'; emitted:\n{trimmed}");
+    Diagnostic::new(
+        "dsl.eval.assert_contains_emitted_mismatch",
+        message,
+        Diagnostic::make_fields(&[("verb", verb), ("needle", needle), ("emitted", trimmed)]),
+    )
+}
+
+/// Containment mismatch over a pipe buffer. Takes the invoking verb,
+/// the needle, and the pipe text; `Debug` rendering of the pipe
+/// text lives here.
+pub fn eval_assert_contains_pipe_mismatch(verb: &str, needle: &str, hay: &str) -> Diagnostic {
+    let message = format!("{verb} did not contain '{needle}'; pipe held {hay:?}");
+    Diagnostic::new(
+        "dsl.eval.assert_contains_pipe_mismatch",
+        message,
+        Diagnostic::make_fields(&[("verb", verb), ("needle", needle), ("hay", hay)]),
+    )
+}
+
 /// `int`-typed argument whose resolution failed. Takes the underlying
 /// failure verbatim: its message already names the argument and the
 /// cause, so no wrapper is added.
@@ -4543,6 +4627,21 @@ mod tests {
             eval_assert_pipe_mismatch("ASSERT_EQ", None, "a").key(),
             eval_assert_pipe_mismatch_text("ASSERT_EQ", "a", "b").key(),
             eval_assert_pipe_unexpected_equal("ASSERT_NE", "a").key(),
+            eval_assert_contains_str_mismatch("ASSERT_CONTAINS", "n", "h").key(),
+            eval_assert_contains_value_mismatch(
+                "ASSERT_CONTAINS",
+                "n",
+                &crate::Value::string("x".to_string()),
+            )
+            .key(),
+            eval_assert_contains_missing("ASSERT_CONTAINS", "n").key(),
+            eval_assert_contains_needs_haystack(
+                "ASSERT_CONTAINS",
+                &crate::Value::string("x".to_string()),
+            )
+            .key(),
+            eval_assert_contains_emitted_mismatch("ASSERT_CONTAINS", "n", "e").key(),
+            eval_assert_contains_pipe_mismatch("ASSERT_CONTAINS", "n", "h").key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -4918,6 +5017,22 @@ mod tests {
         assert_eq!(
             eval_assert_pipe_unexpected_equal("ASSERT_NE", "a").message(),
             "ASSERT_NE pipe unexpectedly equal: \"a\""
+        );
+        assert_eq!(
+            eval_assert_contains_str_mismatch("ASSERT_CONTAINS", "n", "h").message(),
+            "ASSERT_CONTAINS did not contain 'n'; actual: \"h\""
+        );
+        assert_eq!(
+            eval_assert_contains_missing("ASSERT_CONTAINS", "n").message(),
+            "ASSERT_CONTAINS did not contain 'n'"
+        );
+        assert_eq!(
+            eval_assert_contains_emitted_mismatch("ASSERT_CONTAINS", "n", "e  ").message(),
+            "ASSERT_CONTAINS did not contain 'n'; emitted:\ne"
+        );
+        assert_eq!(
+            eval_assert_contains_pipe_mismatch("ASSERT_CONTAINS", "n", "h").message(),
+            "ASSERT_CONTAINS did not contain 'n'; pipe held \"h\""
         );
         assert!(
             eval_async_exit_status(None, &exit_status_sample())
