@@ -4983,8 +4983,9 @@ pub fn import_export_type_mismatch(path: &str, name: &str) -> Diagnostic {
 }
 
 /// Static variable declaration type resolution failure. Takes the
-/// variable name and the underlying failure.
-pub fn check_var_tag(var: &str, reason: &anyhow::Error) -> Diagnostic {
+/// variable name and the underlying failure. By value: same
+/// sourceless-leaf guarantee as [`check_func_tag`].
+pub fn check_var_tag(var: &str, reason: Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("variable `${var}`: {reason_text}");
     Diagnostic::new(
@@ -4995,8 +4996,10 @@ pub fn check_var_tag(var: &str, reason: &anyhow::Error) -> Diagnostic {
 }
 
 /// Static function tag resolution failure. Takes the function name
-/// and the underlying failure.
-pub fn check_func_tag(name: &str, reason: &anyhow::Error) -> Diagnostic {
+/// and the underlying failure. By value: tag failures are
+/// sourceless typing leaves, so the bare render matches the
+/// retired anyhow-chain bytes exactly.
+pub fn check_func_tag(name: &str, reason: Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("function `{name}`: {reason_text}");
     Diagnostic::new(
@@ -5008,7 +5011,8 @@ pub fn check_func_tag(name: &str, reason: &anyhow::Error) -> Diagnostic {
 
 /// Static step-attributed passthrough. Takes the 1-based step number
 /// and the underlying failure; the `step N` prefix lives here.
-pub fn check_step_wrap(step: usize, reason: &anyhow::Error) -> Diagnostic {
+/// By value: same sourceless-leaf guarantee as [`check_func_tag`].
+pub fn check_step_wrap(step: usize, reason: Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("step {step}: {reason_text}");
     Diagnostic::new(
@@ -6326,9 +6330,9 @@ mod tests {
             import_const_forward_failed(&anyhow::anyhow!("x")).key(),
             import_not_in_closure("f").key(),
             import_export_type_mismatch("f", "T").key(),
-            check_var_tag("v", &anyhow::anyhow!("x")).key(),
-            check_func_tag("f", &anyhow::anyhow!("x")).key(),
-            check_step_wrap(3, &anyhow::anyhow!("x")).key(),
+            check_var_tag("v", typing_max_depth(8, "X")).key(),
+            check_func_tag("f", typing_max_depth(8, "X")).key(),
+            check_step_wrap(3, typing_max_depth(8, "X")).key(),
             check_ctx_wrap("ctx", &anyhow::anyhow!("x")).key(),
             check_exact_mismatch("ctx", &TypeTag::Int, &TypeTag::String).key(),
             check_cannot_unify("ctx", &TypeTag::Int, &TypeTag::String).key(),
@@ -8125,16 +8129,16 @@ mod tests {
             "IMPORT `f` EXPORT TYPE `T` does not match any top-level TYPE in that file"
         );
         assert_eq!(
-            check_var_tag("v", &anyhow::anyhow!("boom")).message(),
-            "variable `$v`: boom"
+            check_var_tag("v", typing_max_depth(8, "X")).message(),
+            "variable `$v`: type spelling exceeds maximum generic depth of 8: `X`"
         );
         assert_eq!(
-            check_func_tag("F", &anyhow::anyhow!("boom")).message(),
-            "function `F`: boom"
+            check_func_tag("F", typing_max_depth(8, "X")).message(),
+            "function `F`: type spelling exceeds maximum generic depth of 8: `X`"
         );
         assert_eq!(
-            check_step_wrap(3, &anyhow::anyhow!("boom")).message(),
-            "step 3: boom"
+            check_step_wrap(3, typing_max_depth(8, "X")).message(),
+            "step 3: type spelling exceeds maximum generic depth of 8: `X`"
         );
         assert_eq!(
             check_ctx_wrap("ctx", &anyhow::anyhow!("boom")).message(),

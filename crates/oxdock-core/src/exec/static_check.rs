@@ -607,7 +607,7 @@ fn module_lets_indexed<P: ProcessManager>(
             } => {
                 let tag = exec
                     .resolve_tag(decl_type)
-                    .map_err(|err| check_diag::check_var_tag(var, &anyhow::Error::new(err)))?;
+                    .map_err(|err| check_diag::check_var_tag(var, err))?;
                 out.push((
                     GuardedLet {
                         name: clean_var(var),
@@ -2951,10 +2951,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let declared = self
             .exec
             .resolve_tag(return_type)
-            .map_err(|err| check_diag::check_func_tag(name, &anyhow::Error::new(err)))?;
+            .map_err(|err| check_diag::check_func_tag(name, err))?;
         self.exec
             .check_return_tag(&format!("function `{name}` returns"), &declared)
-            .map_err(|err| check_diag::check_func_tag(name, &anyhow::Error::new(err)))?;
+            .map_err(|err| check_diag::check_func_tag(name, err))?;
         Ok(FuncInfo {
             params: resolved,
             declared,
@@ -3984,16 +3984,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 body,
             } => {
                 self.infer_expr(in_expr, env, scope, idx, depth + 1)?;
-                let val_tag = self.exec.resolve_tag(var_type).map_err(|err| {
-                    check_diag::check_step_wrap(idx + 1, &anyhow::Error::new(err))
-                })?;
+                let val_tag = self
+                    .exec
+                    .resolve_tag(var_type)
+                    .map_err(|err| check_diag::check_step_wrap(idx + 1, err))?;
                 let mut fork = env.fork();
                 fork.insert_top(clean_var(var), val_tag, step.guard.as_ref());
                 if let Some(key) = key_var {
                     let key_tag = match key_type {
-                        Some(name) => self.exec.resolve_tag(name).map_err(|err| {
-                            check_diag::check_step_wrap(idx + 1, &anyhow::Error::new(err))
-                        })?,
+                        Some(name) => self
+                            .exec
+                            .resolve_tag(name)
+                            .map_err(|err| check_diag::check_step_wrap(idx + 1, err))?,
                         None => TypeTag::Int,
                     };
                     fork.insert_top(clean_var(key), key_tag, step.guard.as_ref());
@@ -4031,10 +4033,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let declared = self
                     .exec
                     .resolve_tag(return_type)
-                    .map_err(|err| check_diag::check_func_tag(name, &anyhow::Error::new(err)))?;
+                    .map_err(|err| check_diag::check_func_tag(name, err))?;
                 self.exec
                     .check_return_tag(&format!("function `{name}` returns"), &declared)
-                    .map_err(|err| check_diag::check_func_tag(name, &anyhow::Error::new(err)))?;
+                    .map_err(|err| check_diag::check_func_tag(name, err))?;
                 let info = FuncInfo {
                     params: resolved,
                     declared,
@@ -4073,9 +4075,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // `ASYNC` reports HANDLE-headed before VOID position,
                 // matching the historical per-form order. No per-form
                 // restatement of the tag gate or the const branch.
-                let tag = self.exec.resolve_tag(decl_type).map_err(|err| {
-                    check_diag::check_step_wrap(idx + 1, &anyhow::Error::new(err))
-                })?;
+                let tag = self
+                    .exec
+                    .resolve_tag(decl_type)
+                    .map_err(|err| check_diag::check_step_wrap(idx + 1, err))?;
                 match rhs {
                     oxdock_parser::BindRhs::Expr(expr) => {
                         self.check_plain_rhs(expr, env, scope, idx, depth, var)?;
@@ -4094,9 +4097,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 self.exec
                     .check_declaration_tag(&format!("step {}", idx + 1), &tag)
-                    .map_err(|err| {
-                        check_diag::check_step_wrap(idx + 1, &anyhow::Error::new(err))
-                    })?;
+                    .map_err(|err| check_diag::check_step_wrap(idx + 1, err))?;
                 let key = clean_var(var);
                 if *is_const {
                     env.declare_const(key, tag, step.guard.as_ref(), idx)?;

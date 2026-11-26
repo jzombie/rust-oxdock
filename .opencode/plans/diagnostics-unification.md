@@ -3012,6 +3012,24 @@ transport, so this phase is mechanical:
    core lib 410 plus integration 629 plus 12 plus 2 green;
    clippy shows only the pre-existing static_check
    need_borrow baseline; fmt clean.
+   core static-tag normalization bulk 2026-11-27
+   (diagnostics.rs 3 ctors plus static_check.rs 9 sites):
+   check_var_tag plus check_func_tag plus check_step_wrap
+   normalize from reason: &anyhow::Error to reason:
+   Diagnostic by value; all 9 sites drop the
+   anyhow::Error::new round-trip. Byte-identical by
+   construction: every inner flows from resolve_tag or
+   check_return_tag/check_declaration_tag, and the whole
+   typing_* family carries zero with_source, so bare
+   {:#} equals the retired chain text. Deliberately
+   excluded: import_unknown_type site 697 (Option-shaped
+   param shared with 5 import.rs callers; belongs to the
+   import cluster) and both check_ctx_wrap sites (inners
+   are ForwardError from chase_const_forward, not
+   Diagnostic; needs the ForwardError redesign). Pins
+   swap anyhow boom for typing_max_depth leaf with full
+   message text. core lib 410 plus 629 plus 12 plus 2
+   green; clippy pre-existing baseline only; fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
