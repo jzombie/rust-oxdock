@@ -15,6 +15,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - Engine, parser, CLI, build, MCP, and plugin error sites construct their messages through the keyed constructors (#168). Passthrough chains stay byte-identical; direct diagnostic messages use normalized wording (keyword/type constants, backtick-quoted names, no trailing punctuation). Signature migration to `DiagnosticResult` is tracked as a follow-up via #350; `oxdock-fs` keeps its literals.
 
+### Dependencies
+
+- Bump `regex` 1.13.1 → 1.13.2 (#346).
+- Bump `anyhow` 1.0.104 → 1.0.105 (#347).
+- Bump `bytes` 1.12.1 → 1.12.2 (#348).
+- Bump `russh` 0.65.2 → 0.65.4 (#349).
+
 ## [0.44.1-alpha] - 2026-11-23
 
 ### Changed
