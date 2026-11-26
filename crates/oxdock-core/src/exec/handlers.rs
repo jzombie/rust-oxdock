@@ -14,11 +14,11 @@ use oxdock_fs::command_path;
 use oxdock_fs::to_forward_slashes;
 use oxdock_parser::constants::KEYWORD_RUN;
 use oxdock_parser::constants::{
-    KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASYNC, KEYWORD_AWAIT,
-    KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_EXPAND, KEYWORD_FOR,
-    KEYWORD_FUNC, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND,
-    KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOVE, KEYWORD_RETURN,
-    KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WRITE,
+    KEYWORD_APPEND, KEYWORD_ARCHIVE, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL,
+    KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_EXPAND, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_INSTALL,
+    KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_PROMPT, KEYWORD_READ,
+    KEYWORD_READ_LINE, KEYWORD_RETURN, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE,
+    KEYWORD_WITH_IO, KEYWORD_WRITE,
 };
 use oxdock_parser::{
     Arg, Command, Expr, IoBinding, IoStream, MAP_TYPE_NAME, PIPE_TYPE_NAME, PipeTarget,
@@ -4295,17 +4295,21 @@ pub(super) fn append_line<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("{KEYWORD_APPEND_LINE} {path}"))?;
-    cx.state
-        .fs
-        .ensure_parent_dir(&target)
-        .with_context(|| format!("failed to create parent for {}", target.display()))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_append_line_resolve_failed(path, &e)))?;
+    cx.state.fs.ensure_parent_dir(&target).map_err(|e| {
+        anyhow::Error::new(diag::eval_ensure_parent_failed(
+            &target.display().to_string(),
+            &e,
+        ))
+    })?;
     let mut line = contents.to_string();
     line.push('\n');
     cx.state
         .fs
         .append_file(&target, line.as_bytes())
-        .with_context(|| format!("failed to append to {}", target.display()))?;
+        .map_err(|e| {
+            anyhow::Error::new(diag::eval_append_failed(&target.display().to_string(), &e))
+        })?;
     Ok(())
 }
 
@@ -4323,7 +4327,7 @@ pub(super) fn remove<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cwd, path)
-        .with_context(|| format!("{KEYWORD_REMOVE} {path}"))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_remove_failed(path, &e)))?;
     // Root and working-directory deletion guard: removing the cwd (or any
     // of its ancestors), the workspace root, or the effective root (`/`
     // under `WORKSPACE SYSTEM`) would destroy the execution context or
@@ -4342,7 +4346,7 @@ pub(super) fn remove<P: ProcessManager>(
         || Some(&target) == cx.state.fs.workspace_root()
         || target == *cx.state.fs.root()
     {
-        bail!("{KEYWORD_REMOVE} {path}: cannot remove working directory or workspace root",);
+        return Err(anyhow::Error::new(diag::eval_remove_protected(path)));
     }
     // Lexical link probe: canonical resolution routes through the
     // final link, so a link would otherwise read as its target and the
@@ -4351,32 +4355,32 @@ pub(super) fn remove<P: ProcessManager>(
         .state
         .fs
         .remove_link_if_symlink(&cwd, path)
-        .with_context(|| format!("{KEYWORD_REMOVE} {path}"))?
+        .map_err(|e| anyhow::Error::new(diag::eval_remove_failed(path, &e)))?
     {
         return Ok(());
     }
     match cx.state.fs.entry_kind_no_follow(&target) {
-        Err(_) => bail!("{KEYWORD_REMOVE} {path}: no such file or directory"),
+        Err(_) => Err(anyhow::Error::new(diag::eval_remove_missing(path))),
         Ok(EntryKind::File) => {
             cx.state
                 .fs
                 .remove_file(&target)
-                .with_context(|| format!("{KEYWORD_REMOVE} {path}"))?;
+                .map_err(|e| anyhow::Error::new(diag::eval_remove_failed(path, &e)))?;
             Ok(())
         }
         // A link reaching here appeared between the probe and the
         // resolve: fail closed rather than touch its target.
-        Ok(EntryKind::Symlink) => bail!("{KEYWORD_REMOVE} {path}: link changed during removal",),
+        Ok(EntryKind::Symlink) => Err(anyhow::Error::new(diag::eval_remove_link_changed(path))),
         Ok(EntryKind::Dir) => {
             if recursive {
                 cx.state
                     .fs
                     .remove_dir_all(&target)
-                    .with_context(|| format!("{KEYWORD_REMOVE} {path}"))?;
+                    .map_err(|e| anyhow::Error::new(diag::eval_remove_failed(path, &e)))?;
                 Ok(())
             } else {
-                cx.state.fs.remove_empty_dir(&target).with_context(|| {
-                    format!("{KEYWORD_REMOVE} {path}: directory not empty (use --recursive)",)
+                cx.state.fs.remove_empty_dir(&target).map_err(|e| {
+                    anyhow::Error::new(diag::eval_remove_not_empty_failed(path, &e))
                 })?;
                 Ok(())
             }

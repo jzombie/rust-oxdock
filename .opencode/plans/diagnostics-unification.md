@@ -2233,6 +2233,28 @@ transport, so this phase is mechanical:
    Bytes identical. Core 410 plus integration 629
    green; clippy at baseline (3 pre-existing), fmt
    clean on both touched files.
+   APPEND_LINE/REMOVE bulk step 2026-11-27
+   (file-sized batch): six new dsl.eval.* ctors
+   with key plus wording pins
+   (append_line_resolve_failed with path; the
+   append_line write plus parent sites reuse
+   eval_append_failed plus eval_ensure_parent_failed;
+   remove_failed with path, one key covering all four
+   transport sites with identical outer text;
+   remove_protected, remove_missing, and
+   remove_link_changed with path and no source for the
+   fail-closed validation arms; remove_not_empty_failed
+   with path for the recursive hint). Eleven sites
+   re-keyed across append_line/remove via map_err plus
+   anyhow Error new (non-tail bails become explicit
+   return Err; tail-position match arms use bare Err
+   tails for needless_return, keeping clippy at
+   baseline). Unused KEYWORD_APPEND_LINE plus
+   KEYWORD_REMOVE imports dropped from handlers.
+   Bytes identical (workspace-root guard pin passes).
+   Core 410 plus integration 629 green; clippy at
+   baseline (3 pre-existing), fmt clean on both
+   touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

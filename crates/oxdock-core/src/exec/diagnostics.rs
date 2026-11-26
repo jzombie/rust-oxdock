@@ -10,14 +10,14 @@ use oxdock_diagnostics::Diagnostic;
 use oxdock_parser::template::{bare_sigil_error, qualified_keypath_error};
 use oxdock_parser::{
     ANY_TYPE_NAME, BOOL_TYPE_NAME, Expr, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
-    KEYWORD_APPEND, KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
-    KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT, KEYWORD_ENV, KEYWORD_EXPORT,
-    KEYWORD_FUNC, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED, KEYWORD_LET,
-    KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_READ, KEYWORD_READ_LINE,
-    KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP,
-    KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TYPE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE,
-    LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME,
-    STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
+    KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT,
+    KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT, KEYWORD_ENV,
+    KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED,
+    KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_READ, KEYWORD_READ_LINE,
+    KEYWORD_REMOTE, KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE,
+    KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TYPE, KEYWORD_WITH_IO, KEYWORD_WORKDIR,
+    KEYWORD_WRITE, LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME,
+    SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
 };
 
 use super::function_names::{
@@ -2537,6 +2537,85 @@ pub fn eval_append_open_failed(display: &str, reason: &anyhow::Error) -> Diagnos
         "dsl.eval.append_open_failed",
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `APPEND_LINE` destination-resolution failure. Takes the script
+/// spelling and the underlying failure. The write itself reuses
+/// `eval_append_failed` and the parent step reuses
+/// `eval_ensure_parent_failed`, so this is the only new wording.
+pub fn eval_append_line_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_APPEND_LINE} {path}");
+    Diagnostic::new(
+        "dsl.eval.append_line_resolve_failed",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `REMOVE` transport failure (resolve, link probe, file removal, or
+/// recursive removal). Takes the script spelling and the underlying
+/// failure; one key covers all four sites since the outer text is
+/// identical.
+pub fn eval_remove_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_REMOVE} {path}");
+    Diagnostic::new(
+        "dsl.eval.remove_failed",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `REMOVE` against the working directory or a root. Takes the
+/// script spelling; the guard fails closed before any driver runs,
+/// so no source rides along.
+pub fn eval_remove_protected(path: &str) -> Diagnostic {
+    let message =
+        format!("{KEYWORD_REMOVE} {path}: cannot remove working directory or workspace root");
+    Diagnostic::new(
+        "dsl.eval.remove_protected",
+        message,
+        Diagnostic::make_fields(&[("path", path)]),
+    )
+}
+
+/// `REMOVE` of a missing path. Takes the script spelling; the probe
+/// error is discarded at the call site, so no source rides along.
+pub fn eval_remove_missing(path: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_REMOVE} {path}: no such file or directory");
+    Diagnostic::new(
+        "dsl.eval.remove_missing",
+        message,
+        Diagnostic::make_fields(&[("path", path)]),
+    )
+}
+
+/// `REMOVE` where a link appeared between probe and resolve. Takes
+/// the script spelling; fail-closed validation, so no source.
+pub fn eval_remove_link_changed(path: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_REMOVE} {path}: link changed during removal");
+    Diagnostic::new(
+        "dsl.eval.remove_link_changed",
+        message,
+        Diagnostic::make_fields(&[("path", path)]),
+    )
+}
+
+/// `REMOVE` of a non-empty directory without `--recursive`. Takes the
+/// script spelling and the underlying failure. Bare outer context
+/// plus chained source.
+pub fn eval_remove_not_empty_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_REMOVE} {path}: directory not empty (use --recursive)");
+    Diagnostic::new(
+        "dsl.eval.remove_not_empty_failed",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
     )
     .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
 }
@@ -5372,6 +5451,12 @@ mod tests {
             eval_append_failed("p", &anyhow::anyhow!("x")).key(),
             eval_append_needs_stdin("p").key(),
             eval_append_open_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_append_line_resolve_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_remove_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_remove_protected("p").key(),
+            eval_remove_missing("p").key(),
+            eval_remove_link_changed("p").key(),
+            eval_remove_not_empty_failed("p", &anyhow::anyhow!("x")).key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -5962,6 +6047,30 @@ mod tests {
         assert_eq!(
             eval_append_open_failed("/x", &anyhow::anyhow!("boom")).message(),
             "failed to open /x for appending"
+        );
+        assert_eq!(
+            eval_append_line_resolve_failed("f", &anyhow::anyhow!("boom")).message(),
+            "APPEND_LINE f"
+        );
+        assert_eq!(
+            eval_remove_failed("f", &anyhow::anyhow!("boom")).message(),
+            "REMOVE f"
+        );
+        assert_eq!(
+            eval_remove_protected("f").message(),
+            "REMOVE f: cannot remove working directory or workspace root"
+        );
+        assert_eq!(
+            eval_remove_missing("f").message(),
+            "REMOVE f: no such file or directory"
+        );
+        assert_eq!(
+            eval_remove_link_changed("f").message(),
+            "REMOVE f: link changed during removal"
+        );
+        assert_eq!(
+            eval_remove_not_empty_failed("f", &anyhow::anyhow!("boom")).message(),
+            "REMOVE f: directory not empty (use --recursive)"
         );
         assert!(
             eval_run_exit_status("echo hi", &exit_status_sample())
