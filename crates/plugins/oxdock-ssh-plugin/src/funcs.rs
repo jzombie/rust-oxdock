@@ -330,7 +330,10 @@ fn ssh_serve<P: ProcessManager>(
         AcquiredListener::Memory => {
             // Unreachable: `SocketRequired` already bailed; same text.
             drop(shutdown_rx);
-            return Err(no_cli_mapping("SSH_SERVE", &key.endpoint));
+            return Err(anyhow::Error::from(no_cli_mapping(
+                "SSH_SERVE",
+                &key.endpoint,
+            )));
         }
         AcquiredListener::Offline => {
             // No thread: dropping the receiver makes shutdown a no-op.
@@ -666,7 +669,10 @@ fn ssh_connect<P: ProcessManager>(
         ServiceTarget::Tcp(addr) => addr,
         // Unreachable: the shared resolver already bailed; same text.
         ServiceTarget::Memory => {
-            return Err(no_cli_mapping("SSH_CONNECT", &key.endpoint));
+            return Err(anyhow::Error::from(no_cli_mapping(
+                "SSH_CONNECT",
+                &key.endpoint,
+            )));
         }
     };
     let runtime = connect_runtime()?;
@@ -1055,7 +1061,10 @@ fn ssh_exec<P: ProcessManager>(
         ServiceTarget::Tcp(addr) => addr,
         // Unreachable: the shared resolver already bailed; same text.
         ServiceTarget::Memory => {
-            return Err(no_cli_mapping("SSH_EXEC", &key.endpoint));
+            return Err(anyhow::Error::from(no_cli_mapping(
+                "SSH_EXEC",
+                &key.endpoint,
+            )));
         }
     };
     let timeout = match options.get(OPT_TIMEOUT) {

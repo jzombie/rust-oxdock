@@ -2773,6 +2773,32 @@ transport, so this phase is mechanical:
    funcs.rs NET_FETCH caller stays anyhow by design and
    holds via blanket From. net lib 38 plus net integration
    38 green; net clippy zero, fmt clean on both files.
+   endpoints bulk 2026-11-27 (net endpoints.rs plus net
+   diagnostics plus ssh funcs.rs, 7 new net.endpoint.*
+   ctors): bind_reusable plus add_cli_mapping plus
+   add_mapping plus bind_all plus resolve_endpoint plus
+   claim plus enqueue_memory_session plus acquire_listener
+   plus resolve_service_target flip to DiagnosticResult; the
+   anyhow::Error::new shim (no_cli_mapping) deletes and every
+   with_context layer drops; anyhow import drops from
+   endpoints.rs (now anyhow-free). New ctors follow the net
+   inline family (reason text in the outer message, never
+   with_source): bind_socket_failed plus bind_reuse_flag_failed
+   plus bind_failed plus listen_failed (concrete
+   &std::io::Error, one key per operation), bind_virtual_failed
+   (by-value Diagnostic so {:#} renders byte-identical to the
+   retired bind_all context layer), cli_mapping_needs_host_port
+   (concrete &AddrParseError), claim_bound_address_failed
+   (concrete &std::io::Error). Test pins added to the
+   key-uniqueness plus canonical-wording tests. lib.rs keeps
+   the no_cli_mapping path via a diagnostics re-export so the
+   three ssh defensive arms keep compiling; their
+   return-Err sites wrap with anyhow::Error::from (ssh funcs
+   stay anyhow by design). Net plus CLI plus SSH callers hold
+   via blanket From (? auto-converts). net lib 38 plus net
+   integration 38 plus cli lib 49 plus ssh lib 13 plus ssh
+   integration 68 green; net plus ssh clippy zero on touched
+   files, fmt clean on three files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

@@ -26,8 +26,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use anyhow::{Context, Result};
-
 use crate::diagnostics as net_diag;
 use oxdock_core::PreRunCheck;
 use oxdock_diagnostics::DiagnosticResult;
@@ -46,22 +44,22 @@ pub const MEMORY_QUEUE_CAP: usize = 64;
 /// the old FD drains instead of flaking `EADDRINUSE`. No `SO_REUSEPORT`,
 /// so a live listener still blocks a second claim (the double-claim
 /// refusal test pins that).
-fn bind_reusable(addr: SocketAddr) -> Result<TcpListener> {
+fn bind_reusable(addr: SocketAddr) -> DiagnosticResult<TcpListener> {
     let domain = match addr {
         SocketAddr::V4(_) => socket2::Domain::IPV4,
         SocketAddr::V6(_) => socket2::Domain::IPV6,
     };
     let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))
-        .with_context(|| format!("NET socket for {addr} failed"))?;
+        .map_err(|err| net_diag::bind_socket_failed(&addr, &err))?;
     socket
         .set_reuse_address(true)
-        .with_context(|| format!("NET reuse flag for {addr} failed"))?;
+        .map_err(|err| net_diag::bind_reuse_flag_failed(&addr, &err))?;
     socket
         .bind(&addr.into())
-        .with_context(|| format!("NET bind {addr} failed"))?;
+        .map_err(|err| net_diag::bind_failed(&addr, &err))?;
     socket
         .listen(128)
-        .with_context(|| format!("NET listen {addr} failed"))?;
+        .map_err(|err| net_diag::listen_failed(&addr, &err))?;
     Ok(socket.into())
 }
 
@@ -160,11 +158,10 @@ pub enum ServiceTarget {
 }
 
 /// The one CLI-mapping bail text. Both plugins, serve and dial: the
-/// wording lives in this function and nowhere else. Exported so the SSH
-/// defensive arms report it without restating it.
-pub fn no_cli_mapping(func: &str, endpoint: &VirtualEndpoint) -> anyhow::Error {
-    anyhow::Error::new(net_diag::no_cli_mapping(func, endpoint))
-}
+/// wording lives in [`net_diag::no_cli_mapping`] and nowhere else.
+/// This re-export keeps the historical path working for the SSH
+/// defensive arms; new code prefers the diagnostics module directly.
+pub use crate::diagnostics::no_cli_mapping;
 
 struct ListenerSlot {
     spec: BindingSpec,
@@ -215,10 +212,10 @@ impl EndpointRegistry {
     /// semantics without flag parsing): the single constructor test
     /// harnesses use to pre-map services to ephemeral loopback before
     /// running scripts. The runner binds, the script declares.
-    pub fn add_cli_mapping(&self, service: &str, addr: &str) -> Result<()> {
-        let addr: SocketAddr = addr.parse().with_context(|| {
-            format!("CLI mapping for '{service}' needs a host:port address, got {addr:?}")
-        })?;
+    pub fn add_cli_mapping(&self, service: &str, addr: &str) -> DiagnosticResult<()> {
+        let addr: SocketAddr = addr
+            .parse()
+            .map_err(|err| net_diag::cli_mapping_needs_host_port(service, addr, &err))?;
         self.add_mapping(
             &EndpointKey::tcp(VirtualEndpoint::Name(service.to_string())),
             BindingSpec::Exposed { addr },
@@ -245,10 +242,10 @@ impl EndpointRegistry {
     /// Map one virtual endpoint to its physical spec. Duplicate keys bail:
     /// the CLI rejects them at flag parse time, so a dup here is an
     /// internal wiring bug.
-    pub fn add_mapping(&self, key: &EndpointKey, spec: BindingSpec) -> Result<()> {
+    pub fn add_mapping(&self, key: &EndpointKey, spec: BindingSpec) -> DiagnosticResult<()> {
         let mut slots = self.lock_slots();
         if slots.contains_key(key) {
-            return Err(anyhow::Error::new(net_diag::duplicate_mapping(key)));
+            return Err(net_diag::duplicate_mapping(key));
         }
         slots.insert(
             key.clone(),
@@ -271,7 +268,7 @@ impl EndpointRegistry {
     /// Open every mapped TCP socket. The CLI calls this before parsing so
     /// `EADDRINUSE` fails fast, never parse-then-fail-on-bind. Offline and
     /// memory slots need no socket. Idempotent: bound slots are skipped.
-    pub fn bind_all(&self) -> Result<()> {
+    pub fn bind_all(&self) -> DiagnosticResult<()> {
         if self.offline {
             return Ok(());
         }
@@ -288,7 +285,7 @@ impl EndpointRegistry {
                 }
             };
             let listener = bind_reusable(addr)
-                .with_context(|| format!("bind {addr} for virtual '{key}' failed"))?;
+                .map_err(|err| net_diag::bind_virtual_failed(&addr, key, err))?;
             slot.socket = Some(Arc::new(listener));
             slot.persistent = true;
         }
@@ -307,9 +304,9 @@ impl EndpointRegistry {
     /// Bound address of a slot, or a `not bound` error naming `key`.
     /// Unmapped slots, never-bound TCP specs, memory rendezvous, and
     /// offline slots all report the same error: no `0`/empty sentinels.
-    pub fn resolve_endpoint(&self, key: &EndpointKey) -> Result<SocketAddr> {
+    pub fn resolve_endpoint(&self, key: &EndpointKey) -> DiagnosticResult<SocketAddr> {
         self.bound_addr(key)
-            .ok_or_else(|| anyhow::Error::new(net_diag::endpoint_not_bound(key)))
+            .ok_or_else(|| net_diag::endpoint_not_bound(key))
     }
 
     /// Resolve caller-facing endpoint text (`NET_PORT`/`NET_ADDR`): an
@@ -369,21 +366,21 @@ impl EndpointRegistry {
     /// (`already claimed`), so concurrent listeners on one service fail
     /// loudly; claim-after-release succeeds for re-bind loops. Offline
     /// registries always acquire socketless.
-    pub fn claim(&self, key: &EndpointKey, func: &str) -> Result<AcquiredListener> {
+    pub fn claim(&self, key: &EndpointKey, func: &str) -> DiagnosticResult<AcquiredListener> {
         if self.offline {
             return Ok(AcquiredListener::Offline);
         }
         let mut slots = self.lock_slots();
         let Some(slot) = slots.get_mut(key) else {
-            return Err(anyhow::Error::new(net_diag::unknown_service(func, key)));
+            return Err(net_diag::unknown_service(func, key));
         };
         if slot.claimed.swap(true, Ordering::SeqCst) {
-            return Err(anyhow::Error::new(net_diag::already_claimed(func, key)));
+            return Err(net_diag::already_claimed(func, key));
         }
         if let Some(socket) = slot.socket.as_ref() {
             let addr = socket
                 .local_addr()
-                .with_context(|| format!("{func} cannot read its bound address"))?;
+                .map_err(|err| net_diag::claim_bound_address_failed(func, &err))?;
             return Ok(AcquiredListener::Tcp {
                 listener: Arc::clone(socket),
                 addr,
@@ -394,11 +391,11 @@ impl EndpointRegistry {
             BindingSpec::Offline => Ok(AcquiredListener::Offline),
             BindingSpec::DialOnly { .. } => {
                 slot.claimed.store(false, Ordering::SeqCst);
-                Err(anyhow::Error::new(net_diag::dial_only_mapping(func, key)))
+                Err(net_diag::dial_only_mapping(func, key))
             }
             BindingSpec::Loopback { .. } | BindingSpec::Exposed { .. } => {
                 slot.claimed.store(false, Ordering::SeqCst);
-                Err(anyhow::Error::new(net_diag::never_bound(func, key)))
+                Err(net_diag::never_bound(func, key))
             }
         }
     }
@@ -461,13 +458,17 @@ impl EndpointRegistry {
     /// Queue a CONNECT-side memory pair for a later ACCEPT. Bails past
     /// [`MEMORY_QUEUE_CAP`] instead of leaking backends when no consumer
     /// accepts.
-    pub fn enqueue_memory_session(&self, key: &EndpointKey, pair: MemoryPipePair) -> Result<()> {
+    pub fn enqueue_memory_session(
+        &self,
+        key: &EndpointKey,
+        pair: MemoryPipePair,
+    ) -> DiagnosticResult<()> {
         let mut slots = self.lock_slots();
         let Some(slot) = slots.get_mut(key) else {
-            return Err(anyhow::Error::new(net_diag::connect_unknown_service(key)));
+            return Err(net_diag::connect_unknown_service(key));
         };
         if slot.memory.len() >= MEMORY_QUEUE_CAP {
-            return Err(anyhow::Error::new(net_diag::connect_queue_full(key)));
+            return Err(net_diag::connect_queue_full(key));
         }
         slot.memory.push_back(pair);
         Ok(())
@@ -617,19 +618,19 @@ pub fn acquire_listener(
     key: &EndpointKey,
     func: &str,
     sockets: SocketRequirement,
-) -> Result<(AcquiredListener, Arc<EndpointRegistry>)> {
+) -> DiagnosticResult<(AcquiredListener, Arc<EndpointRegistry>)> {
     if registry.is_offline() {
         return Ok((AcquiredListener::Offline, Arc::clone(registry)));
     }
     if !registry.has(key) {
-        return Err(no_cli_mapping(func, &key.endpoint));
+        return Err(net_diag::no_cli_mapping(func, &key.endpoint));
     }
     let (acquired, registry) = registry
         .claim(key, func)
         .map(|got| (got, Arc::clone(registry)))?;
     match (acquired, sockets) {
         (AcquiredListener::Memory, SocketRequirement::SocketRequired) => {
-            Err(no_cli_mapping(func, &key.endpoint))
+            Err(net_diag::no_cli_mapping(func, &key.endpoint))
         }
         (got, _) => Ok((got, registry)),
     }
@@ -647,19 +648,19 @@ pub fn resolve_service_target(
     key: &EndpointKey,
     func: &str,
     sockets: SocketRequirement,
-) -> Result<ServiceTarget> {
+) -> DiagnosticResult<ServiceTarget> {
     if registry.is_offline() {
-        return Err(anyhow::Error::new(net_diag::service_offline(func, key)));
+        return Err(net_diag::service_offline(func, key));
     }
     match registry.slot_kind(key) {
         SlotKind::TcpBound(addr) => Ok(ServiceTarget::Tcp(addr)),
         SlotKind::Memory => match sockets {
             SocketRequirement::SocketlessOk => Ok(ServiceTarget::Memory),
-            SocketRequirement::SocketRequired => Err(no_cli_mapping(func, &key.endpoint)),
+            SocketRequirement::SocketRequired => Err(net_diag::no_cli_mapping(func, &key.endpoint)),
         },
-        SlotKind::Unmapped => Err(no_cli_mapping(func, &key.endpoint)),
-        SlotKind::TcpUnbound => Err(anyhow::Error::new(net_diag::never_bound(func, key))),
-        SlotKind::Offline => Err(anyhow::Error::new(net_diag::service_offline(func, key))),
+        SlotKind::Unmapped => Err(net_diag::no_cli_mapping(func, &key.endpoint)),
+        SlotKind::TcpUnbound => Err(net_diag::never_bound(func, key)),
+        SlotKind::Offline => Err(net_diag::service_offline(func, key)),
     }
 }
 

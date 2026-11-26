@@ -39,6 +39,8 @@ const FIELD_REASON: &str = "reason";
 const FIELD_GUEST: &str = "guest";
 const FIELD_PATH: &str = "path";
 const FIELD_DECLARED: &str = "declared";
+const FIELD_ADDR: &str = "addr";
+const FIELD_SERVICE: &str = "service";
 
 // ---------------------------------------------------------------------------
 // Pump (`net.pump.*`, `bridge.rs`)
@@ -542,6 +544,124 @@ pub fn service_offline(func: &str, key: &EndpointKey) -> Diagnostic {
         "net.endpoint.service_offline",
         message,
         Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_KEY, key_text.as_str())]),
+    )
+}
+
+/// Socket creation failed while binding. Takes the address plus the
+/// I/O failure; rendering lives here.
+pub fn bind_socket_failed(addr: &std::net::SocketAddr, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("NET socket for {addr} failed: {err_text}");
+    Diagnostic::new(
+        "net.endpoint.bind_socket_failed",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_ADDR, addr.to_string().as_str()),
+            (FIELD_ERR, err_text.as_str()),
+        ]),
+    )
+}
+
+/// `SO_REUSEADDR` flag failed while binding. Takes the address plus
+/// the I/O failure; rendering lives here.
+pub fn bind_reuse_flag_failed(addr: &std::net::SocketAddr, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("NET reuse flag for {addr} failed: {err_text}");
+    Diagnostic::new(
+        "net.endpoint.bind_reuse_flag_failed",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_ADDR, addr.to_string().as_str()),
+            (FIELD_ERR, err_text.as_str()),
+        ]),
+    )
+}
+
+/// Bind failed. Takes the address plus the I/O failure; rendering
+/// lives here.
+pub fn bind_failed(addr: &std::net::SocketAddr, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("NET bind {addr} failed: {err_text}");
+    Diagnostic::new(
+        "net.endpoint.bind_failed",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_ADDR, addr.to_string().as_str()),
+            (FIELD_ERR, err_text.as_str()),
+        ]),
+    )
+}
+
+/// Listen failed. Takes the address plus the I/O failure; rendering
+/// lives here.
+pub fn listen_failed(addr: &std::net::SocketAddr, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("NET listen {addr} failed: {err_text}");
+    Diagnostic::new(
+        "net.endpoint.listen_failed",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_ADDR, addr.to_string().as_str()),
+            (FIELD_ERR, err_text.as_str()),
+        ]),
+    )
+}
+
+/// Bound-socket handoff failed for one virtual key. Takes the address,
+/// the key, and the underlying typed failure by value; the reason
+/// text renders inline so the chain reads byte-identical to the
+/// retired context layer.
+pub fn bind_virtual_failed(
+    addr: &std::net::SocketAddr,
+    key: &EndpointKey,
+    reason: Diagnostic,
+) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let key_text = key.to_string();
+    let message = format!("bind {addr} for virtual '{key_text}' failed: {reason_text}");
+    Diagnostic::new(
+        "net.endpoint.bind_virtual_failed",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_ADDR, addr.to_string().as_str()),
+            (FIELD_KEY, key_text.as_str()),
+            (FIELD_ERR, reason_text.as_str()),
+        ]),
+    )
+}
+
+/// CLI mapping text that is not a host:port address. Takes the
+/// service name, the raw flag text, and the parse failure;
+/// rendering lives here.
+pub fn cli_mapping_needs_host_port(
+    service: &str,
+    addr_text: &str,
+    err: &std::net::AddrParseError,
+) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!(
+        "CLI mapping for '{service}' needs a host:port address, got {addr_text:?}: {err_text}"
+    );
+    Diagnostic::new(
+        "net.endpoint.cli_mapping_needs_host_port",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_SERVICE, service),
+            (FIELD_RAW, addr_text),
+            (FIELD_ERR, err_text.as_str()),
+        ]),
+    )
+}
+
+/// Bound address unreadable at claim time. Takes the caller label
+/// plus the I/O failure; rendering lives here.
+pub fn claim_bound_address_failed(func: &str, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{func} cannot read its bound address: {err_text}");
+    Diagnostic::new(
+        "net.endpoint.claim_bound_address_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, err_text.as_str())]),
     )
 }
 
@@ -1092,6 +1212,14 @@ mod tests {
         EndpointKey::tcp(VirtualEndpoint::Name(name.to_string()))
     }
 
+    fn loopback() -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([127, 0, 0, 1], 2251))
+    }
+
+    fn addr_err() -> std::net::AddrParseError {
+        "nope".parse::<std::net::SocketAddr>().unwrap_err()
+    }
+
     #[test]
     fn each_failure_has_a_distinct_key() {
         let err = io_err("boom");
@@ -1143,6 +1271,13 @@ mod tests {
             connect_queue_full(&tcp_key).key(),
             service_names_must_be_literal("NET_LISTEN").key(),
             service_offline("NET_CONNECT", &tcp_key).key(),
+            bind_socket_failed(&loopback(), &err).key(),
+            bind_reuse_flag_failed(&loopback(), &err).key(),
+            bind_failed(&loopback(), &err).key(),
+            listen_failed(&loopback(), &err).key(),
+            bind_virtual_failed(&loopback(), &tcp_key, bind_failed(&loopback(), &err)).key(),
+            cli_mapping_needs_host_port("web", "nope", &addr_err()).key(),
+            claim_bound_address_failed("NET_LISTEN", &err).key(),
             port_not_numeric().key(),
             unknown_protocol_qualifier("sctp/dns").key(),
             endpoint_ref_invalid("NET_PORT", "tcp/dns", port_not_numeric()).key(),
@@ -1396,6 +1531,38 @@ mod tests {
         assert_eq!(
             service_offline("NET_CONNECT", &key).message(),
             "NET_CONNECT: 'web' is offline"
+        );
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 2251));
+        assert_eq!(
+            bind_socket_failed(&addr, &err).message(),
+            "NET socket for 127.0.0.1:2251 failed: boom"
+        );
+        assert_eq!(
+            bind_reuse_flag_failed(&addr, &err).message(),
+            "NET reuse flag for 127.0.0.1:2251 failed: boom"
+        );
+        assert_eq!(
+            bind_failed(&addr, &err).message(),
+            "NET bind 127.0.0.1:2251 failed: boom"
+        );
+        assert_eq!(
+            listen_failed(&addr, &err).message(),
+            "NET listen 127.0.0.1:2251 failed: boom"
+        );
+        assert_eq!(
+            bind_virtual_failed(&addr, &key, bind_failed(&addr, &err)).message(),
+            "bind 127.0.0.1:2251 for virtual 'web' failed: NET bind 127.0.0.1:2251 failed: boom"
+        );
+        assert_eq!(
+            cli_mapping_needs_host_port("web", "nope", &addr_err()).message(),
+            format!(
+                "CLI mapping for 'web' needs a host:port address, got \"nope\": {}",
+                addr_err()
+            )
+        );
+        assert_eq!(
+            claim_bound_address_failed("NET_LISTEN", &err).message(),
+            "NET_LISTEN cannot read its bound address: boom"
         );
         assert_eq!(port_not_numeric().message(), "port must be numeric 0-65535");
         assert_eq!(
