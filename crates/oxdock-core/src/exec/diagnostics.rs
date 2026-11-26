@@ -11,15 +11,15 @@ use oxdock_parser::template::{bare_sigil_error, qualified_keypath_error};
 use oxdock_parser::{
     ANY_TYPE_NAME, BOOL_TYPE_NAME, Expr, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
     KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC,
-    KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
-    KEYWORD_ENV, KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IMPORT,
-    KEYWORD_INHERIT_ENV, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND,
-    KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOTE,
-    KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP,
-    KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO,
-    KEYWORD_WORKDIR, KEYWORD_WRITE, LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME,
-    PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME,
-    render_structural,
+    KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY,
+    KEYWORD_COPY_GIT, KEYWORD_ENV, KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC,
+    KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET,
+    KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ,
+    KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN,
+    KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TIMEOUT,
+    KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE,
+    LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME,
+    STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
 };
 
 use super::function_names::{
@@ -2230,6 +2230,182 @@ pub fn eval_async_entry_unavailable() -> Diagnostic {
         "dsl.eval.async_entry_unavailable",
         format!("{KEYWORD_ASYNC} task entry unavailable"),
         Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Task-handle variable that is not defined. Takes the bare variable
+/// name; quoting lives here. One key covers the single-handle
+/// `AWAIT`, list-`AWAIT`, and `CANCEL` lookups: the failure mode is
+/// identical and the message names no invoker. No source rides along.
+pub fn eval_task_var_undefined(var: &str) -> Diagnostic {
+    let message = format!("variable '${var}' is not defined");
+    Diagnostic::new(
+        "dsl.eval.task_var_undefined",
+        message,
+        Diagnostic::make_fields(&[("var", var)]),
+    )
+}
+
+/// Variable holding a non-handle in task position. Takes the bare
+/// variable name; quoting lives here. One key covers the `AWAIT` and
+/// `CANCEL` resolvers. No source rides along.
+pub fn eval_task_not_handle(var: &str) -> Diagnostic {
+    let message = format!("variable '${var}' is not a task handle");
+    Diagnostic::new(
+        "dsl.eval.task_not_handle",
+        message,
+        Diagnostic::make_fields(&[("var", var)]),
+    )
+}
+
+/// Task id with no live registry entry. Takes the already-sigil'd
+/// label (`$var` or `$var[idx]`); quoting lives here. One key covers
+/// the id lookup and the double-await guard: both render the same
+/// sentence. No source rides along.
+pub fn eval_task_not_found(label: &str) -> Diagnostic {
+    let message = format!("task handle for '{label}' was not found or has already been awaited");
+    Diagnostic::new(
+        "dsl.eval.task_not_found",
+        message,
+        Diagnostic::make_fields(&[("label", label)]),
+    )
+}
+
+/// `AWAIT` observing external cancellation. Takes the bare variable
+/// (or `var[idx]` member) name; the `$` lives here. One key covers
+/// the claim-time and poll-loop observations. No source rides along:
+/// cancellation carries no error payload.
+pub fn eval_await_cancelled(var: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_AWAIT} task '${var}' was cancelled");
+    Diagnostic::new(
+        "dsl.eval.await_cancelled",
+        message,
+        Diagnostic::make_fields(&[("var", var)]),
+    )
+}
+
+/// List-`AWAIT` member holding a non-handle. Takes the already-sigil'd
+/// member label and the member's type name; quoting lives here. No
+/// source rides along.
+pub fn eval_await_member_not_handle(label: &str, got: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_AWAIT} '{label}' is not a task handle, got {got}");
+    Diagnostic::new(
+        "dsl.eval.await_member_not_handle",
+        message,
+        Diagnostic::make_fields(&[("label", label), ("got", got)]),
+    )
+}
+
+/// `AWAIT` preempted by its `TIMEOUT` deadline. Takes the bare
+/// variable name. No source rides along: the deadline owns the kill.
+pub fn eval_await_timeout(var: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_AWAIT} task '${var}' interrupted by {KEYWORD_TIMEOUT}");
+    Diagnostic::new(
+        "dsl.eval.await_timeout",
+        message,
+        Diagnostic::make_fields(&[("var", var)]),
+    )
+}
+
+/// Awaited task exiting nonzero. Takes the bare variable name and the
+/// platform exit status; the status rendering stays platform-native,
+/// so tests pin the prefix only. No source rides along.
+pub fn eval_await_exit_status(var: &str, status: &std::process::ExitStatus) -> Diagnostic {
+    let status_text = format!("{status}");
+    let message = format!("{KEYWORD_AWAIT} task '${var}' failed with status {status_text}");
+    Diagnostic::new(
+        "dsl.eval.await_exit_status",
+        message,
+        Diagnostic::make_fields(&[("var", var), ("status", &status_text)]),
+    )
+}
+
+/// `AWAIT` capture whose task can return but produced no value. Takes
+/// the invoking keyword (`LET`/`CONST`) and both variable spellings;
+/// quoting lives here. No source rides along.
+pub fn eval_await_fell_off(kw: &str, out_var: &str, task_var: &str) -> Diagnostic {
+    let message = format!(
+        "{kw} ${out_var} = {KEYWORD_AWAIT} ${task_var} fell off the end without {KEYWORD_RETURN}: the task body can return a value on some path but this run produced none"
+    );
+    Diagnostic::new(
+        "dsl.eval.await_fell_off",
+        message,
+        Diagnostic::make_fields(&[("keyword", kw), ("out", out_var), ("task", task_var)]),
+    )
+}
+
+/// `CANCEL` on a reaped or unknown task. Takes the bare variable
+/// name. One key covers the missing-entry and already-completed arms:
+/// both render the same sentence. No source rides along.
+pub fn eval_cancel_gone(var: &str) -> Diagnostic {
+    let message =
+        format!("{KEYWORD_CANCEL}: task '${var}' has already been awaited or does not exist");
+    Diagnostic::new(
+        "dsl.eval.cancel_gone",
+        message,
+        Diagnostic::make_fields(&[("var", var)]),
+    )
+}
+
+/// `CANCEL` on an already-cancelled task. Takes the bare variable
+/// name. No source rides along.
+pub fn eval_cancel_already(var: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_CANCEL}: task '${var}' was already cancelled");
+    Diagnostic::new(
+        "dsl.eval.cancel_already",
+        message,
+        Diagnostic::make_fields(&[("var", var)]),
+    )
+}
+
+/// `TIMEOUT` deadline firing. Takes the rendered budget; the typed
+/// diagnostic is the chain head in both arms (a bare diagnostic on
+/// the success path, a `with_context` layer over the body error on
+/// the failure path, so the key, the fields, and the original chain
+/// depth are all preserved). No source rides along on the
+/// diagnostic itself.
+pub fn eval_timeout_deadline(budget: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_TIMEOUT} after {budget} — deadline exceeded");
+    Diagnostic::new(
+        "dsl.eval.timeout_deadline",
+        message,
+        Diagnostic::make_fields(&[("budget", budget)]),
+    )
+}
+
+/// Step error attributed inside an `ISOLATED` block. Parameterless:
+/// the boundary name is the whole message and the typed diagnostic
+/// rides the anyhow context chain as a `Diagnostic` layer (not a
+/// stringified message), so the key survives chain traversal.
+pub fn eval_inside_isolated() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.inside_isolated",
+        format!("inside {KEYWORD_ISOLATED} block"),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `INHERIT_ENV` allowlist outside any `ISOLATED` block.
+/// Parameterless: the runtime twin of `check_isolated_allowlist`
+/// (which carries the static step prefix). Unreachable by
+/// construction, so no source rides along.
+pub fn eval_isolated_outside_allowlist() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.isolated_outside_allowlist",
+        format!("isolated allowlist outside {KEYWORD_ISOLATED}"),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Lazy placeholder miss with pre-rendered text. Takes the fully
+/// formed message verbatim: quoting and remediation already live in
+/// the `describe` renderer, so the constructor adds no wrapper and
+/// attaches no source.
+pub fn eval_placeholder_miss_text(text: &str) -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.placeholder_miss_text",
+        text.to_string(),
+        Diagnostic::make_fields(&[("reason", text)]),
     )
 }
 
@@ -6116,6 +6292,20 @@ mod tests {
             eval_capture_with_io_stdout("LET").key(),
             eval_capture_not_utf8("LET", "a", eval_remove_missing("x")).key(),
             eval_async_entry_unavailable().key(),
+            eval_task_var_undefined("t").key(),
+            eval_task_not_handle("t").key(),
+            eval_task_not_found("$t").key(),
+            eval_await_cancelled("t").key(),
+            eval_await_member_not_handle("$w[0]", "INT").key(),
+            eval_await_timeout("t").key(),
+            eval_await_exit_status("t", &exit_status_sample()).key(),
+            eval_await_fell_off("LET", "o", "t").key(),
+            eval_cancel_gone("t").key(),
+            eval_cancel_already("t").key(),
+            eval_timeout_deadline("1s").key(),
+            eval_inside_isolated().key(),
+            eval_isolated_outside_allowlist().key(),
+            eval_placeholder_miss_text("placeholder miss").key(),
             eval_with_io_tty_live_pipe("stdin").key(),
             eval_run_cancelled("echo hi").key(),
             eval_run_argv_cancelled(&["echo".to_string()]).key(),
@@ -6698,6 +6888,60 @@ mod tests {
         assert_eq!(
             eval_async_entry_unavailable().message(),
             "ASYNC task entry unavailable"
+        );
+        assert_eq!(
+            eval_task_var_undefined("t").message(),
+            "variable '$t' is not defined"
+        );
+        assert_eq!(
+            eval_task_not_handle("t").message(),
+            "variable '$t' is not a task handle"
+        );
+        assert_eq!(
+            eval_task_not_found("$t").message(),
+            "task handle for '$t' was not found or has already been awaited"
+        );
+        assert_eq!(
+            eval_await_cancelled("t").message(),
+            "AWAIT task '$t' was cancelled"
+        );
+        assert_eq!(
+            eval_await_member_not_handle("$w[0]", "INT").message(),
+            "AWAIT '$w[0]' is not a task handle, got INT"
+        );
+        assert_eq!(
+            eval_await_timeout("t").message(),
+            "AWAIT task '$t' interrupted by TIMEOUT"
+        );
+        assert!(
+            eval_await_exit_status("t", &exit_status_sample())
+                .message()
+                .starts_with("AWAIT task '$t' failed with status ")
+        );
+        assert_eq!(
+            eval_await_fell_off("LET", "o", "t").message(),
+            "LET $o = AWAIT $t fell off the end without RETURN: the task body can return a value on some path but this run produced none"
+        );
+        assert_eq!(
+            eval_cancel_gone("t").message(),
+            "CANCEL: task '$t' has already been awaited or does not exist"
+        );
+        assert_eq!(
+            eval_cancel_already("t").message(),
+            "CANCEL: task '$t' was already cancelled"
+        );
+        assert_eq!(
+            eval_timeout_deadline("1s").message(),
+            "TIMEOUT after 1s — deadline exceeded"
+        );
+        assert_eq!(eval_inside_isolated().message(), "inside ISOLATED block");
+        assert_eq!(
+            eval_isolated_outside_allowlist().message(),
+            "isolated allowlist outside ISOLATED"
+        );
+        assert_eq!(
+            eval_placeholder_miss_text("placeholder miss").message(),
+            "placeholder miss"
         );
         assert_eq!(
             eval_run_cancelled("echo hi").message(),

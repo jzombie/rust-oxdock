@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -14,9 +14,8 @@ use oxdock_fs::command_path;
 use oxdock_fs::to_forward_slashes;
 use oxdock_parser::constants::KEYWORD_RUN;
 use oxdock_parser::constants::{
-    KEYWORD_APPEND, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_CONTINUE,
-    KEYWORD_EXPAND, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_RETURN,
-    KEYWORD_TIMEOUT, KEYWORD_WRITE,
+    KEYWORD_APPEND, KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_EXPAND, KEYWORD_LET,
+    KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_RETURN, KEYWORD_WRITE,
 };
 use oxdock_parser::{
     Arg, Command, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value,
@@ -1758,7 +1757,7 @@ pub(super) fn replace<P: ProcessManager>(
             Ok(value) => Ok(value),
             Err(err) => {
                 if let Some(text) = snapshot.describe(module, func) {
-                    return Err(anyhow::anyhow!("{text}"));
+                    return Err(anyhow::Error::new(diag::eval_placeholder_miss_text(&text)));
                 }
                 Err(err)
             }
@@ -5067,9 +5066,9 @@ fn resolve_task_entry<P: ProcessManager>(
     let val = cx
         .state
         .get_var(var)
-        .ok_or_else(|| anyhow::anyhow!("variable '${var}' is not defined"))?;
+        .ok_or_else(|| anyhow::Error::new(diag::eval_task_var_undefined(var)))?;
     let Some(task_id) = val.as_handle() else {
-        bail!("variable '${var}' is not a task handle");
+        return Err(anyhow::Error::new(diag::eval_task_not_handle(var)));
     };
     resolve_task_entry_by_id(task_id, &sigil_var(var), cx)
 }
@@ -5093,7 +5092,7 @@ pub(crate) fn resolve_task_entry_by_id<P: ProcessManager>(
         named.get(&task_id).cloned()
     };
     let Some(entry) = entry else {
-        bail!("task handle for '{label}' was not found or has already been awaited");
+        return Err(anyhow::Error::new(diag::eval_task_not_found(label)));
     };
     Ok(entry)
 }
@@ -5118,10 +5117,12 @@ fn await_task_entry(
                 drop(guard);
                 // Teardown barrier: never outrun the killer's join.
                 entry.wait_reaped();
-                bail!("{KEYWORD_AWAIT} task '${var}' was cancelled");
+                return Err(anyhow::Error::new(diag::eval_await_cancelled(var)));
             }
             TaskPhase::Completed | TaskPhase::Awaiting => {
-                bail!("task handle for '${var}' was not found or has already been awaited");
+                return Err(anyhow::Error::new(diag::eval_task_not_found(&sigil_var(
+                    var,
+                ))));
             }
             TaskPhase::Running => {
                 guard.phase = TaskPhase::Awaiting;
@@ -5195,19 +5196,21 @@ fn await_task_entry(
             }
             Decision::Cancelled => {
                 entry.wait_reaped();
-                bail!("{KEYWORD_AWAIT} task '${var}' was cancelled");
+                return Err(anyhow::Error::new(diag::eval_await_cancelled(var)));
             }
             Decision::KillOnTimeout => {
                 if let Some(mut handle) = timeout_kill {
                     let _ = handle.kill();
                 }
                 entry.finish_teardown();
-                bail!("{KEYWORD_AWAIT} task '${var}' interrupted by {KEYWORD_TIMEOUT}");
+                return Err(anyhow::Error::new(diag::eval_await_timeout(var)));
             }
             Decision::Done(status) => {
                 entry.finish_teardown();
                 if !status.success() {
-                    bail!("{KEYWORD_AWAIT} task '${var}' failed with status {status}");
+                    return Err(anyhow::Error::new(diag::eval_await_exit_status(
+                        var, &status,
+                    )));
                 }
                 return Ok(status);
             }
@@ -5228,7 +5231,7 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
     let val = cx
         .state
         .get_var(var)
-        .ok_or_else(|| anyhow::anyhow!("variable '${var}' is not defined"))?;
+        .ok_or_else(|| anyhow::Error::new(diag::eval_task_var_undefined(var)))?;
     // A LIST of HANDLEs awaits every member in order, so worker pools
     // collected with PUSH join as a group; an empty LIST is a no-op. The
     // first failing member bails like sequential single AWAITs would.
@@ -5244,10 +5247,10 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
             let member = format!("{var}[{idx}]");
             let label = sigil_var(&member);
             let Some(task_id) = item.as_handle() else {
-                bail!(
-                    "{KEYWORD_AWAIT} '{label}' is not a task handle, got {}",
-                    item.type_name()
-                );
+                return Err(anyhow::Error::new(diag::eval_await_member_not_handle(
+                    &label,
+                    item.type_name(),
+                )));
             };
             let entry = resolve_task_entry_by_id(task_id, &label, cx)?;
             await_task_entry(&entry, &cx.state.cancel_token, &member)?;
@@ -5293,9 +5296,9 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
         return Ok(());
     }
     if returns_value {
-        anyhow::bail!(
-            "{kw} ${out_var} = {KEYWORD_AWAIT} ${task_var} fell off the end without {KEYWORD_RETURN}: the task body can return a value on some path but this run produced none"
-        );
+        return Err(anyhow::Error::new(diag::eval_await_fell_off(
+            kw, out_var, task_var,
+        )));
     }
     let tag = cx.state.resolve_tag(&out_type)?;
     cx.state.declare_binding(
@@ -5320,9 +5323,9 @@ pub(crate) fn dispatch_cancel<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_,
     let val = cx
         .state
         .get_var(var)
-        .ok_or_else(|| anyhow::anyhow!("variable '${var}' is not defined"))?;
+        .ok_or_else(|| anyhow::Error::new(diag::eval_task_var_undefined(var)))?;
     let Some(task_id) = val.as_handle() else {
-        bail!("variable '${var}' is not a task handle");
+        return Err(anyhow::Error::new(diag::eval_task_not_handle(var)));
     };
 
     let entry = {
@@ -5334,7 +5337,7 @@ pub(crate) fn dispatch_cancel<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_,
         named.get(&task_id).cloned()
     };
     let Some(entry) = entry else {
-        bail!("{KEYWORD_CANCEL}: task '${var}' has already been awaited or does not exist");
+        return Err(anyhow::Error::new(diag::eval_cancel_gone(var)));
     };
 
     // Transition to Cancelled and take the handle under a short lock.
@@ -5342,10 +5345,10 @@ pub(crate) fn dispatch_cancel<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_,
         let mut guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
         match guard.phase {
             TaskPhase::Cancelled => {
-                bail!("{KEYWORD_CANCEL}: task '${var}' was already cancelled");
+                return Err(anyhow::Error::new(diag::eval_cancel_already(var)));
             }
             TaskPhase::Completed => {
-                bail!("{KEYWORD_CANCEL}: task '${var}' has already been awaited or does not exist");
+                return Err(anyhow::Error::new(diag::eval_cancel_gone(var)));
             }
             TaskPhase::Running | TaskPhase::Awaiting => {
                 guard.phase = TaskPhase::Cancelled;
@@ -5563,15 +5566,13 @@ fn disarm_deadline<T, P: ProcessManager>(
     match result {
         Ok(value) => {
             if guard.fired.load(Ordering::SeqCst) {
-                bail!("{KEYWORD_TIMEOUT} after {} — deadline exceeded", budget);
+                return Err(anyhow::Error::new(diag::eval_timeout_deadline(&budget)));
             }
             Ok(value)
         }
         Err(err) => {
             if guard.fired.load(Ordering::SeqCst) {
-                Err(err).with_context(|| {
-                    format!("{KEYWORD_TIMEOUT} after {} — deadline exceeded", budget)
-                })
+                Err(err).with_context(|| diag::eval_timeout_deadline(&budget))
             } else {
                 Err(err)
             }
@@ -5681,7 +5682,7 @@ pub(crate) fn isolated<P: ProcessManager>(cx: &mut StepCtx<'_, P>, body: &[Step]
     // Inner steps number from the block, not the script: name the
     // boundary so `step 1: RUN ...` inside ISOLATED never reads as the
     // script's first step.
-    result.with_context(|| format!("inside {KEYWORD_ISOLATED} block"))
+    result.with_context(diag::eval_inside_isolated)
 }
 
 /// Resolve a block allowlist against the enclosing `ISOLATED` snapshot
@@ -5695,7 +5696,7 @@ pub(crate) fn isolated_inherit_env<P: ProcessManager>(
     keys: &[String],
 ) -> Result<()> {
     let Some(snapshot) = cx.state.isolated_stack.last().cloned() else {
-        bail!("isolated allowlist outside {KEYWORD_ISOLATED}");
+        return Err(anyhow::Error::new(diag::eval_isolated_outside_allowlist()));
     };
     let envs = Arc::make_mut(&mut cx.state.envs);
     for key in keys {

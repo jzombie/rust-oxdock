@@ -2404,6 +2404,41 @@ transport, so this phase is mechanical:
    positions (needless_return fix keeps the no-new-warning
    gate). Core lib 410 plus integration 629 green; clippy at
    baseline (3 pre-existing), fmt clean on both touched files.
+   Await plus cancel plus timeout plus isolated bulk step
+   2026-11-27 (file-sized batch): fourteen new dsl.eval.* ctors
+   with key plus wording pins. Task trio: task_var_undefined with
+   var (one key for single-AWAIT, list-AWAIT, and CANCEL
+   lookups), task_not_handle with var (one key for AWAIT and
+   CANCEL resolvers), task_not_found with label (one key for the
+   id lookup and the double-await guard; the guard passes
+   sigil_var(var) so both render one `$`). AWAIT quintet:
+   await_cancelled with var (one key for claim-time and
+   poll-loop observations), await_member_not_handle with label
+   plus got, await_timeout with var, await_exit_status with var
+   plus platform status (prefix-pinned like async_exit_status),
+   await_fell_off with kw plus out plus task. CANCEL pair:
+   cancel_gone with var (one key for missing-entry and
+   completed arms), cancel_already with var. TIMEOUT plus
+   ISOLATED trio: timeout_deadline with budget (bare diagnostic
+   on the success path, typed Diagnostic as the with_context
+   layer over the body error on the failure path, so the key,
+   the fields, and the original chain depth are all preserved),
+   inside_isolated parameterless (same typed-layer chain trick;
+   SEV-2 amend: an earlier draft stringified the diagnostic
+   with `.to_string()`, which would have discarded the key and
+   fields into an untyped String layer), isolated_outside_allowlist parameterless (runtime
+   twin of check_isolated_allowlist, which keeps its static step
+   prefix). Placeholder: placeholder_miss_text verbatim &str
+   passthrough with no source (quoting lives in the describe
+   renderer). Twenty-one sites re-keyed across resolve, await,
+   capture, cancel, deadline, isolated, and EXPAND placeholder
+   paths. Bytes identical (contains pins on task-handle,
+   failed-with-status, and fell-off wordings). Dropped the now-
+   unused anyhow bail macro plus KEYWORD_AWAIT, KEYWORD_CANCEL,
+   KEYWORD_ISOLATED, and KEYWORD_TIMEOUT imports from handlers;
+   Context stays (both with_context sites keep the anyhow
+   chain). Core lib 410 plus integration 629 green; clippy at
+   baseline (3 pre-existing), fmt clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
