@@ -22,7 +22,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::diagnostics as net_diag;
 
@@ -138,7 +138,7 @@ fn net_listen<P: ProcessManager>(
             // on its own clone so close never races an in-flight accept.
             let owned = listener
                 .try_clone()
-                .context("NET_LISTEN cannot clone its listener")?;
+                .map_err(|err| anyhow::Error::new(net_diag::listen_clone_failed(&err)))?;
             Arc::new(ListenerState::new_tcp(
                 id,
                 Arc::clone(&registry),
@@ -298,7 +298,7 @@ fn net_accept<P: ProcessManager>(
     };
     listener
         .set_nonblocking(true)
-        .context("NET_ACCEPT failed to configure listener")?;
+        .map_err(|err| anyhow::Error::new(net_diag::accept_configure_listener_failed(&err)))?;
     let stream = loop {
         if cx.is_cancelled() {
             return Err(anyhow::Error::new(net_diag::accept_interrupted()));
@@ -318,7 +318,7 @@ fn net_accept<P: ProcessManager>(
     };
     stream
         .set_nonblocking(false)
-        .context("NET_ACCEPT failed to configure stream")?;
+        .map_err(|err| anyhow::Error::new(net_diag::accept_configure_stream_failed(&err)))?;
     pump_stream(
         cx,
         "NET_ACCEPT",
@@ -429,8 +429,13 @@ fn net_connect<P: ProcessManager>(
             let text = value
                 .as_str()
                 .expect("check_options verified DURATION|STRING");
-            timeout = oxdock_parser::command::parse_duration(text).with_context(|| {
-                format!("NET_CONNECT option '{OPT_TIMEOUT}' must be a duration, got {text:?}")
+            timeout = oxdock_parser::command::parse_duration(text).map_err(|reason| {
+                anyhow::Error::new(net_diag::timeout_option_invalid(
+                    "NET_CONNECT",
+                    OPT_TIMEOUT,
+                    text,
+                    reason,
+                ))
             })?;
         }
     }
@@ -481,7 +486,7 @@ fn dial_tcp<P: ProcessManager>(
     half_close: bool,
 ) -> Result<Value> {
     let stream = TcpStream::connect_timeout(&addr, timeout)
-        .with_context(|| format!("NET_CONNECT {target:?} dial failed"))?;
+        .map_err(|err| anyhow::Error::new(net_diag::connect_dial_failed(target, &err)))?;
     pump_stream(cx, "NET_CONNECT", in_pipe, out_pipe, stream, half_close)?;
     let mut out = BTreeMap::new();
     out.insert(FIELD_CLOSED.to_string(), Value::bool(true));
@@ -782,8 +787,13 @@ fn net_fetch<P: ProcessManager>(
             let text = value
                 .as_str()
                 .expect("check_options verified DURATION|STRING");
-            timeout = oxdock_parser::command::parse_duration(text).with_context(|| {
-                format!("NET_FETCH option '{OPT_TIMEOUT}' must be a duration, got {text:?}")
+            timeout = oxdock_parser::command::parse_duration(text).map_err(|reason| {
+                anyhow::Error::new(net_diag::timeout_option_invalid(
+                    "NET_FETCH",
+                    OPT_TIMEOUT,
+                    text,
+                    reason,
+                ))
             })?;
         }
     }

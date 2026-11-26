@@ -883,6 +883,79 @@ pub fn connect_offline() -> Diagnostic {
     )
 }
 
+/// Listener clone failed at claim time. Takes the I/O failure;
+/// rendering lives here.
+pub fn listen_clone_failed(err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("NET_LISTEN cannot clone its listener: {err_text}");
+    Diagnostic::new(
+        "net.func.listen_clone_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Accept listener would not enter non-blocking mode. Takes the I/O
+/// failure; rendering lives here.
+pub fn accept_configure_listener_failed(err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("NET_ACCEPT failed to configure listener: {err_text}");
+    Diagnostic::new(
+        "net.func.accept_configure_listener_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Accepted stream would not leave non-blocking mode. Takes the I/O
+/// failure; rendering lives here.
+pub fn accept_configure_stream_failed(err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("NET_ACCEPT failed to configure stream: {err_text}");
+    Diagnostic::new(
+        "net.func.accept_configure_stream_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Dial failed. Takes the target plus the I/O failure; rendering
+/// lives here.
+pub fn connect_dial_failed(target: &str, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("NET_CONNECT {target:?} dial failed: {err_text}");
+    Diagnostic::new(
+        "net.func.connect_dial_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_TARGET, target), (FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Duration-typed option that did not parse. Takes the caller label,
+/// the option name, the raw text, and the underlying typed failure by
+/// value; the reason text renders inline. Shared by the `timeout`
+/// options: one key, one mode.
+pub fn timeout_option_invalid(
+    func: &str,
+    option: &str,
+    text: &str,
+    reason: Diagnostic,
+) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message =
+        format!("{func} option '{option}' must be a duration, got {text:?}: {reason_text}");
+    Diagnostic::new(
+        "net.func.timeout_option_invalid",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_FUNC, func),
+            (FIELD_OPTION, option),
+            (FIELD_VALUE, text),
+            (FIELD_ERR, reason_text.as_str()),
+        ]),
+    )
+}
+
 /// Negative `NET_FETCH` numeric option. Takes the option name (the
 /// `OPT_*` constants) plus the value; rendering lives here. Shared by
 /// `max_body_bytes` / `max_redirects`: one key, one mode.
@@ -1271,6 +1344,11 @@ mod tests {
             connect_queue_full(&tcp_key).key(),
             service_names_must_be_literal("NET_LISTEN").key(),
             service_offline("NET_CONNECT", &tcp_key).key(),
+            listen_clone_failed(&err).key(),
+            accept_configure_listener_failed(&err).key(),
+            accept_configure_stream_failed(&err).key(),
+            connect_dial_failed("web", &err).key(),
+            timeout_option_invalid("NET_CONNECT", "timeout", "soon", port_not_numeric()).key(),
             bind_socket_failed(&loopback(), &err).key(),
             bind_reuse_flag_failed(&loopback(), &err).key(),
             bind_failed(&loopback(), &err).key(),
@@ -1362,6 +1440,10 @@ mod tests {
         assert_eq!(
             pump_interrupted_by_cancellation("NET_ACCEPT").key(),
             pump_interrupted_by_cancellation("NET_CONNECT").key()
+        );
+        assert_eq!(
+            timeout_option_invalid("NET_CONNECT", "timeout", "x", port_not_numeric()).key(),
+            timeout_option_invalid("NET_FETCH", "timeout", "y", port_not_numeric()).key()
         );
     }
 
@@ -1531,6 +1613,26 @@ mod tests {
         assert_eq!(
             service_offline("NET_CONNECT", &key).message(),
             "NET_CONNECT: 'web' is offline"
+        );
+        assert_eq!(
+            listen_clone_failed(&err).message(),
+            "NET_LISTEN cannot clone its listener: boom"
+        );
+        assert_eq!(
+            accept_configure_listener_failed(&err).message(),
+            "NET_ACCEPT failed to configure listener: boom"
+        );
+        assert_eq!(
+            accept_configure_stream_failed(&err).message(),
+            "NET_ACCEPT failed to configure stream: boom"
+        );
+        assert_eq!(
+            connect_dial_failed("web", &err).message(),
+            "NET_CONNECT \"web\" dial failed: boom"
+        );
+        assert_eq!(
+            timeout_option_invalid("NET_FETCH", "timeout", "soon", port_not_numeric()).message(),
+            "NET_FETCH option 'timeout' must be a duration, got \"soon\": port must be numeric 0-65535"
         );
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 2251));
         assert_eq!(

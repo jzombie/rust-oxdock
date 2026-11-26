@@ -2799,6 +2799,23 @@ transport, so this phase is mechanical:
    integration 38 plus cli lib 49 plus ssh lib 13 plus ssh
    integration 68 green; net plus ssh clippy zero on touched
    files, fmt clean on three files.
+   funcs bulk 2026-11-27 (net funcs.rs plus net diagnostics,
+   5 new net.func.* ctors): boundary-shim audit converts the
+   last six bare-string context layers; every remaining anyhow
+   site is a pure Error::new(ctor) boundary shim (correct
+   permanent shape for #[oxdock_func] fns, which stay anyhow
+   by design). New ctors follow the net inline family:
+   listen_clone_failed plus accept_configure_listener_failed
+   plus accept_configure_stream_failed (concrete
+   &std::io::Error), connect_dial_failed (target plus concrete
+   &std::io::Error), timeout_option_invalid (shared by the
+   NET_CONNECT plus NET_FETCH timeout parses: same failure
+   mode, func as structured field, reason by-value Diagnostic
+   so {:#} renders byte-identical to the retired
+   with_context layers). anyhow Context import drops from
+   funcs.rs. Test pins added to the key-uniqueness plus
+   canonical-wording tests. net lib 38 plus net integration
+   38 green; net clippy zero, fmt clean on both files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
