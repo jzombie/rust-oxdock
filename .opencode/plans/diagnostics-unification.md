@@ -2191,6 +2191,29 @@ transport, so this phase is mechanical:
    identical. Core 410 plus integration 629
    green; clippy at baseline (3 pre-existing),
    fmt clean on both touched files.
+   WRITE bulk step 2026-11-26 (file-sized batch):
+   six new dsl.eval.* ctors with key plus wording
+   pins (write_resolve_failed with path;
+   ensure_parent_failed with display, one key
+   designed to cover APPEND plus APPEND_LINE
+   later since the outer text names no keyword;
+   write_file_failed with display;
+   write_needs_stdin with path, no source;
+   write_open_failed with display for writing;
+   write_stream_failed with display for the
+   streamed chunk). Six sites re-keyed across
+   write via map_err plus anyhow Error new
+   (stdin-missing bail becomes explicit return
+   Err). All failure ctors keep the bare
+   outer-context message plus chained source
+   (Other-kind io error). Type note: the
+   streamed write_all yields std io Error, so
+   that site wraps with anyhow Error new at
+   the call site for the ref-anyhow-Error param,
+   per the interop rule. Bytes identical. Core
+   410 plus integration 629 green; clippy at
+   baseline (3 pre-existing), fmt clean on both
+   touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

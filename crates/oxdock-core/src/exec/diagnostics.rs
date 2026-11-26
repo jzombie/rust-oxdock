@@ -15,7 +15,7 @@ use oxdock_parser::{
     KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND,
     KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_RETURN,
     KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK,
-    KEYWORD_TYPE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, LIST_TYPE_NAME, MAP_TYPE_NAME,
+    KEYWORD_TYPE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE, LIST_TYPE_NAME, MAP_TYPE_NAME,
     PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag,
     VOID_TYPE_NAME, render_structural,
 };
@@ -2401,6 +2401,87 @@ pub fn eval_read_line_not_utf8(reason: &std::string::FromUtf8Error) -> Diagnosti
         "dsl.eval.read_line_not_utf8",
         message,
         Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `WRITE` destination-resolution failure. Takes the script spelling
+/// and the underlying failure. Bare outer context plus chained
+/// source.
+pub fn eval_write_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_WRITE} {path}");
+    Diagnostic::new(
+        "dsl.eval.write_resolve_failed",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// Parent-directory creation failure. Takes the resolved display and
+/// the underlying failure. One key covers `WRITE`, `APPEND`, and
+/// `APPEND_LINE`: the outer text names no keyword, so the invoker
+/// needs no field.
+pub fn eval_ensure_parent_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to create parent for {display}");
+    Diagnostic::new(
+        "dsl.eval.ensure_parent_failed",
+        message,
+        Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `WRITE` whole-file failure. Takes the resolved display and the
+/// underlying failure. Bare outer context plus chained source.
+pub fn eval_write_file_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to write {display}");
+    Diagnostic::new(
+        "dsl.eval.write_file_failed",
+        message,
+        Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `WRITE` without a stdin stream. Takes the script spelling; the
+/// remediation lives here. No underlying error, so no source.
+pub fn eval_write_needs_stdin(path: &str) -> Diagnostic {
+    let message = format!(
+        "{KEYWORD_WRITE} {path} requires stdin (use {KEYWORD_WITH_IO} [stdin=...] {KEYWORD_WRITE})"
+    );
+    Diagnostic::new(
+        "dsl.eval.write_needs_stdin",
+        message,
+        Diagnostic::make_fields(&[("path", path)]),
+    )
+}
+
+/// `WRITE` stream-open failure. Takes the resolved display and the
+/// underlying failure. Bare outer context plus chained source.
+pub fn eval_write_open_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to open {display} for writing");
+    Diagnostic::new(
+        "dsl.eval.write_open_failed",
+        message,
+        Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `WRITE` streamed-chunk failure. Takes the resolved display and the
+/// underlying failure. Bare outer context plus chained source.
+pub fn eval_write_stream_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to write to {display}");
+    Diagnostic::new(
+        "dsl.eval.write_stream_failed",
+        message,
+        Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
     )
     .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
 }
@@ -5226,6 +5307,12 @@ mod tests {
             eval_read_needs_stdin().key(),
             eval_read_line_needs_stdin().key(),
             eval_read_line_not_utf8(&String::from_utf8(vec![0xff]).unwrap_err()).key(),
+            eval_write_resolve_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_ensure_parent_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_write_file_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_write_needs_stdin("p").key(),
+            eval_write_open_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_write_stream_failed("p", &anyhow::anyhow!("x")).key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -5776,6 +5863,30 @@ mod tests {
         assert_eq!(
             eval_read_line_not_utf8(&String::from_utf8(vec![0xff]).unwrap_err()).message(),
             "READ_LINE received non-UTF8 bytes"
+        );
+        assert_eq!(
+            eval_write_resolve_failed("f", &anyhow::anyhow!("boom")).message(),
+            "WRITE f"
+        );
+        assert_eq!(
+            eval_ensure_parent_failed("/x", &anyhow::anyhow!("boom")).message(),
+            "failed to create parent for /x"
+        );
+        assert_eq!(
+            eval_write_file_failed("/x", &anyhow::anyhow!("boom")).message(),
+            "failed to write /x"
+        );
+        assert_eq!(
+            eval_write_needs_stdin("f").message(),
+            "WRITE f requires stdin (use WITH_IO [stdin=...] WRITE)"
+        );
+        assert_eq!(
+            eval_write_open_failed("/x", &anyhow::anyhow!("boom")).message(),
+            "failed to open /x for writing"
+        );
+        assert_eq!(
+            eval_write_stream_failed("/x", &anyhow::anyhow!("boom")).message(),
+            "failed to write to /x"
         );
         assert!(
             eval_run_exit_status("echo hi", &exit_status_sample())
