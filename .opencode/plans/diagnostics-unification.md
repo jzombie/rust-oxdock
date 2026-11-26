@@ -2477,6 +2477,15 @@ transport, so this phase is mechanical:
    create_os_pipe precedent). Core lib 410 plus integration 629
    green; clippy at baseline (3 pre-existing), fmt clean on both
    touched files.
+   finish-run flow bulk 2026-11-27 (file-sized batch): zero new
+   ctors. The three finish_run bare bail!s (BREAK/CONTINUE-outside,
+   RETURN-outside) re-key to the existing check_flow_outside_loop
+   (BREAK/CONTINUE as the word) and check_return_outside ctors,
+   byte-identical via the shared KEYWORD constants, same as the
+   handlers.rs top_level_flow precedent. Dropped the now-unused
+   KEYWORD_ASYNC/KEYWORD_LET/KEYWORD_RETURN imports from mod
+   (BREAK/CONTINUE stay). Core lib 410 plus integration 629
+   green; clippy at baseline (3 pre-existing), fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
