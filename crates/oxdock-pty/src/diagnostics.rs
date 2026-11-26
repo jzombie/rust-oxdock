@@ -188,6 +188,32 @@ pub fn worker_panicked(func: &str, worker: &str, panic: &impl std::fmt::Debug) -
     )
 }
 
+/// Input worker failed. Takes the caller label plus the worker's
+/// typed failure by value; bare outer plus chained source.
+pub fn input_worker_failed(func: &str, reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    let message = format!("{func} input worker failed");
+    Diagnostic::new(
+        "pty.worker.input_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// Output worker failed. Takes the caller label plus the worker's
+/// typed failure by value; bare outer plus chained source.
+pub fn output_worker_failed(func: &str, reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    let message = format!("{func} output worker failed");
+    Diagnostic::new(
+        "pty.worker.output_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +238,8 @@ mod tests {
             pty_master_writer_failed("FUNC", &anyhow::anyhow!("boom")).key(),
             pty_spawn_failed("FUNC", &anyhow::anyhow!("boom")).key(),
             worker_panicked("FUNC", "input", &"boom").key(),
+            input_worker_failed("FUNC", output_lock_poisoned("FUNC")).key(),
+            output_worker_failed("FUNC", output_lock_poisoned("FUNC")).key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -282,6 +310,34 @@ mod tests {
         assert_eq!(
             worker_panicked("SSH_PTY_RUN", "output", &"boom").message(),
             "SSH_PTY_RUN output worker panicked: \"boom\""
+        );
+        assert_eq!(
+            input_worker_failed("SSH_PTY_RUN", output_lock_poisoned("SSH_PTY_RUN")).message(),
+            "SSH_PTY_RUN input worker failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(input_worker_failed(
+                    "SSH_PTY_RUN",
+                    output_lock_poisoned("SSH_PTY_RUN"),
+                ))
+            ),
+            "SSH_PTY_RUN input worker failed: SSH_PTY_RUN output lock poisoned"
+        );
+        assert_eq!(
+            output_worker_failed("SSH_PTY_RUN", output_lock_poisoned("SSH_PTY_RUN")).message(),
+            "SSH_PTY_RUN output worker failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(output_worker_failed(
+                    "SSH_PTY_RUN",
+                    output_lock_poisoned("SSH_PTY_RUN"),
+                ))
+            ),
+            "SSH_PTY_RUN output worker failed: SSH_PTY_RUN output lock poisoned"
         );
     }
 

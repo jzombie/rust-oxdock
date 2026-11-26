@@ -23,8 +23,7 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use anyhow::Result;
-use oxdock_diagnostics::DiagnosticResult;
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 
 use crate::diagnostics as pty_diag;
 
@@ -112,7 +111,7 @@ enum PtyEvent {
 }
 
 /// Completion of one child-pump worker, by slot (0 is always input).
-struct ChildDone(usize, Result<()>);
+struct ChildDone(usize, DiagnosticResult<()>);
 
 /// The reaper observed child exit, carrying the code. Produced by the
 /// backend's blocking wait on its own thread: ConPTY holds the master
@@ -410,9 +409,9 @@ fn spawn_repoll_watch(
 /// The calling thread supervises; workers detach. Cancellation (via
 /// `should_cancel`) tears down the console, kills the child, and
 /// returns `Cancelled` without waiting out parked workers.
-pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
+pub fn run_pty_session(mut req: PtyRequest<'_>) -> DiagnosticResult<PtyOutcome> {
     if req.argv.is_empty() {
-        return Err(anyhow::Error::new(pty_diag::needs_program(req.func)));
+        return Err(pty_diag::needs_program(req.func));
     }
     let func = req.func;
     let epoch = Instant::now();
@@ -474,7 +473,7 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
         drain_generation: 0,
     };
     let (event_tx, event_rx) = mpsc::channel::<PtyEvent>();
-    let mut failed: Option<anyhow::Error> = None;
+    let mut failed: Option<Diagnostic> = None;
     let mut in_done = req.input.is_none();
     let mut outputs_done = false;
     let mut exit_code: Option<i64> = None;
@@ -526,15 +525,13 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
                     }
                     Err(err) => {
                         send_release_nudge(&nudge_writer, true);
-                        Err(anyhow::Error::from(err))
+                        Err(err)
                     }
                 }
             }));
             let outcome = match outcome {
                 Ok(inner) => inner,
-                Err(panic) => Err(anyhow::Error::new(pty_diag::worker_panicked(
-                    func, "input", &panic,
-                ))),
+                Err(panic) => Err(pty_diag::worker_panicked(func, "input", &panic)),
             };
             let _ = input_tx.send(PtyEvent::Done(ChildDone(0, outcome)));
         });
@@ -552,13 +549,11 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
                 func,
             );
             peer_done_out.store(true, Ordering::SeqCst);
-            result.map_err(anyhow::Error::from)
+            result
         }));
         let outcome = match outcome {
             Ok(inner) => inner,
-            Err(panic) => Err(anyhow::Error::new(pty_diag::worker_panicked(
-                func, "output", &panic,
-            ))),
+            Err(panic) => Err(pty_diag::worker_panicked(func, "output", &panic)),
         };
         let _ = output_tx.send(PtyEvent::Done(ChildDone(1, outcome)));
     });
@@ -607,15 +602,13 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
                 PtyEvent::Done(done) => {
                     if done.0 == 0 {
                         in_done = true;
-                        if let Some(err) = done.1.err() {
-                            failed
-                                .get_or_insert(err.context(format!("{func} input worker failed")));
+                        if let Err(err) = done.1 {
+                            failed.get_or_insert_with(|| pty_diag::input_worker_failed(func, err));
                         }
                     } else {
                         outputs_done = true;
-                        if let Some(err) = done.1.err() {
-                            failed
-                                .get_or_insert(err.context(format!("{func} output worker failed")));
+                        if let Err(err) = done.1 {
+                            failed.get_or_insert_with(|| pty_diag::output_worker_failed(func, err));
                         }
                     }
                 }

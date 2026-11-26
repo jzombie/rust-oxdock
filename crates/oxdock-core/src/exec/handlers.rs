@@ -558,7 +558,7 @@ fn run_pty<P: ProcessManager>(
         on_output_drained: None,
         func: KEYWORD_RUN,
     })
-    .map_err(|e| anyhow::Error::new(diag::eval_run_spawn_failed(what, &e)))?;
+    .map_err(|e| anyhow::Error::new(diag::eval_run_spawn_failed(what, &anyhow::Error::new(e))))?;
     // Pipe EOF rides the writer drops like any `RUN`: the supervisor
     // returns only after the output worker finished, so every byte is
     // already in the sink before the code below runs.

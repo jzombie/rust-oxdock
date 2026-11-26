@@ -2677,6 +2677,34 @@ transport, so this phase is mechanical:
    only for that backtick, then updated the assertion to the
    canonical bytes. Not environment-related. ssh clippy
    zero, fmt clean, anyhow import drops from types.rs.
+   pty supervisor bulk 2026-11-27 (oxdock-pty run.rs plus
+   pty diagnostics plus one core call-site bridge): two new
+   pty.* ctors (input/output_worker_failed with key plus
+   wording plus {:#} chain pins; distinct keys, worker rides
+   the key). run_pty_session flips to DiagnosticResult;
+   ChildDone plus failed plus both worker catch_unwind arms
+   go Diagnostic-native (anyhow::Error::from conversions and
+   Error::new panic wraps drop); the two format! worker
+   contexts become by-value ctors via done.1 move-out
+   (Copy slot read first). anyhow import drops from run.rs.
+   Core handlers.rs run_pty_session site bridges with
+   &anyhow::Error::new(e): eval_run_spawn_failed keeps
+   &anyhow::Error (line-267 native caller passes opaque
+   anyhow) and inlines {reason:#}, so the bridge renders
+   byte-identical through the transparent anyhow layer. ssh
+   pty.rs outcome ? holds via blanket From; pty tests use
+   matches! on Ok and hold. pty lib 19 plus ssh lib 13 plus
+   parser 267+303 plus core lib 410 plus ssh integration 68
+   plus core integration 629 green; workspace check clean;
+   pty plus ssh clippy zero, fmt clean on three touched
+   files.
+   FOLLOW-UP: diag::eval_run_spawn_failed keeps
+   &anyhow::Error with {reason:#} inlining (passthrough
+   shape, no source). Once the line-267 native spawn caller
+   in handlers.rs flips to DiagnosticResult, normalize the
+   ctor to reason: Diagnostic by value with with_source and
+   drop the &anyhow::Error::new(e) flattening bridge at the
+   run_pty call site.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
