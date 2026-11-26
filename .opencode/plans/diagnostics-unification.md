@@ -2324,6 +2324,38 @@ transport, so this phase is mechanical:
    the tail value, explicit return Err in diverging if/for arms.
    Core 410 plus integration 629 green; clippy at baseline
    (3 pre-existing), fmt clean on both touched files.
+   Call/loop dispatch bulk step 2026-11-27 (file-sized batch):
+   thirteen new dsl.eval.* ctors with key plus wording pins.
+   FOR trio: for_needs_key_value parameterless, for_map_key_type
+   with actual, for_needs_list_or_map with Value and Debug in the
+   ctor. Gate trio: call_recursion_limit with base name,
+   call_arity_exact plus call_arity_range with counts.
+   Resolve pair: call_unknown with name plus hint (one key for the
+   registry plus script-site arms), call_unknown_rpn separate key
+   for the backtick-less RPN spelling. Return-tag:
+   call_return_tag_failed takes the Diagnostic by value and inlines
+   its text flat with no source (the original anyhow bang built a
+   flat string, so the chain stays flat and no anyhow round-trip
+   is needed). Boundary: call_missing_param with param plus base,
+   call_zero_value_failed takes the Diagnostic by value with bare
+   outer plus chained source (the original with_context was
+   already two layers, so chain depth is unchanged),
+   call_flow_crosses_func with step plus word plus func covering
+   BREAK and CONTINUE. Wrapper: call_failed with ref-anyhow-Error
+   and bare outer plus chained source (matching
+   eval_symlink_failed, not the copy_failed inline shape, per
+   review). Fifteen sites re-keyed across for_loop,
+   build_script_entry, resolve_call_entry, gate_call, and
+   execute_call_entry. Unused KEYWORD_FOR, KEYWORD_FUNC,
+   KEYWORD_TYPE, MAP_TYPE_NAME, and STRING_TYPE_NAME imports
+   dropped from handlers. Bytes identical (only contains pins on
+   arity, unknown-function, recursion, and boundary wordings).
+   Core 410 plus integration 629 green; clippy at baseline
+   (3 pre-existing), fmt clean on both touched files.
+   AMEND 2026-11-27 (review-directed, SEV-2): eval_call_failed
+   corrected to bare outer plus chained source; entry moved below
+   WITH_IO so PROMPT-bind stays adjacent to its AMEND. Gates stay
+   green.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

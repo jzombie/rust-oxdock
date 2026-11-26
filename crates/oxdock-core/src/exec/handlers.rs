@@ -15,13 +15,13 @@ use oxdock_fs::to_forward_slashes;
 use oxdock_parser::constants::KEYWORD_RUN;
 use oxdock_parser::constants::{
     KEYWORD_APPEND, KEYWORD_ARCHIVE, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL,
-    KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_EXPAND, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_ISOLATED,
-    KEYWORD_LET, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_RETURN, KEYWORD_TIMEOUT, KEYWORD_TYPE,
-    KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WRITE,
+    KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_EXPAND, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_READ,
+    KEYWORD_READ_LINE, KEYWORD_RETURN, KEYWORD_TIMEOUT, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO,
+    KEYWORD_WRITE,
 };
 use oxdock_parser::{
-    Arg, Command, Expr, IoBinding, IoStream, MAP_TYPE_NAME, PipeTarget, STRING_TYPE_NAME, Step,
-    StepKind, TypeTag, Value, WorkspaceTarget, render_structural, sigil_var,
+    Arg, Command, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value,
+    WorkspaceTarget, render_structural, sigil_var,
 };
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
@@ -2542,9 +2542,8 @@ pub(crate) fn for_loop<P: ProcessManager>(
         return Ok(Flow::Done);
     }
     if let Some(map) = iterable.as_map() {
-        let key_name = key_var.ok_or_else(|| {
-            anyhow!("{KEYWORD_FOR} loop over Map requires key and value bindings: {KEYWORD_FOR} $k: {STRING_TYPE_NAME}, $v: {KEYWORD_TYPE} IN $map")
-        })?;
+        let key_name =
+            key_var.ok_or_else(|| anyhow::Error::new(diag::eval_for_needs_key_value()))?;
         let clean_key_var = key_name.trim_start_matches('$').to_string();
         let mut keys: Vec<_> = map.keys().cloned().collect();
         keys.sort();
@@ -2555,10 +2554,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
             None => TypeTag::String,
         };
         if !matches!(kt, TypeTag::String) {
-            anyhow::bail!(
-                "{KEYWORD_FOR} loop over {MAP_TYPE_NAME} requires a {STRING_TYPE_NAME} key variable, got {}",
-                kt.name(),
-            );
+            return Err(anyhow::Error::new(diag::eval_for_map_key_type(kt.name())));
         }
         for k in keys {
             let v = map[&k].clone();
@@ -2600,10 +2596,9 @@ pub(crate) fn for_loop<P: ProcessManager>(
         }
         return Ok(Flow::Done);
     }
-    bail!(
-        "{KEYWORD_FOR} loop requires a List or Map iterable, found {:?}",
-        iterable
-    )
+    Err(anyhow::Error::new(diag::eval_for_needs_list_or_map(
+        &iterable,
+    )))
 }
 
 /// Define a user function (`FUNC NAME($p: TYPE, ...) { ... }}).
@@ -2700,7 +2695,7 @@ fn build_script_entry<P: ProcessManager>(
     let resolved_params = super::native::resolve_script_params(state, name, &raw.params)?;
     let return_tag = state
         .resolve_tag(&raw.return_spelling)
-        .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+        .map_err(|err| anyhow::Error::new(diag::eval_call_return_tag_failed(name, err)))?;
     state.check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
     Ok(super::native::FuncEntry {
         meta: super::native::FuncMeta {
@@ -2772,10 +2767,12 @@ pub(crate) fn resolve_call_entry<P: ProcessManager>(
     let entry: super::native::FuncEntry<P> = match canonical {
         Some(key) => match cx.state.functions.get(&key) {
             Some(entry) => entry,
-            None => bail!(
-                "unknown function `{name}`{}",
-                super::import::missing_import_hint(cx.state, name)
-            ),
+            None => {
+                return Err(anyhow::Error::new(diag::eval_call_unknown(
+                    name,
+                    &super::import::missing_import_hint(cx.state, name),
+                )));
+            }
         },
         None => match cx.state.functions.get(name) {
             // Hosts and natives resolve as spelled (including
@@ -2790,10 +2787,12 @@ pub(crate) fn resolve_call_entry<P: ProcessManager>(
                 Some(super::import::ScriptSite::File { raw, unit }) => {
                     build_script_entry(cx.state, name, &raw, unit)?
                 }
-                None => bail!(
-                    "unknown function `{name}`{}",
-                    super::import::missing_import_hint(cx.state, name)
-                ),
+                None => {
+                    return Err(anyhow::Error::new(diag::eval_call_unknown(
+                        name,
+                        &super::import::missing_import_hint(cx.state, name),
+                    )));
+                }
             },
         },
     };
@@ -2811,10 +2810,9 @@ pub(crate) fn gate_call<P: ProcessManager>(
 ) -> Result<()> {
     // Global recursion check.
     if cx.state.call_depth >= MAX_CALL_DEPTH {
-        bail!(
-            "recursion depth limit exceeded in {KEYWORD_FUNC} {}",
-            super::base_name(name)
-        );
+        return Err(anyhow::Error::new(diag::eval_call_recursion_limit(
+            super::base_name(name),
+        )));
     }
     // Pre-evaluation arity gate from the entry metadata. Trailing
     // optional MAP params widen exact counts to ranges; everything
@@ -2823,20 +2821,18 @@ pub(crate) fn gate_call<P: ProcessManager>(
         let required = super::required_arity(params);
         if nargs < required || nargs > params.len() {
             if required == params.len() {
-                bail!(
-                    "{}() expects {} argument(s), got {}",
+                return Err(anyhow::Error::new(diag::eval_call_arity_exact(
                     super::base_name(name),
                     params.len(),
-                    nargs
-                );
+                    nargs,
+                )));
             }
-            bail!(
-                "{}() expects {} to {} argument(s), got {}",
+            return Err(anyhow::Error::new(diag::eval_call_arity_range(
                 super::base_name(name),
                 required,
                 params.len(),
-                nargs
-            );
+                nargs,
+            )));
         }
     }
     Ok(())
@@ -2979,16 +2975,17 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             // unzeroable optionals, so the fill cannot fail here.
             for (pname, ptype, optional) in def.params.iter().skip(arg_vals.len()) {
                 if !optional {
-                    bail!(
-                        "internal error: missing non-optional param `${pname}` in {}()",
-                        super::base_name(name)
-                    );
+                    return Err(anyhow::Error::new(diag::eval_call_missing_param(
+                        pname,
+                        super::base_name(name),
+                    )));
                 }
-                arg_vals.push(super::optional_zero_value(ptype).with_context(|| {
-                    format!(
-                        "function `{}` optional param `${pname}` has no zero value",
-                        super::base_name(name)
-                    )
+                arg_vals.push(super::optional_zero_value(ptype).map_err(|err| {
+                    anyhow::Error::new(diag::eval_call_zero_value_failed(
+                        super::base_name(name),
+                        pname,
+                        err,
+                    ))
                 })?);
             }
             let outcome: Result<Value> = (|| {
@@ -3045,18 +3042,12 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
                 match flow {
                     Flow::Done => Ok(Value::string(String::new())),
                     Flow::Return { value, .. } => Ok(value),
-                    Flow::Break { idx } => {
-                        bail!(
-                            "step {}: {KEYWORD_BREAK} cannot cross function boundary (in {name}())",
-                            idx + 1
-                        );
-                    }
-                    Flow::Continue { idx } => {
-                        bail!(
-                            "step {}: {KEYWORD_CONTINUE} cannot cross function boundary (in {name}())",
-                            idx + 1
-                        );
-                    }
+                    Flow::Break { idx } => Err(anyhow::Error::new(
+                        diag::eval_call_flow_crosses_func(idx + 1, KEYWORD_BREAK, name),
+                    )),
+                    Flow::Continue { idx } => Err(anyhow::Error::new(
+                        diag::eval_call_flow_crosses_func(idx + 1, KEYWORD_CONTINUE, name),
+                    )),
                 }
             })();
             let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
@@ -3082,10 +3073,10 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
         FuncBody::Pure(func) => func(arg_vals),
         FuncBody::Ctx(func) => {
             if rpn_only && !entry.meta.rpn {
-                anyhow::bail!(
-                    "unknown function {name}{}",
-                    super::import::missing_import_hint(cx.state, name)
-                );
+                return Err(anyhow::Error::new(diag::eval_call_unknown_rpn(
+                    name,
+                    &super::import::missing_import_hint(cx.state, name),
+                )));
             }
             func(cx, arg_vals)
         }
@@ -3097,7 +3088,7 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             }
         }
     }
-    .with_context(|| format!("function `{name}` failed"))?;
+    .map_err(|err| anyhow::Error::new(diag::eval_call_failed(name, &err)))?;
     super::args::check_host_return_value(
         &format!("function `{}` returned", super::base_name(name)),
         &entry.meta.returns,

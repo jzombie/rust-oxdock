@@ -12,7 +12,7 @@ use oxdock_parser::{
     ANY_TYPE_NAME, BOOL_TYPE_NAME, Expr, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
     KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT,
     KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT, KEYWORD_ENV,
-    KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV,
+    KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV,
     KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR,
     KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE,
     KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH,
@@ -861,6 +861,188 @@ pub fn func_unknown(name: &str) -> Diagnostic {
         "dsl.func.unknown",
         message,
         Diagnostic::make_fields(&[("name", name)]),
+    )
+}
+
+/// Runtime unknown function with an import hint suffix. Takes the
+/// name and the hint (empty when no file exports the base); joining
+/// lives here. One key covers the registry, script-site, and RPN
+/// spellings only when the backtick shape matches: the RPN spelling
+/// reports the bare name, so it owns a separate key below.
+pub fn eval_call_unknown(name: &str, hint: &str) -> Diagnostic {
+    let message = format!("unknown function `{name}`{hint}");
+    Diagnostic::new(
+        "dsl.eval.call_unknown",
+        message,
+        Diagnostic::make_fields(&[("name", name), ("hint", hint)]),
+    )
+}
+
+/// Runtime unknown function on the RPN path. Takes the name and the
+/// hint; the RPN spelling reports the bare name without backticks,
+/// so this owns a separate key from `eval_call_unknown`.
+pub fn eval_call_unknown_rpn(name: &str, hint: &str) -> Diagnostic {
+    let message = format!("unknown function {name}{hint}");
+    Diagnostic::new(
+        "dsl.eval.call_unknown_rpn",
+        message,
+        Diagnostic::make_fields(&[("name", name), ("hint", hint)]),
+    )
+}
+
+/// Function return-tag resolution failure. Takes the function name
+/// and the underlying diagnostic verbatim: the original site built a
+/// flat `anyhow!` string, so the text inlines with no `with_source`
+/// and the chain stays flat. No `anyhow` round-trip: the callee
+/// already returns `DiagnosticResult`.
+pub fn eval_call_return_tag_failed(name: &str, reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    let message = format!("function `{name}`: {reason_text}");
+    Diagnostic::new(
+        "dsl.eval.call_return_tag_failed",
+        message,
+        Diagnostic::make_fields(&[("function", name), ("reason", &reason_text)]),
+    )
+}
+
+/// Call failure wrapper for one invocation. Takes the function name
+/// and the underlying (mixed-shape) failure; bare outer context
+/// plus chained source, matching `eval_symlink_failed` and
+/// `eval_install_failed` so the snapshot renderer keeps every
+/// layer.
+pub fn eval_call_failed(name: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.eval.call_failed",
+        format!("function `{name}` failed"),
+        Diagnostic::make_fields(&[("function", name), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// Recursion depth budget exhausted. Takes the caller-rendered base
+/// name; quoting lives here.
+pub fn eval_call_recursion_limit(func: &str) -> Diagnostic {
+    let message = format!("recursion depth limit exceeded in {KEYWORD_FUNC} {func}");
+    Diagnostic::new(
+        "dsl.eval.call_recursion_limit",
+        message,
+        Diagnostic::make_fields(&[("function", func)]),
+    )
+}
+
+/// Exact arity mismatch. Takes the caller-rendered base name and the
+/// expected/got counts; joining lives here.
+pub fn eval_call_arity_exact(func: &str, expected: usize, got: usize) -> Diagnostic {
+    let message = format!("{func}() expects {expected} argument(s), got {got}");
+    Diagnostic::new(
+        "dsl.eval.call_arity_exact",
+        message,
+        Diagnostic::make_fields(&[
+            ("function", func),
+            ("expected", &expected.to_string()),
+            ("got", &got.to_string()),
+        ]),
+    )
+}
+
+/// Ranged arity mismatch (trailing optional MAP params). Takes the
+/// caller-rendered base name and the required/max/got counts.
+pub fn eval_call_arity_range(func: &str, min: usize, max: usize, got: usize) -> Diagnostic {
+    let message = format!("{func}() expects {min} to {max} argument(s), got {got}");
+    Diagnostic::new(
+        "dsl.eval.call_arity_range",
+        message,
+        Diagnostic::make_fields(&[
+            ("function", func),
+            ("min", &min.to_string()),
+            ("max", &max.to_string()),
+            ("got", &got.to_string()),
+        ]),
+    )
+}
+
+/// Internal missing-parameter invariant. Takes the parameter name
+/// and the caller-rendered base name; quoting lives here.
+pub fn eval_call_missing_param(param: &str, func: &str) -> Diagnostic {
+    let message = format!("internal error: missing non-optional param `${param}` in {func}()");
+    Diagnostic::new(
+        "dsl.eval.call_missing_param",
+        message,
+        Diagnostic::make_fields(&[("param", param), ("function", func)]),
+    )
+}
+
+/// Optional parameter with no zero value. Takes the caller-rendered
+/// base name, the parameter name, and the underlying diagnostic by
+/// value: the original site wrapped a `DiagnosticResult` with
+/// `with_context`, so the bare outer text rides with the concrete
+/// diagnostic as chained source and the chain depth is unchanged.
+pub fn eval_call_zero_value_failed(func: &str, param: &str, reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    let message = format!("function `{func}` optional param `${param}` has no zero value");
+    Diagnostic::new(
+        "dsl.eval.call_zero_value_failed",
+        message,
+        Diagnostic::make_fields(&[
+            ("function", func),
+            ("param", param),
+            ("reason", &reason_text),
+        ]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// Flow word crossing a function boundary at runtime. Takes the
+/// 1-based step number, the word, and the function name; one key
+/// covers `BREAK` and `CONTINUE`, mirroring
+/// `check_flow_outside_loop`.
+pub fn eval_call_flow_crosses_func(step: usize, word: &str, func: &str) -> Diagnostic {
+    let message = format!("step {step}: {word} cannot cross function boundary (in {func}())");
+    Diagnostic::new(
+        "dsl.eval.call_flow_crosses_func",
+        message,
+        Diagnostic::make_fields(&[
+            ("step", &step.to_string()),
+            ("flow", word),
+            ("function", func),
+        ]),
+    )
+}
+
+/// `FOR` loop over a map without both key and value bindings.
+/// Parameterless: the remediation names the shared keyword and type
+/// constants.
+pub fn eval_for_needs_key_value() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.for_needs_key_value",
+        format!(
+            "{KEYWORD_FOR} loop over Map requires key and value bindings: {KEYWORD_FOR} $k: {STRING_TYPE_NAME}, $v: {KEYWORD_TYPE} IN $map"
+        ),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `FOR` loop over a map with a non-STRING key variable. Takes the
+/// actual key type name.
+pub fn eval_for_map_key_type(actual: &str) -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.for_map_key_type",
+        format!(
+            "{KEYWORD_FOR} loop over {MAP_TYPE_NAME} requires a {STRING_TYPE_NAME} key variable, got {actual}"
+        ),
+        Diagnostic::make_fields(&[("actual", actual)]),
+    )
+}
+
+/// `FOR` loop over a non-list, non-map value. Takes the offending
+/// value; `Debug` rendering lives here.
+pub fn eval_for_needs_list_or_map(got: &super::Value) -> Diagnostic {
+    let got_text = format!("{got:?}");
+    Diagnostic::new(
+        "dsl.eval.for_needs_list_or_map",
+        format!("{KEYWORD_FOR} loop requires a List or Map iterable, found {got_text}"),
+        Diagnostic::make_fields(&[("got", &got_text)]),
     )
 }
 
@@ -5522,6 +5704,19 @@ mod tests {
             func_placeholder_unknown("M", "F", &["M::F".to_string()]).key(),
             func_describe_unqualified("F").key(),
             func_unknown("F").key(),
+            eval_call_unknown("F", "").key(),
+            eval_call_unknown_rpn("F", "").key(),
+            eval_call_return_tag_failed("F", eval_remove_missing("x")).key(),
+            eval_call_failed("F", &anyhow::anyhow!("x")).key(),
+            eval_call_recursion_limit("F").key(),
+            eval_call_arity_exact("F", 1, 0).key(),
+            eval_call_arity_range("F", 1, 2, 0).key(),
+            eval_call_missing_param("p", "F").key(),
+            eval_call_zero_value_failed("F", "p", eval_remove_missing("x")).key(),
+            eval_call_flow_crosses_func(3, "BREAK", "F").key(),
+            eval_for_needs_key_value().key(),
+            eval_for_map_key_type("INT").key(),
+            eval_for_needs_list_or_map(&crate::Value::string("x".to_string())).key(),
             std_unknown_type("T").key(),
             std_contains_needle_type("INT").key(),
             std_contains_haystack_type("INT").key(),
@@ -5887,6 +6082,59 @@ mod tests {
                 .contains("`M::F`")
         );
         assert_eq!(func_unknown("F").message(), "unknown function `F`");
+        assert_eq!(eval_call_unknown("F", "").message(), "unknown function `F`");
+        assert_eq!(
+            eval_call_unknown("F", " (did you mean `X`?)").message(),
+            "unknown function `F` (did you mean `X`?)"
+        );
+        assert_eq!(
+            eval_call_unknown_rpn("F", "").message(),
+            "unknown function F"
+        );
+        assert_eq!(
+            eval_call_return_tag_failed("F", eval_remove_missing("x")).message(),
+            "function `F`: REMOVE x: no such file or directory"
+        );
+        assert_eq!(
+            eval_call_failed("F", &anyhow::anyhow!("boom")).message(),
+            "function `F` failed"
+        );
+        assert_eq!(
+            eval_call_recursion_limit("BOOM").message(),
+            "recursion depth limit exceeded in FUNC BOOM"
+        );
+        assert_eq!(
+            eval_call_arity_exact("F", 1, 0).message(),
+            "F() expects 1 argument(s), got 0"
+        );
+        assert_eq!(
+            eval_call_arity_range("F", 1, 2, 3).message(),
+            "F() expects 1 to 2 argument(s), got 3"
+        );
+        assert_eq!(
+            eval_call_missing_param("p", "F").message(),
+            "internal error: missing non-optional param `$p` in F()"
+        );
+        assert_eq!(
+            eval_call_zero_value_failed("F", "p", eval_remove_missing("x")).message(),
+            "function `F` optional param `$p` has no zero value"
+        );
+        assert_eq!(
+            eval_call_flow_crosses_func(3, "BREAK", "F").message(),
+            "step 3: BREAK cannot cross function boundary (in F())"
+        );
+        assert_eq!(
+            eval_for_needs_key_value().message(),
+            "FOR loop over Map requires key and value bindings: FOR $k: STRING, $v: TYPE IN $map"
+        );
+        assert_eq!(
+            eval_for_map_key_type("INT").message(),
+            "FOR loop over MAP requires a STRING key variable, got INT"
+        );
+        assert_eq!(
+            eval_for_needs_list_or_map(&crate::Value::string("x".to_string())).message(),
+            "FOR loop requires a List or Map iterable, found STRING(\"x\")"
+        );
         assert_eq!(
             func_param_values_without_type("p", "F").message(),
             "param 'p' of 'F' declares values without a type"
