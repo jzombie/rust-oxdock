@@ -376,13 +376,12 @@ fn read_and_parse_import(
 ) -> DiagnosticResult<Vec<Step>> {
     let bytes =
         read_import_bytes(fs, resolved).map_err(|e| import_diag::import_cannot_read(path, &e))?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|e| import_diag::import_bad_utf8(path, &anyhow::Error::new(e)))?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| import_diag::import_bad_utf8(path, &e))?;
     let table = table.clone();
     let mut reserved = super::native::builtin_function_names();
     reserved.extend(table.reserved_base_names());
     oxdock_parser::parse_script_with_modules(text, crate::lower_command, reserved, table)
-        .map_err(|e| import_diag::import_parse_failed(path, &anyhow::Error::new(e)))
+        .map_err(|e| import_diag::import_parse_failed(path, &e))
 }
 
 /// Execute `IMPORT [[F, G FROM "<path>" (AS <ALIAS>)?]]`: load the
@@ -1627,8 +1626,7 @@ fn load_file<P: ProcessManager>(
     }
     let bytes = read_import_bytes(state.fs.as_ref(), &resolved)
         .map_err(|e| import_diag::import_cannot_read(path, &e))?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|e| import_diag::import_bad_utf8(path, &anyhow::Error::new(e)))?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| import_diag::import_bad_utf8(path, &e))?;
     let table = state.module_table.clone();
     let mut reserved = super::native::builtin_function_names();
     reserved.extend(table.reserved_base_names());
@@ -1638,7 +1636,7 @@ fn load_file<P: ProcessManager>(
         reserved,
         table,
     )
-    .map_err(|e| import_diag::import_parse_failed(path, &anyhow::Error::new(e)))?;
+    .map_err(|e| import_diag::import_parse_failed(path, &e))?;
     state.modules.insert(
         key,
         super::state::ModuleRecord {

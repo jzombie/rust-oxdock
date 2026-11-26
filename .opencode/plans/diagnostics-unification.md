@@ -3057,6 +3057,21 @@ transport, so this phase is mechanical:
    import_const_forward_failed (ForwardError redesign).
    core lib 410 plus 629 plus 12 plus 2 green; clippy
    pre-existing baseline only; fmt clean.
+   core import-leaf normalization bulk 2026-11-27
+   (diagnostics.rs 2 ctors plus import.rs 4 sites):
+   import_bad_utf8 normalizes from reason: &anyhow::Error
+   to &std::str::Utf8Error and import_parse_failed to
+   &ParseError; all 4 sites (read_and_parse_import plus
+   load_file) drop the anyhow::Error::new round-trip.
+   Byte-identical by construction: Utf8Error is a leaf and
+   ParseError carries no source override, so bare
+   {reason} equals the retired anyhow {:#} text. Pins
+   swap anyhow placeholders for utf8_err_sample (existing
+   helper, same shape as std_load_toml_not_utf8) plus a
+   new parse_err_sample built from a sourceless
+   typing_max_depth leaf via ParseError::from_diagnostic.
+   core lib 410 plus 629 plus 12 plus 2 green; clippy
+   pre-existing baseline only; fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

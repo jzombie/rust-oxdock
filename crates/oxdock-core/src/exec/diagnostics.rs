@@ -18,8 +18,8 @@ use oxdock_parser::{
     KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN,
     KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TIMEOUT,
     KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE,
-    LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME,
-    STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
+    LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, ParseError,
+    SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
 };
 
 use super::function_names::{
@@ -480,9 +480,11 @@ pub fn import_cannot_read(path: &str, reason: &anyhow::Error) -> Diagnostic {
     )
 }
 
-/// IMPORT file that is not valid UTF-8.
-pub fn import_bad_utf8(path: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+/// IMPORT file that is not valid UTF-8. Takes the decoding failure
+/// directly: `Utf8Error` is a leaf, so `{reason}` matches the retired
+/// anyhow-chain bytes exactly.
+pub fn import_bad_utf8(path: &str, reason: &std::str::Utf8Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
     let message = format!("{KEYWORD_IMPORT} `{path}` is not valid UTF-8: {reason_text}");
     Diagnostic::new(
         "dsl.import.bad_utf8",
@@ -491,9 +493,11 @@ pub fn import_bad_utf8(path: &str, reason: &anyhow::Error) -> Diagnostic {
     )
 }
 
-/// IMPORT file that fails to parse.
-pub fn import_parse_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+/// IMPORT file that fails to parse. Takes the parser failure
+/// directly: `ParseError` carries no `source` chain, so `{reason}`
+/// matches the retired anyhow-chain bytes exactly.
+pub fn import_parse_failed(path: &str, reason: &ParseError) -> Diagnostic {
+    let reason_text = format!("{reason}");
     let message = format!("{KEYWORD_IMPORT} `{path}` failed to parse: {reason_text}");
     Diagnostic::new(
         "dsl.import.parse_failed",
@@ -6258,6 +6262,18 @@ mod tests {
         regex::Regex::new(&pattern).unwrap_err()
     }
 
+    /// A `ParseError` sample built from a sourceless typing leaf:
+    /// the round trip preserves the message, so pins observe the
+    /// real inline shape instead of an anyhow placeholder.
+    fn parse_err_sample() -> ParseError {
+        use oxdock_parser::{ParseErrorKind, SpanContext};
+        ParseError::from_diagnostic(
+            ParseErrorKind::Syntax,
+            typing_max_depth(8, "X"),
+            &SpanContext::line_only(0),
+        )
+    }
+
     /// An `ExitStatus` sample built through the shared test helper:
     /// the status rendering is platform-native, so tests pin the
     /// prefix only, never the full text.
@@ -6315,8 +6331,8 @@ mod tests {
             import_not_found("f").key(),
             import_cannot_resolve("f", &anyhow::anyhow!("x")).key(),
             import_cannot_read("f", &anyhow::anyhow!("x")).key(),
-            import_bad_utf8("f", &anyhow::anyhow!("x")).key(),
-            import_parse_failed("f", &anyhow::anyhow!("x")).key(),
+            import_bad_utf8("f", &utf8_err_sample()).key(),
+            import_parse_failed("f", &parse_err_sample()).key(),
             import_missing_export("f", "FUNC", "g").key(),
             import_unknown_member("f", "function", "g").key(),
             import_unknown_type("f", "T", None).key(),
@@ -8338,12 +8354,12 @@ mod tests {
                 .contains("cannot be read")
         );
         assert!(
-            import_bad_utf8("f", &anyhow::anyhow!("root"))
+            import_bad_utf8("f", &utf8_err_sample())
                 .message()
                 .contains("not valid UTF-8")
         );
         assert!(
-            import_parse_failed("f", &anyhow::anyhow!("root"))
+            import_parse_failed("f", &parse_err_sample())
                 .message()
                 .contains("failed to parse")
         );
