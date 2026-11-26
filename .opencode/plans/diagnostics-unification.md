@@ -2467,6 +2467,16 @@ transport, so this phase is mechanical:
    typed-layer sites). Core lib 410 plus integration 629 green
    (including 19 remote); clippy at baseline (3 pre-existing),
    fmt clean on all three touched files.
+   write-live-pipe bulk 2026-11-27 (file-sized batch): one new
+   dsl.eval.write_live_pipe ctor with key plus both-stream pins.
+   One key covers write_stdout and write_stderr (message stays
+   stream-free for identical bytes; stream rides as a structured
+   field), mirroring eval_with_io_tty_live_pipe. Two sites
+   re-keyed; bail import dropped from io. TaskTee Write keeps its
+   io::Error::other spelling (io::Result boundary, same
+   create_os_pipe precedent). Core lib 410 plus integration 629
+   green; clippy at baseline (3 pre-existing), fmt clean on both
+   touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

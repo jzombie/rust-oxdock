@@ -3,8 +3,6 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex, atomic::AtomicU64};
 
 use anyhow::Result;
-#[cfg(not(miri))]
-use anyhow::bail;
 use oxdock_diagnostics::DiagnosticResult;
 #[cfg(not(miri))]
 use oxdock_pipe::OsPipeWriter;
@@ -367,9 +365,9 @@ where
         // OS entries to shared handles for them, and promotion only fires
         // for single RUN bodies. This arm is defensive only.
         #[cfg(not(miri))]
-        Some(StreamHandle::Os(_)) => {
-            bail!("cannot write DSL output to a live OS pipe")
-        }
+        Some(StreamHandle::Os(_)) => Err(anyhow::Error::new(
+            super::diagnostics::eval_write_live_pipe("stdout"),
+        )),
         // `None` inherits host stdout: only explicit `Stream` bindings
         // reroute DSL output.
         None => {
@@ -391,9 +389,9 @@ where
             Ok(())
         }
         #[cfg(not(miri))]
-        Some(StreamHandle::Os(_)) => {
-            bail!("cannot write DSL output to a live OS pipe")
-        }
+        Some(StreamHandle::Os(_)) => Err(anyhow::Error::new(
+            super::diagnostics::eval_write_live_pipe("stderr"),
+        )),
         None => {
             let mut stderr = io::stderr();
             op(&mut stderr)

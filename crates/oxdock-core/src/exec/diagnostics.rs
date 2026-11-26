@@ -2222,6 +2222,20 @@ pub fn eval_with_io_tty_live_pipe(stream: &str) -> Diagnostic {
     )
 }
 
+/// DSL output arriving on a live OS pipe. Takes the stream name
+/// (`stdout`/`stderr`); one key covers `write_stdout` and
+/// `write_stderr`, mirroring `eval_with_io_tty_live_pipe`. The message
+/// stays stream-free (identical bytes at both sites); the stream rides
+/// as a structured field. No source rides along: the defensive arm
+/// carries no underlying error.
+pub fn eval_write_live_pipe(stream: &str) -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.write_live_pipe",
+        "cannot write DSL output to a live OS pipe".to_string(),
+        Diagnostic::make_fields(&[("stream", stream)]),
+    )
+}
+
 /// `ASYNC` worker missing its spawned entry. Parameterless: the
 /// original site discards the channel error, so the message stands
 /// alone with no source.
@@ -6513,6 +6527,7 @@ mod tests {
             eval_remote_push_target_outside("a", &anyhow::anyhow!("x")).key(),
             eval_remote_push_symlink_over_dir("a").key(),
             eval_with_io_tty_live_pipe("stdin").key(),
+            eval_write_live_pipe("stdout").key(),
             eval_run_cancelled("echo hi").key(),
             eval_run_argv_cancelled(&["echo".to_string()]).key(),
             eval_run_unexpected_capture("echo hi").key(),
@@ -7090,6 +7105,14 @@ mod tests {
         assert_eq!(
             eval_with_io_tty_live_pipe("stdout").message(),
             "WITH_IO [tty] stdout cannot arrive on a live OS pipe; bind a script pipe with stdout=$var"
+        );
+        assert_eq!(
+            eval_write_live_pipe("stdout").message(),
+            "cannot write DSL output to a live OS pipe"
+        );
+        assert_eq!(
+            eval_write_live_pipe("stderr").message(),
+            "cannot write DSL output to a live OS pipe"
         );
         assert_eq!(
             eval_async_entry_unavailable().message(),
