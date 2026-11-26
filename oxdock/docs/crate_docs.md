@@ -8297,7 +8297,7 @@ let script = indoc! {"
 let err = oxdock_parser::parse_script(script, oxdock_parser::lower_command)
     .expect_err("must fail");
 let expected = indoc! {"
-    unknown command: FROBNICATE
+    unknown command \"FROBNICATE\"
       --> line 1, col 1-13
       1 | FROBNICATE hi
         | ^^^^^^^^^^^^^
@@ -8339,7 +8339,7 @@ let script = indoc! {"
 let err = oxdock_parser::parse_script(script, oxdock_parser::lower_command)
     .expect_err("must fail");
 let expected = indoc! {"
-    invalid syntax for command WITH_IO: WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`: invalid binding `stdout=discard`; bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`); `tty` is a bare flag for RUN steps, with `rows = <int>` / `cols = <int>` geometry (e.g. `[tty, rows=40, cols=100]`); got `[stdout=discard] ECHO hi`.
+    WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`: invalid binding `stdout=discard`; bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`); `tty` is a bare flag for RUN steps, with `rows = <int>` / `cols = <int>` geometry (e.g. `[tty, rows=40, cols=100]`); got `[stdout=discard] ECHO hi`
       --> line 1, col 1-32
       1 | WITH_IO [stdout=discard] ECHO hi
         | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
