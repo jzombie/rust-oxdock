@@ -39,7 +39,7 @@ fn load_markdown(name: &str) -> Result<String> {
 }
 
 fn load_blocks(name: &str) -> Result<Vec<FencedBlock>> {
-    extract_fenced_blocks(&load_markdown(name)?, "oxdock")
+    Ok(extract_fenced_blocks(&load_markdown(name)?, "oxdock")?)
 }
 
 fn load_readme_blocks() -> Result<Vec<FencedBlock>> {

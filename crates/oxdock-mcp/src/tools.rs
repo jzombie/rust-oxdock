@@ -6,13 +6,14 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use anyhow::{Result, bail};
 use oxdock_core::{
     FuncMeta, FuncParam, TypeTag, Value, fill_optional_args, json_to_value_typed,
     value_to_json_typed,
 };
+use oxdock_diagnostics::DiagnosticResult;
 use serde_json::{Map, Value as JsonValue};
 
+use crate::diagnostics as mcp_diag;
 use crate::schema::{is_json_compatible, schema_for_tag};
 
 /// One servable tool: bare MCP name, qualified script name, and the
@@ -39,13 +40,13 @@ pub struct McpTool {
 /// Build the servable tool table from exported metas and script docs.
 /// `docs` maps qualified names to (summary, docs). Errors on duplicate
 /// bare names and on opaque parameter or return types.
-pub fn build_tool_table(metas: Vec<FuncMeta>, docs: &HashMapDoc) -> Result<Vec<McpTool>> {
+pub fn build_tool_table(metas: Vec<FuncMeta>, docs: &HashMapDoc) -> DiagnosticResult<Vec<McpTool>> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::with_capacity(metas.len());
     for meta in metas {
         let base = oxdock_parser::base_name(&meta.name).to_string();
         if !seen.insert(base.clone()) {
-            bail!("duplicate MCP tool name `{base}`");
+            return Err(mcp_diag::tool_duplicate_name(&base));
         }
         let description = tool_description(&meta, docs);
         let (input_schema, params) = input_schema_for(&meta)?;
@@ -93,7 +94,7 @@ fn tool_description(meta: &FuncMeta, docs: &HashMapDoc) -> String {
 /// Build the result envelope schema: `{result: <returns>}`. The `result`
 /// key keeps `structuredContent` a JSON object (as MCP requires) while
 /// the inner schema stays the function's real return type.
-pub fn output_schema_for(meta: &FuncMeta) -> Result<JsonValue> {
+pub fn output_schema_for(meta: &FuncMeta) -> DiagnosticResult<JsonValue> {
     let inner = match &meta.returns {
         Some(tag) => schema_for_tag(tag)?,
         None => JsonValue::Object(Map::new()),
@@ -120,14 +121,13 @@ pub fn wrap_structured(value: JsonValue) -> JsonValue {
 }
 /// Build the arguments JSON Schema plus the ordered param table.
 /// `params: None` (unconstrained `Value`) renders `{}` with no params.
-fn input_schema_for(meta: &FuncMeta) -> Result<(JsonValue, Vec<FuncParam>)> {
+fn input_schema_for(meta: &FuncMeta) -> DiagnosticResult<(JsonValue, Vec<FuncParam>)> {
     if let Some(returns) = &meta.returns
         && !is_json_compatible(returns)
     {
-        bail!(
-            "cannot expose MCP tool `{}` with opaque return type",
-            oxdock_parser::base_name(&meta.name)
-        );
+        return Err(mcp_diag::tool_opaque_return(oxdock_parser::base_name(
+            &meta.name,
+        )));
     }
     let Some(params) = &meta.params else {
         return Ok((JsonValue::Object(Map::new()), Vec::new()));
@@ -141,11 +141,10 @@ fn input_schema_for(meta: &FuncMeta) -> Result<(JsonValue, Vec<FuncParam>)> {
             continue;
         };
         if !is_json_compatible(tag) {
-            bail!(
-                "cannot expose MCP tool `{}` with opaque parameter type for `${}`",
+            return Err(mcp_diag::tool_opaque_param(
                 oxdock_parser::base_name(&meta.name),
-                param.name
-            );
+                &param.name,
+            ));
         }
         let mut slot = schema_for_tag(tag)?;
         if let Some(allowed) = param.allowed
@@ -182,12 +181,12 @@ fn input_schema_for(meta: &FuncMeta) -> Result<(JsonValue, Vec<FuncParam>)> {
 /// Map a JSON arguments object to ordered `Value` words per the param
 /// table. Missing optional trailing MAP params fill `{}`; missing
 /// required params and surplus keys both fail.
-pub fn map_json_args(params: &[FuncParam], args: &JsonValue) -> Result<Vec<Value>> {
+pub fn map_json_args(params: &[FuncParam], args: &JsonValue) -> DiagnosticResult<Vec<Value>> {
     let empty = Map::new();
     let object = match args {
         JsonValue::Object(map) => map,
         JsonValue::Null => &empty,
-        _ => bail!("MCP tool arguments must be a JSON object"),
+        _ => return Err(mcp_diag::args_not_object()),
     };
     let required = oxdock_core::required_arity(params);
     let mut values = Vec::with_capacity(params.len());
@@ -201,22 +200,21 @@ pub fn map_json_args(params: &[FuncParam], args: &JsonValue) -> Result<Vec<Value
                 if param.optional {
                     values.push(Value::map(BTreeMap::new()));
                 } else {
-                    bail!("missing required MCP argument `{}`", param.name);
+                    return Err(mcp_diag::args_missing_required(&param.name));
                 }
             }
         }
     }
     if values.len() < required || values.len() > params.len() {
-        bail!(
-            "MCP argument count {} out of range {}..={}",
+        return Err(mcp_diag::args_count_out_of_range(
             values.len(),
             required,
-            params.len()
-        );
+            params.len(),
+        ));
     }
     for key in object.keys() {
         if !params.iter().any(|param| &param.name == key) {
-            bail!("unknown MCP argument `{key}`");
+            return Err(mcp_diag::args_unknown(key));
         }
     }
     Ok(fill_optional_args(params, values))
@@ -225,6 +223,6 @@ pub fn map_json_args(params: &[FuncParam], args: &JsonValue) -> Result<Vec<Value
 /// Serialize a return `Value` to JSON through the declared return
 /// tag. `HANDLE` projects as `{"task_id": N}`; every other tag rides
 /// the untyped boundary. Opaque words fail naming the type.
-pub fn value_to_json_result(tag: Option<&TypeTag>, value: &Value) -> Result<JsonValue> {
+pub fn value_to_json_result(tag: Option<&TypeTag>, value: &Value) -> DiagnosticResult<JsonValue> {
     value_to_json_typed(tag, value)
 }

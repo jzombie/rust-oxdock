@@ -8,7 +8,9 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, bail};
+use oxdock_diagnostics::DiagnosticResult;
+
+use crate::diagnostics as ssh_diag;
 use oxdock_func_macro::oxdock_type;
 use tokio::sync::mpsc;
 
@@ -118,22 +120,22 @@ impl SshSessionTag {
     /// blocks: a saturated queue means the wire side is wedged behind
     /// network backpressure, and parking the reporter on it would stall
     /// teardown behind a dead network. That failure also bails loudly.
-    pub fn send_exit_status(&self, code: u32) -> Result<()> {
+    pub fn send_exit_status(&self, code: u32) -> DiagnosticResult<()> {
         let slot = self
             .inner
             .control_tx
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let Some(tx) = slot.as_ref() else {
-            bail!("SSH session pump already finished");
+            return Err(ssh_diag::session_pump_already_finished());
         };
         tx.try_send(crate::state::DownMsg::ExitStatus(code))
             .map_err(|err| match err {
                 tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                    anyhow::anyhow!("SSH session wire queue saturated under backpressure")
+                    ssh_diag::session_wire_queue_saturated()
                 }
                 tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                    anyhow::anyhow!("SSH session wire writer is gone")
+                    ssh_diag::session_wire_writer_gone()
                 }
             })?;
         Ok(())
@@ -175,11 +177,13 @@ impl SshSessionTag {
     /// Take the pump ends for `SSH_PUMP_CHANNEL`. A second pump on the
     /// same session bails instead of splitting bytes across pumps. The
     /// check runs before either take so a failed pump mutates nothing.
-    pub fn take_pump_ends(&self) -> Result<(mpsc::Receiver<UpMsg>, mpsc::Sender<DownMsg>)> {
+    pub fn take_pump_ends(
+        &self,
+    ) -> DiagnosticResult<(mpsc::Receiver<UpMsg>, mpsc::Sender<DownMsg>)> {
         let mut up = self.inner.up_rx.lock().unwrap_or_else(|p| p.into_inner());
         let mut down = self.inner.down_tx.lock().unwrap_or_else(|p| p.into_inner());
         if up.is_none() || down.is_none() {
-            bail!("SSH session already pumped");
+            return Err(ssh_diag::session_already_pumped());
         }
         Ok((up.take().unwrap(), down.take().unwrap()))
     }

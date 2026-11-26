@@ -37,6 +37,7 @@ muxio-core.workspace = true
 muxio-rpc-service-endpoint.workspace = true
 muxio-sync-rpc-server.workspace = true
 oxdock-core.workspace = true
+oxdock-diagnostics.workspace = true
 oxdock-fs.workspace = true
 oxdock-macros.workspace = true
 oxdock-markdown-plugin = { workspace = true, optional = true }

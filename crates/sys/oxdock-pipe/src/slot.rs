@@ -12,12 +12,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-// `Result` threads through the OS-pipe take-once slots, which are
-// compiled out under Miri.
 #[cfg_attr(miri, allow(unused_imports))]
-use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::backend::{PipeInner, ScriptPipe};
+use crate::diagnostics as pipe_diag;
 
 /// Shared reader half: mutex-guarded `Read` behind an `Arc`, so every
 /// binding aliases one channel.
@@ -58,14 +57,12 @@ impl OsPipeReader {
     /// Take the handle for `Stdio::from`. Bails deterministically if the
     /// descriptor was already consumed so a second spawn can never reuse a
     /// spent pipe or leave stdio unbound.
-    pub fn take(&self) -> Result<std::io::PipeReader> {
+    pub fn take(&self) -> DiagnosticResult<std::io::PipeReader> {
         self.inner
             .lock()
-            .map_err(|_| anyhow::anyhow!("os pipe reader lock poisoned"))?
+            .map_err(|_| pipe_diag::os_reader_lock_poisoned())?
             .take()
-            .ok_or_else(|| {
-                anyhow::anyhow!("os pipe handle has already been consumed by another process")
-            })
+            .ok_or_else(pipe_diag::os_handle_consumed)
     }
 
     /// Whether this half was already taken. A poisoned slot reports live
@@ -86,14 +83,12 @@ impl OsPipeWriter {
     /// Take the handle for `Stdio::from`. Bails deterministically if the
     /// descriptor was already consumed so a second spawn can never reuse a
     /// spent pipe or leave stdio unbound.
-    pub fn take(&self) -> Result<std::io::PipeWriter> {
+    pub fn take(&self) -> DiagnosticResult<std::io::PipeWriter> {
         self.inner
             .lock()
-            .map_err(|_| anyhow::anyhow!("os pipe writer lock poisoned"))?
+            .map_err(|_| pipe_diag::os_writer_lock_poisoned())?
             .take()
-            .ok_or_else(|| {
-                anyhow::anyhow!("os pipe handle has already been consumed by another process")
-            })
+            .ok_or_else(pipe_diag::os_handle_consumed)
     }
 
     /// Whether this half was already taken. A poisoned slot reports live
@@ -108,7 +103,7 @@ impl OsPipeWriter {
 /// copies immediately after spawning, otherwise the reader never sees EOF.
 /// Moved verbatim from `oxdock-process`; behavior is unchanged.
 #[cfg(not(miri))]
-pub fn create_os_pipe() -> Result<(OsPipeReader, OsPipeWriter)> {
+pub fn create_os_pipe() -> std::io::Result<(OsPipeReader, OsPipeWriter)> {
     let (reader, writer) = std::io::pipe()?;
     Ok((OsPipeReader::new(reader), OsPipeWriter::new(writer)))
 }
@@ -131,7 +126,7 @@ pub struct OsPipeEntry {
 #[cfg(not(miri))]
 impl OsPipeEntry {
     /// Mint a fresh kernel pair.
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new() -> std::io::Result<Self> {
         let (reader, writer) = create_os_pipe()?;
         Ok(Self { writer, reader })
     }
@@ -246,11 +241,11 @@ pub enum Materialized {
 /// context : RUN-terminated ⇒ OS, else script); a decided handle returns
 /// its kind unchanged. Later bindings with different needs adapt through
 /// the caller's resolution machinery instead of failing or upgrading here.
-pub fn materialize(handle: &PipeHandle, promote: bool) -> anyhow::Result<Materialized> {
+pub fn materialize(handle: &PipeHandle, promote: bool) -> DiagnosticResult<Materialized> {
     let mut guard = handle
         .cell()
         .lock()
-        .map_err(|_| anyhow::anyhow!("pipe handle lock poisoned"))?;
+        .map_err(|_| pipe_diag::handle_lock_poisoned())?;
     match &*guard {
         Slot::Script { backend } => Ok(Materialized::Script(Arc::clone(backend))),
         #[cfg(not(miri))]
@@ -258,7 +253,8 @@ pub fn materialize(handle: &PipeHandle, promote: bool) -> anyhow::Result<Materia
         Slot::Unbound => {
             #[cfg(not(miri))]
             if promote {
-                let entry = OsPipeEntry::new()?;
+                let entry =
+                    OsPipeEntry::new().map_err(|e| pipe_diag::os_pipe_creation_failed(&e))?;
                 let out = entry.clone();
                 *guard = Slot::Os { entry };
                 return Ok(Materialized::Os(out));

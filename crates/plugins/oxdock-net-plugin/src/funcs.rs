@@ -22,7 +22,9 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
+
+use crate::diagnostics as net_diag;
 
 use oxdock_core::{Field, HostModule, OxDockFn, OxDockType, RecordSchema, StepCtx, TypeTag, Value};
 use oxdock_func_macro::oxdock_func;
@@ -117,9 +119,9 @@ fn net_listen<P: ProcessManager>(
     // every passed key before the body runs.
     let _ = options;
     if bind.contains('/') {
-        bail!(
-            "NET_LISTEN() invalid endpoint {bind:?}: protocol-qualified endpoints cannot be claimed (UDP listen is not supported); observe -p mappings with NET_PORT/NET_ADDR instead"
-        );
+        return Err(anyhow::Error::new(net_diag::listen_protocol_qualified(
+            &bind,
+        )));
     }
     let endpoint = parse_virtual_endpoint(&bind, "NET_LISTEN")?;
     let key = EndpointKey::tcp(endpoint);
@@ -136,7 +138,7 @@ fn net_listen<P: ProcessManager>(
             // on its own clone so close never races an in-flight accept.
             let owned = listener
                 .try_clone()
-                .context("NET_LISTEN cannot clone its listener")?;
+                .map_err(|err| anyhow::Error::new(net_diag::listen_clone_failed(&err)))?;
             Arc::new(ListenerState::new_tcp(
                 id,
                 Arc::clone(&registry),
@@ -233,9 +235,7 @@ fn net_accept<P: ProcessManager>(
     options: BTreeMap<String, Value>,
 ) -> Result<Value> {
     if !cx.is_async_task() {
-        bail!(
-            "NET_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC {{ NET_ACCEPT($l, $in, $out, {{}}) }}"
-        );
+        return Err(anyhow::Error::new(net_diag::accept_requires_async()));
     }
     let state = Arc::clone(listener.state());
     let map = &options;
@@ -255,10 +255,10 @@ fn net_accept<P: ProcessManager>(
         // with no client in flight, then report the close.
         loop {
             if cx.is_cancelled() {
-                bail!("NET_ACCEPT interrupted by cancellation");
+                return Err(anyhow::Error::new(net_diag::accept_interrupted()));
             }
             if state.is_shutdown() {
-                bail!("NET_ACCEPT: listener is closed");
+                return Err(anyhow::Error::new(net_diag::accept_listener_closed()));
             }
             std::thread::sleep(accept_tick());
         }
@@ -268,10 +268,10 @@ fn net_accept<P: ProcessManager>(
         // like the TCP accept loop so cancel and close win promptly.
         let pair = loop {
             if cx.is_cancelled() {
-                bail!("NET_ACCEPT interrupted by cancellation");
+                return Err(anyhow::Error::new(net_diag::accept_interrupted()));
             }
             if state.is_shutdown() {
-                bail!("NET_ACCEPT: listener is closed");
+                return Err(anyhow::Error::new(net_diag::accept_listener_closed()));
             }
             if let Some(pair) = state.registry().dequeue_memory_session(state.endpoint()) {
                 break pair;
@@ -294,17 +294,17 @@ fn net_accept<P: ProcessManager>(
         return Ok(Value::map(out));
     }
     let Some(listener) = state.try_clone_listener() else {
-        bail!("NET_ACCEPT: listener is closed");
+        return Err(anyhow::Error::new(net_diag::accept_listener_closed()));
     };
     listener
         .set_nonblocking(true)
-        .context("NET_ACCEPT failed to configure listener")?;
+        .map_err(|err| anyhow::Error::new(net_diag::accept_configure_listener_failed(&err)))?;
     let stream = loop {
         if cx.is_cancelled() {
-            bail!("NET_ACCEPT interrupted by cancellation");
+            return Err(anyhow::Error::new(net_diag::accept_interrupted()));
         }
         if state.is_shutdown() {
-            bail!("NET_ACCEPT: listener is closed");
+            return Err(anyhow::Error::new(net_diag::accept_listener_closed()));
         }
         match listener.accept() {
             Ok((stream, _)) => break stream,
@@ -312,13 +312,13 @@ fn net_accept<P: ProcessManager>(
                 std::thread::sleep(accept_tick());
             }
             Err(err) => {
-                bail!("NET_ACCEPT accept failed: {err}");
+                return Err(anyhow::Error::new(net_diag::accept_failed(&err)));
             }
         }
     };
     stream
         .set_nonblocking(false)
-        .context("NET_ACCEPT failed to configure stream")?;
+        .map_err(|err| anyhow::Error::new(net_diag::accept_configure_stream_failed(&err)))?;
     pump_stream(
         cx,
         "NET_ACCEPT",
@@ -407,9 +407,7 @@ fn net_connect<P: ProcessManager>(
     options: BTreeMap<String, Value>,
 ) -> Result<Value> {
     if !cx.is_async_task() {
-        bail!(
-            "NET_CONNECT requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC {{ NET_CONNECT($target, $in, $out, {{}}) }}"
-        );
+        return Err(anyhow::Error::new(net_diag::connect_requires_async()));
     }
     // Module-shared endpoint registry: stashed at registration, so
     // this entry stays declarative with no captured closure.
@@ -431,8 +429,13 @@ fn net_connect<P: ProcessManager>(
             let text = value
                 .as_str()
                 .expect("check_options verified DURATION|STRING");
-            timeout = oxdock_parser::command::parse_duration(text).with_context(|| {
-                format!("NET_CONNECT option '{OPT_TIMEOUT}' must be a duration, got {text:?}")
+            timeout = oxdock_parser::command::parse_duration(text).map_err(|reason| {
+                anyhow::Error::new(net_diag::timeout_option_invalid(
+                    "NET_CONNECT",
+                    OPT_TIMEOUT,
+                    text,
+                    reason,
+                ))
             })?;
         }
     }
@@ -442,7 +445,7 @@ fn net_connect<P: ProcessManager>(
     // Sandbox gate first: offline runs open no OS sockets, so even a
     // literal dial must fail before parsing, DNS, or connect.
     if registry.is_offline() {
-        bail!("NET_CONNECT failed: engine running in --offline mode");
+        return Err(anyhow::Error::new(net_diag::connect_offline()));
     }
     // Strictly symbolic: every target is a service name resolved through
     // runner mappings (or memory rendezvous). Physical `host:port` shapes
@@ -483,7 +486,7 @@ fn dial_tcp<P: ProcessManager>(
     half_close: bool,
 ) -> Result<Value> {
     let stream = TcpStream::connect_timeout(&addr, timeout)
-        .with_context(|| format!("NET_CONNECT {target:?} dial failed"))?;
+        .map_err(|err| anyhow::Error::new(net_diag::connect_dial_failed(target, &err)))?;
     pump_stream(cx, "NET_CONNECT", in_pipe, out_pipe, stream, half_close)?;
     let mut out = BTreeMap::new();
     out.insert(FIELD_CLOSED.to_string(), Value::bool(true));
@@ -784,8 +787,13 @@ fn net_fetch<P: ProcessManager>(
             let text = value
                 .as_str()
                 .expect("check_options verified DURATION|STRING");
-            timeout = oxdock_parser::command::parse_duration(text).with_context(|| {
-                format!("NET_FETCH option '{OPT_TIMEOUT}' must be a duration, got {text:?}")
+            timeout = oxdock_parser::command::parse_duration(text).map_err(|reason| {
+                anyhow::Error::new(net_diag::timeout_option_invalid(
+                    "NET_FETCH",
+                    OPT_TIMEOUT,
+                    text,
+                    reason,
+                ))
             })?;
         }
     }
@@ -793,7 +801,10 @@ fn net_fetch<P: ProcessManager>(
     if let Some(value) = options_map.get(OPT_MAX_BODY_BYTES) {
         let n = value.as_i64().expect("check_options verified INT");
         if n < 0 {
-            bail!("NET_FETCH option '{OPT_MAX_BODY_BYTES}' must be non-negative, got {n}");
+            return Err(anyhow::Error::new(net_diag::fetch_option_negative(
+                OPT_MAX_BODY_BYTES,
+                n,
+            )));
         }
         max_body_bytes = n as u64;
     }
@@ -801,12 +812,18 @@ fn net_fetch<P: ProcessManager>(
     if let Some(value) = options_map.get(OPT_MAX_REDIRECTS) {
         let n = value.as_i64().expect("check_options verified INT");
         if n < 0 {
-            bail!("NET_FETCH option '{OPT_MAX_REDIRECTS}' must be non-negative, got {n}");
+            return Err(anyhow::Error::new(net_diag::fetch_option_negative(
+                OPT_MAX_REDIRECTS,
+                n,
+            )));
         }
         max_redirects = n as u64;
     }
     let max_redirects = u32::try_from(max_redirects).map_err(|_| {
-        anyhow::anyhow!("NET_FETCH() option '{OPT_MAX_REDIRECTS}' exceeds u32: {max_redirects}")
+        anyhow::Error::new(net_diag::fetch_option_exceeds_u32(
+            OPT_MAX_REDIRECTS,
+            max_redirects,
+        ))
     })?;
     let body = fetch_text_with_options(
         &url,

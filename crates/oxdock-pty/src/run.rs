@@ -23,7 +23,9 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
+
+use crate::diagnostics as pty_diag;
 
 use crate::drain::{drain_overdue, elapsed_ms, quiet_remaining_ms};
 use crate::filter::DsrFilter;
@@ -109,7 +111,7 @@ enum PtyEvent {
 }
 
 /// Completion of one child-pump worker, by slot (0 is always input).
-struct ChildDone(usize, Result<()>);
+struct ChildDone(usize, DiagnosticResult<()>);
 
 /// The reaper observed child exit, carrying the code. Produced by the
 /// backend's blocking wait on its own thread: ConPTY holds the master
@@ -203,7 +205,7 @@ fn pump_master_out(
     activity: &Arc<AtomicU64>,
     epoch: Instant,
     func: &'static str,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut buffer = [0u8; PUMP_CHUNK];
     let mut queries = DsrFilter::new();
     loop {
@@ -216,7 +218,9 @@ fn pump_master_out(
             // Either way no more bytes will ever arrive, so the drain
             // ends here.
             Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => break,
-            Err(err) => bail!("{func} master read failed: {err}"),
+            Err(err) => {
+                return Err(pty_diag::master_read_failed(func, &err));
+            }
             Ok(0) => break,
             Ok(count) => {
                 let clean = queries.feed(&buffer[..count], master_in);
@@ -225,13 +229,13 @@ fn pump_master_out(
                 }
                 let mut guard = writer
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("{func} output lock poisoned"))?;
+                    .map_err(|_| pty_diag::output_lock_poisoned(func))?;
                 guard
                     .write_all(&clean)
-                    .with_context(|| format!("{func} output write failed"))?;
+                    .map_err(|err| pty_diag::output_write_failed(func, &err))?;
                 guard
                     .flush()
-                    .with_context(|| format!("{func} output flush failed"))?;
+                    .map_err(|err| pty_diag::output_flush_failed(func, &err))?;
                 activity.store(elapsed_ms(epoch), Ordering::SeqCst);
             }
         }
@@ -242,13 +246,13 @@ fn pump_master_out(
     if !tail.is_empty() {
         let mut guard = writer
             .lock()
-            .map_err(|_| anyhow::anyhow!("{func} output lock poisoned"))?;
+            .map_err(|_| pty_diag::output_lock_poisoned(func))?;
         guard
             .write_all(&tail)
-            .with_context(|| format!("{func} output write failed"))?;
+            .map_err(|err| pty_diag::output_write_failed(func, &err))?;
         guard
             .flush()
-            .with_context(|| format!("{func} output flush failed"))?;
+            .map_err(|err| pty_diag::output_flush_failed(func, &err))?;
     }
     Ok(())
 }
@@ -298,7 +302,7 @@ fn pump_stdin_to_master(
     cancel: &Arc<AtomicBool>,
     peer_done: &Arc<AtomicBool>,
     func: &'static str,
-) -> Result<bool> {
+) -> DiagnosticResult<bool> {
     let mut buffer = [0u8; PUMP_CHUNK];
     let mut fed = false;
     let mut ends_newline = true;
@@ -310,12 +314,14 @@ fn pump_stdin_to_master(
             break;
         }
         match read_chunk(&mut buffer) {
-            Err(err) => bail!("{func} input read failed: {err}"),
+            Err(err) => {
+                return Err(pty_diag::input_read_failed(func, &err));
+            }
             Ok(0) => break,
             Ok(count) => {
                 let mut guard = master
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("{func} sink lock poisoned"))?;
+                    .map_err(|_| pty_diag::sink_lock_poisoned(func))?;
                 if guard
                     .write_all(&console_input_bytes(&buffer[..count], &mut prev_cr))
                     .is_err()
@@ -403,9 +409,9 @@ fn spawn_repoll_watch(
 /// The calling thread supervises; workers detach. Cancellation (via
 /// `should_cancel`) tears down the console, kills the child, and
 /// returns `Cancelled` without waiting out parked workers.
-pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
+pub fn run_pty_session(mut req: PtyRequest<'_>) -> DiagnosticResult<PtyOutcome> {
     if req.argv.is_empty() {
-        bail!("{} needs at least a program", req.func);
+        return Err(pty_diag::needs_program(req.func));
     }
     let func = req.func;
     let epoch = Instant::now();
@@ -418,17 +424,17 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
             req.initial_size.rows,
             req.initial_size.cols,
         ))
-        .with_context(|| format!("{func} pty allocation failed"))?;
+        .map_err(|e| pty_diag::pty_alloc_failed(func, &e))?;
     let mut master_reader = pair
         .master
         .try_clone_reader()
-        .with_context(|| format!("{func} pty master reader failed"))?;
+        .map_err(|e| pty_diag::pty_master_reader_failed(func, &e))?;
     // Shared with the output worker, which answers ConPTY setup
     // queries through it while the input worker pumps pipe bytes.
     let master_writer = Arc::new(Mutex::new(
         pair.master
             .take_writer()
-            .with_context(|| format!("{func} pty master writer failed"))?,
+            .map_err(|e| pty_diag::pty_master_writer_failed(func, &e))?,
     ));
     // Console teardown handle. Released once the drain is due: ConPTY
     // holds the output pipe open until close, which lives in this
@@ -448,7 +454,7 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
     let child = pair
         .slave
         .spawn_command(builder)
-        .with_context(|| format!("{func} pty spawn failed"))?;
+        .map_err(|e| pty_diag::pty_spawn_failed(func, &e))?;
     drop(pair.slave);
 
     let mut killer = child.clone_killer();
@@ -467,7 +473,7 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
         drain_generation: 0,
     };
     let (event_tx, event_rx) = mpsc::channel::<PtyEvent>();
-    let mut failed: Option<anyhow::Error> = None;
+    let mut failed: Option<Diagnostic> = None;
     let mut in_done = req.input.is_none();
     let mut outputs_done = false;
     let mut exit_code: Option<i64> = None;
@@ -525,7 +531,7 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
             }));
             let outcome = match outcome {
                 Ok(inner) => inner,
-                Err(panic) => Err(anyhow::anyhow!("{func} input worker panicked: {panic:?}")),
+                Err(panic) => Err(pty_diag::worker_panicked(func, "input", &panic)),
             };
             let _ = input_tx.send(PtyEvent::Done(ChildDone(0, outcome)));
         });
@@ -547,7 +553,7 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
         }));
         let outcome = match outcome {
             Ok(inner) => inner,
-            Err(panic) => Err(anyhow::anyhow!("{func} output worker panicked: {panic:?}")),
+            Err(panic) => Err(pty_diag::worker_panicked(func, "output", &panic)),
         };
         let _ = output_tx.send(PtyEvent::Done(ChildDone(1, outcome)));
     });
@@ -596,15 +602,13 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
                 PtyEvent::Done(done) => {
                     if done.0 == 0 {
                         in_done = true;
-                        if let Some(err) = done.1.err() {
-                            failed
-                                .get_or_insert(err.context(format!("{func} input worker failed")));
+                        if let Err(err) = done.1 {
+                            failed.get_or_insert_with(|| pty_diag::input_worker_failed(func, err));
                         }
                     } else {
                         outputs_done = true;
-                        if let Some(err) = done.1.err() {
-                            failed
-                                .get_or_insert(err.context(format!("{func} output worker failed")));
+                        if let Err(err) = done.1 {
+                            failed.get_or_insert_with(|| pty_diag::output_worker_failed(func, err));
                         }
                     }
                 }

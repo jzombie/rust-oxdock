@@ -1,6 +1,11 @@
 use crate::ast::{Arg, Expr, StepKind};
-use crate::error::{ParseError, SpanContext};
-use anyhow::{Result, anyhow, bail};
+use crate::diagnostics as dsl_diag;
+use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
+use crate::{
+    BOOL_TYPE_NAME, DURATION_TYPE_NAME, INT_TYPE_NAME, LIST_TYPE_NAME, PATH_TYPE_NAME,
+    STRING_TYPE_NAME,
+};
+use oxdock_diagnostics::DiagnosticResult;
 
 /// Metadata for a single command argument.
 pub struct ArgSpec {
@@ -52,11 +57,11 @@ impl ArgType {
     /// command syntax.
     pub fn label(&self) -> String {
         match self {
-            ArgType::String => "STRING".to_string(),
-            ArgType::Path => "PATH".to_string(),
-            ArgType::Int => "INT".to_string(),
-            ArgType::Duration => "DURATION".to_string(),
-            ArgType::List => "LIST".to_string(),
+            ArgType::String => STRING_TYPE_NAME.to_string(),
+            ArgType::Path => PATH_TYPE_NAME.to_string(),
+            ArgType::Int => INT_TYPE_NAME.to_string(),
+            ArgType::Duration => DURATION_TYPE_NAME.to_string(),
+            ArgType::List => LIST_TYPE_NAME.to_string(),
             ArgType::Any => "<any>".to_string(),
             ArgType::OneOf(options) => options.join("|"),
             ArgType::Rest(inner) => format!("{}...", inner.label()),
@@ -68,11 +73,11 @@ impl ArgType {
     /// unlinked.
     pub fn anchor(&self) -> Option<String> {
         match self {
-            ArgType::String => Some(crate::value::type_anchor("STRING")),
-            ArgType::Path => Some(crate::value::type_anchor("PATH")),
-            ArgType::Int => Some(crate::value::type_anchor("INT")),
-            ArgType::Duration => Some(crate::value::type_anchor("DURATION")),
-            ArgType::List => Some(crate::value::type_anchor("LIST")),
+            ArgType::String => Some(crate::value::type_anchor(STRING_TYPE_NAME)),
+            ArgType::Path => Some(crate::value::type_anchor(PATH_TYPE_NAME)),
+            ArgType::Int => Some(crate::value::type_anchor(INT_TYPE_NAME)),
+            ArgType::Duration => Some(crate::value::type_anchor(DURATION_TYPE_NAME)),
+            ArgType::List => Some(crate::value::type_anchor(LIST_TYPE_NAME)),
             ArgType::Any => None,
             ArgType::OneOf(_) => None,
             ArgType::Rest(inner) => inner.anchor(),
@@ -81,19 +86,19 @@ impl ArgType {
 
     /// Validate a statically-known literal against this type.
     /// Templates and variables are never passed here : see `check_arg`.
-    pub fn validate_literal(&self, literal: &str) -> Result<()> {
+    pub fn validate_literal(&self, literal: &str) -> DiagnosticResult<()> {
         match self {
             ArgType::String | ArgType::Path | ArgType::Any => Ok(()),
             ArgType::Int => strip_digit_separators(literal)
                 .parse::<i64>()
                 .map(|_| ())
-                .map_err(|_| anyhow!("expected int, got {literal:?}")),
+                .map_err(|_| dsl_diag::expected_int(literal)),
             ArgType::Duration => parse_duration(literal).map(|_| ()),
             ArgType::List => {
                 if literal.starts_with('$') {
                     Ok(())
                 } else {
-                    bail!("expected $var, got {literal:?}")
+                    Err(dsl_diag::expected_var(literal))
                 }
             }
             ArgType::OneOf(options) => {
@@ -102,7 +107,7 @@ impl ArgType {
                 if options.contains(&literal) {
                     Ok(())
                 } else {
-                    bail!("expected one of {}, got {literal:?}", options.join("|"))
+                    Err(dsl_diag::expected_one_of(options, literal))
                 }
             }
             ArgType::Rest(inner) => inner.validate_literal(literal),
@@ -113,7 +118,7 @@ impl ArgType {
     /// `Static` literals validate now; templates, variables (except a
     /// `$var` where `List` is required), and mixed fragments defer to the
     /// runtime resolvers, which see interpolated values.
-    pub fn check_arg(&self, arg: &Arg) -> Result<CheckOutcome> {
+    pub fn check_arg(&self, arg: &Arg) -> DiagnosticResult<CheckOutcome> {
         match arg {
             Arg::String(s, _) if !s.contains("{{") => {
                 self.validate_literal(s)?;
@@ -130,7 +135,7 @@ impl ArgType {
             }
             Arg::Expr(_) => {
                 if matches!(*self, ArgType::List) {
-                    bail!("expected $var, got expression {}", arg.render())
+                    Err(dsl_diag::expected_var_expression(&arg.render()))
                 } else {
                     Ok(CheckOutcome::Deferred)
                 }
@@ -158,19 +163,17 @@ pub fn validate_positionals_against_meta(
     cmd_name: &str,
     specs: &[ArgSpec],
     args: &[Arg],
-) -> Result<(), ParseError> {
+) -> ParseResult<()> {
     let has_rest = specs
         .last()
         .is_some_and(|s| matches!(s.arg_type, ArgType::Rest(_)));
 
     if !has_rest && args.len() > specs.len() {
-        return Err(ParseError::validation(
-            cmd_name,
-            format!(
-                "invalid syntax for command {cmd_name}: expects at most {} positional argument(s), got {}",
-                specs.len(),
-                args.len()
-            ),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: cmd_name.to_string(),
+            },
+            dsl_diag::too_many_positionals(cmd_name, specs.len(), args.len()),
             &SpanContext::line_only(0),
         ));
     }
@@ -181,12 +184,11 @@ pub fn validate_positionals_against_meta(
             // the inner type, not just the first.
             let tail = args.get(spec.index..).unwrap_or(&[]);
             if tail.is_empty() && spec.required {
-                return Err(ParseError::validation(
-                    cmd_name,
-                    format!(
-                        "invalid syntax for command {cmd_name}: requires argument `{}`",
-                        spec.name
-                    ),
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: cmd_name.to_string(),
+                    },
+                    dsl_diag::missing_argument(cmd_name, spec.name),
                     &SpanContext::line_only(0),
                 ));
             }
@@ -198,12 +200,11 @@ pub fn validate_positionals_against_meta(
         match args.get(spec.index) {
             Some(arg) => check_one(cmd_name, spec, &spec.arg_type, arg)?,
             None if spec.required => {
-                return Err(ParseError::validation(
-                    cmd_name,
-                    format!(
-                        "invalid syntax for command {cmd_name}: requires argument `{}`",
-                        spec.name
-                    ),
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: cmd_name.to_string(),
+                    },
+                    dsl_diag::missing_argument(cmd_name, spec.name),
                     &SpanContext::line_only(0),
                 ));
             }
@@ -213,21 +214,14 @@ pub fn validate_positionals_against_meta(
     Ok(())
 }
 
-fn check_one(
-    cmd_name: &str,
-    spec: &ArgSpec,
-    arg_type: &ArgType,
-    arg: &Arg,
-) -> Result<(), ParseError> {
+fn check_one(cmd_name: &str, spec: &ArgSpec, arg_type: &ArgType, arg: &Arg) -> ParseResult<()> {
     match arg_type.check_arg(arg) {
         Ok(_) => Ok(()),
-        Err(e) => Err(ParseError::validation(
-            cmd_name,
-            format!(
-                "invalid syntax for command {cmd_name}: argument `{}` got {} — {e:#}",
-                spec.name,
-                arg.render()
-            ),
+        Err(e) => Err(ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: cmd_name.to_string(),
+            },
+            dsl_diag::arg_type_mismatch(cmd_name, spec.name, &arg.render(), e),
             &SpanContext::line_only(0),
         )),
     }
@@ -348,12 +342,12 @@ fn common_prefix(a: &str, b: &str) -> String {
 /// exotic keys the grammar cannot classify (single tokens only : no whitespace
 /// reassembly, so the quoted-space corruption class cannot arise here).
 /// Returns `Ok(None)` when there is no `=`.
-pub fn split_assignment(text: &str) -> Result<Option<(String, Arg)>> {
+pub fn split_assignment(text: &str) -> DiagnosticResult<Option<(String, Arg)>> {
     let Some((key, raw)) = text.split_once('=') else {
         return Ok(None);
     };
     if key.is_empty() {
-        bail!("assignment requires KEY=value format");
+        return Err(dsl_diag::assignment_requires_key_value());
     }
     Ok(Some((
         key.to_string(),
@@ -365,7 +359,7 @@ pub fn split_assignment(text: &str) -> Result<Option<(String, Arg)>> {
 /// number means seconds). One optional space may separate the number
 /// from its unit (`30 s`), like byte counts: bare DSL tokens still
 /// split upstream, so this covers quoted strings and variables.
-pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
+pub fn parse_duration(s: &str) -> DiagnosticResult<std::time::Duration> {
     let s = join_single_space(s)?;
     let (digits, unit_ms): (&str, u64) = if let Some(v) = s.strip_suffix("ms") {
         (v, 1)
@@ -380,12 +374,12 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
     };
     let n: u64 = digits
         .parse()
-        .map_err(|_| anyhow!("invalid TIMEOUT duration: {s}"))?;
+        .map_err(|_| dsl_diag::invalid_timeout_duration(&s))?;
     let millis = n
         .checked_mul(unit_ms)
-        .ok_or_else(|| anyhow!("TIMEOUT duration out of range: {s}"))?;
+        .ok_or_else(|| dsl_diag::timeout_duration_out_of_range(&s))?;
     if millis == 0 {
-        bail!("TIMEOUT duration must be positive, got: {s}");
+        return Err(dsl_diag::timeout_duration_not_positive(&s));
     }
     Ok(std::time::Duration::from_millis(millis))
 }
@@ -443,11 +437,11 @@ pub fn strip_digit_separators(text: &str) -> String {
 /// (three parts, a split digit run like `1 0`, an empty string) fails:
 /// the space may only separate the number from its unit, never split
 /// the digits themselves.
-fn join_single_space(s: &str) -> Result<String> {
+fn join_single_space(s: &str) -> DiagnosticResult<String> {
     let mut parts = s.split_whitespace();
     let (first, second) = (parts.next(), parts.next());
     if parts.next().is_some() {
-        bail!("invalid numeric token: {s}");
+        return Err(dsl_diag::invalid_numeric_token(s));
     }
     match (first, second) {
         (Some(digits), None) => Ok(digits.to_string()),
@@ -461,7 +455,7 @@ fn join_single_space(s: &str) -> Result<String> {
         {
             Ok(format!("{digits}{unit}"))
         }
-        _ => bail!("invalid numeric token: {s}"),
+        _ => Err(dsl_diag::invalid_numeric_token(s)),
     }
 }
 
@@ -477,7 +471,7 @@ fn join_single_space(s: &str) -> Result<String> {
 /// an exact integer spelling like `1500MB`). Matching is
 /// case-insensitive (`1gb`, `1GB`, and `1Gb` agree), mirroring
 /// [`parse_duration`]: digits only, no fractions, no signs.
-pub fn parse_byte_count(s: &str) -> Result<u64> {
+pub fn parse_byte_count(s: &str) -> DiagnosticResult<u64> {
     let compact = join_single_space(s)?;
     let s = compact.as_str();
     let lower = s.to_ascii_lowercase();
@@ -511,12 +505,12 @@ pub fn parse_byte_count(s: &str) -> Result<u64> {
     let digits = digits.strip_prefix('+').unwrap_or(&digits);
     let n: u64 = digits
         .parse()
-        .map_err(|_| anyhow!("invalid byte count: {s}"))?;
+        .map_err(|_| dsl_diag::invalid_byte_count(s))?;
     let bytes = n
         .checked_mul(unit)
-        .ok_or_else(|| anyhow!("byte count out of range: {s}"))?;
+        .ok_or_else(|| dsl_diag::byte_count_out_of_range(s))?;
     if bytes == 0 {
-        bail!("byte count must be positive, got: {s}");
+        return Err(dsl_diag::byte_count_not_positive(s));
     }
     Ok(bytes)
 }
@@ -594,9 +588,9 @@ impl FlagValueType {
     /// switch carries no value; `BOOL` names what its presence asserts.
     pub fn label(&self) -> &'static str {
         match self {
-            FlagValueType::Flag => "BOOL",
-            FlagValueType::String => "STRING",
-            FlagValueType::Int => "INT",
+            FlagValueType::Flag => BOOL_TYPE_NAME,
+            FlagValueType::String => STRING_TYPE_NAME,
+            FlagValueType::Int => INT_TYPE_NAME,
         }
     }
 }
@@ -634,7 +628,7 @@ pub trait CommandSpec {
     const NAME: &'static str;
 
     fn metadata() -> CommandMeta;
-    fn lower(flags: Vec<(String, Arg)>, args: Vec<Arg>) -> Result<StepKind>;
+    fn lower(flags: Vec<(String, Arg)>, args: Vec<Arg>) -> ParseResult<StepKind>;
 }
 
 #[cfg(test)]

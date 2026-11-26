@@ -23,7 +23,9 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result, bail};
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
+
+use crate::diagnostics as ssh_diag;
 use bytes::Bytes;
 use oxdock_core::{StepCtx, Value};
 use oxdock_process::{CancelHub, run_guarded as guard_worker};
@@ -37,8 +39,8 @@ use crate::state::{DownMsg, UpMsg};
 /// through [`guard_worker`], so a panicking worker reports instead of
 /// stranding the supervisor past scope end.
 enum SessionDone {
-    InDone(std::thread::Result<Result<()>>),
-    OutDone(std::thread::Result<Result<()>>),
+    InDone(std::thread::Result<DiagnosticResult<()>>),
+    OutDone(std::thread::Result<DiagnosticResult<()>>),
 }
 
 /// Pump `up_rx -> writer` until the wire half-closes. The bounded queue
@@ -69,7 +71,7 @@ fn pump_out(
     cancel: &AtomicBool,
     peer_done: &AtomicBool,
     break_on_peer_done: bool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     /// One wait outcome: queue traffic or a supervisor wake.
     enum Waited {
         Up(Option<UpMsg>),
@@ -98,11 +100,11 @@ fn pump_out(
             Waited::Up(Some(UpMsg::Data(bytes))) => {
                 let mut guard = writer
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("SSH pump output lock poisoned"))?;
+                    .map_err(|_| ssh_diag::pump_output_lock_poisoned())?;
                 guard
                     .write_all(&bytes)
-                    .context("SSH pump output pipe write failed")?;
-                guard.flush().context("SSH pump output pipe flush failed")?;
+                    .map_err(ssh_diag::pump_output_write_failed)?;
+                guard.flush().map_err(ssh_diag::pump_output_flush_failed)?;
             }
             Waited::Up(_) => break,
             Waited::WakeUp => {
@@ -125,14 +127,16 @@ fn pump_in(
     reader: &SharedInput,
     down_tx: &mpsc::Sender<DownMsg>,
     cancel: &AtomicBool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut buffer = [0u8; PUMP_CHUNK];
     loop {
         if cancel.load(Ordering::SeqCst) {
             break;
         }
         match read_pump_chunk(reader, &mut buffer) {
-            Err(err) => bail!("SSH pump input pipe read failed: {err}"),
+            Err(err) => {
+                return Err(ssh_diag::pump_input_read_failed(&err));
+            }
             Ok(0) => {
                 if !cancel.load(Ordering::SeqCst) {
                     let _ = down_tx.blocking_send(DownMsg::Eof);
@@ -155,8 +159,8 @@ fn pump_in(
 /// Record the first worker error. Later errors lose: the first failure
 /// explains the teardown.
 pub(crate) fn note_failure(
-    failed: &mut Option<anyhow::Error>,
-    outcome: std::thread::Result<Result<()>>,
+    failed: &mut Option<Diagnostic>,
+    outcome: std::thread::Result<DiagnosticResult<()>>,
     worker: &str,
 ) {
     match outcome {
@@ -168,7 +172,7 @@ pub(crate) fn note_failure(
         }
         Err(_) => {
             if failed.is_none() {
-                *failed = Some(anyhow::anyhow!("SSH pump {worker} panicked"));
+                *failed = Some(ssh_diag::pump_worker_panicked(worker));
             }
         }
     }
@@ -206,13 +210,13 @@ pub fn pump_session<P: ProcessManager>(
     up_rx: mpsc::Receiver<UpMsg>,
     down_tx: mpsc::Sender<DownMsg>,
     break_on_peer_done: bool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let reader = cx
         .pipe_reader(in_pipe)
-        .context("SSH pump cannot borrow the input pipe")?;
+        .map_err(ssh_diag::pump_borrow_input_failed)?;
     let writer = cx
         .pipe_writer(out_pipe)
-        .context("SSH pump cannot borrow the output pipe")?;
+        .map_err(ssh_diag::pump_borrow_output_failed)?;
     let in_backend = cx.pipe_backend(in_pipe);
     let hub = cx.cancel_hub();
     // Task-local cancellation shared with the detached workers. The
@@ -225,14 +229,14 @@ pub fn pump_session<P: ProcessManager>(
     // this for their multi-thread runtime.
     let wait_runtime = tokio::runtime::Builder::new_current_thread()
         .build()
-        .context("SSH pump wait runtime failed")?;
+        .map_err(ssh_diag::pump_wait_runtime_failed)?;
     // Supervisor wake queue for the wire worker. Bounded and
     // best-effort: a full queue means queued wakes already guarantee
     // the worker releases.
     let (wake_tx, wake_rx) = mpsc::channel::<()>(8);
     let peer_done = Arc::new(AtomicBool::new(false));
     let (done_tx, done_rx) = std::sync::mpsc::channel::<SessionDone>();
-    let mut failed: Option<anyhow::Error> = None;
+    let mut failed: Option<Diagnostic> = None;
     let mut in_done = false;
     let mut out_done = false;
     let mut out_closed = false;
@@ -324,7 +328,7 @@ pub fn pump_session<P: ProcessManager>(
         Some(err) => Err(err),
         None => {
             if cancel.load(Ordering::SeqCst) {
-                anyhow::bail!("SSH pump interrupted by cancellation");
+                return Err(ssh_diag::pump_interrupted_by_cancellation());
             }
             Ok(())
         }
@@ -341,13 +345,13 @@ pub fn pump_pipe_to_pipe<P: ProcessManager>(
     from_pipe: &Value,
     to_pipe: &Value,
     cancel: &AtomicBool,
-) -> Result<i64> {
+) -> DiagnosticResult<i64> {
     let reader = cx
         .pipe_reader(from_pipe)
-        .context("SSH_PUMP cannot borrow the source pipe")?;
+        .map_err(ssh_diag::pump_borrow_source_failed)?;
     let writer = cx
         .pipe_writer(to_pipe)
-        .context("SSH_PUMP cannot borrow the target pipe")?;
+        .map_err(ssh_diag::pump_borrow_target_failed)?;
     let hub: Arc<CancelHub> = cx.cancel_hub();
     let _guard = cx
         .pipe_backend(from_pipe)
@@ -359,17 +363,19 @@ pub fn pump_pipe_to_pipe<P: ProcessManager>(
             break;
         }
         match read_pump_chunk(&reader, &mut buffer) {
-            Err(err) => bail!("SSH_PUMP source pipe read failed: {err}"),
+            Err(err) => {
+                return Err(ssh_diag::pump_source_read_failed(&err));
+            }
             Ok(0) => break,
             Ok(count) => {
                 {
                     let mut guard = writer
                         .lock()
-                        .map_err(|_| anyhow::anyhow!("SSH_PUMP target lock poisoned"))?;
+                        .map_err(|_| ssh_diag::pump_target_lock_poisoned())?;
                     guard
                         .write_all(&buffer[..count])
-                        .context("SSH_PUMP target pipe write failed")?;
-                    guard.flush().context("SSH_PUMP target pipe flush failed")?;
+                        .map_err(ssh_diag::pump_target_write_failed)?;
+                    guard.flush().map_err(ssh_diag::pump_target_flush_failed)?;
                 }
                 total += count as i64;
             }
@@ -390,7 +396,7 @@ pub fn pump_pipe_to_pipe<P: ProcessManager>(
 /// supervisor's closes (0 is always the input worker). Delivered
 /// through [`guard_worker`]: panics report instead of stranding the
 /// supervisor.
-pub(crate) struct ChildDone(pub usize, pub std::thread::Result<Result<()>>);
+pub(crate) struct ChildDone(pub usize, pub std::thread::Result<DiagnosticResult<()>>);
 
 /// The reaper observed child exit, carrying the code. Produced by the
 /// backend's blocking wait on its own thread (ConPTY holds the master
@@ -416,14 +422,16 @@ pub(crate) fn pump_pipe_to_sink(
     cancel: &AtomicBool,
     peer_done: &AtomicBool,
     func: &str,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut buffer = [0u8; PUMP_CHUNK];
     loop {
         if cancel.load(Ordering::SeqCst) || peer_done.load(Ordering::SeqCst) {
             break;
         }
         match read_pump_chunk(reader, &mut buffer) {
-            Err(err) => bail!("{func} input pipe read failed: {err}"),
+            Err(err) => {
+                return Err(ssh_diag::pump_func_input_read_failed(func, &err));
+            }
             Ok(0) => break,
             Ok(count) => {
                 if sink.write_all(&buffer[..count]).is_err() {

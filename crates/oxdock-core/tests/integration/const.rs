@@ -67,7 +67,7 @@ fn const_set_fails_with_one_message() {
             "#},
         )
         .expect_err("SET on a CONST must fail");
-    assert!(err.to_string().contains("cannot mutate CONST N"), "{err}");
+    assert!(err.to_string().contains("cannot mutate CONST `N`"), "{err}");
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn const_list_append_fails_with_one_message() {
         )
         .expect_err("LIST_APPEND on a CONST must fail");
     assert!(
-        err.to_string().contains("cannot mutate CONST ITEMS"),
+        err.to_string().contains("cannot mutate CONST `ITEMS`"),
         "{err}"
     );
 }
@@ -1010,7 +1010,7 @@ fn const_readline_and_prompt_refuse_const() {
             .run_script(&root, script)
             .expect_err("READ_LINE/PROMPT onto a CONST must fail");
         assert!(
-            format!("{err:#}").contains("cannot mutate CONST X"),
+            format!("{err:#}").contains("cannot mutate CONST `X`"),
             "{err:#}"
         );
     }
@@ -1075,7 +1075,7 @@ fn const_guards_are_site_aware() {
         )
         .expect_err("guard-matching CONST mutation must fail");
     assert!(
-        format!("{err:#}").contains("cannot mutate CONST X"),
+        format!("{err:#}").contains("cannot mutate CONST `X`"),
         "{err:#}"
     );
 }
@@ -1238,7 +1238,7 @@ fn block_import_unwinds_on_block_exit() {
         )
         .expect_err("runtime must unwind block imports too");
     assert!(
-        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        format!("{err:#}").contains("unknown placeholder function `LIB::WHO`"),
         "{err:#}"
     );
 }
@@ -1309,7 +1309,7 @@ fn func_block_imports_unwind_and_isolate_callees() {
         )
         .expect_err("runtime must unwind function block imports too");
     assert!(
-        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        format!("{err:#}").contains("unknown placeholder function `LIB::WHO`"),
         "{err:#}"
     );
     // SEV-1b, static: sibling callee `G` reads nothing from caller
@@ -1364,7 +1364,7 @@ fn func_block_imports_unwind_and_isolate_callees() {
         )
         .expect_err("runtime must not leak caller block imports into callees");
     assert!(
-        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        format!("{err:#}").contains("unknown placeholder function `LIB::WHO`"),
         "{err:#}"
     );
     // SEV-2: a bare guarded block unwinds its import past `}` in both
@@ -1427,7 +1427,7 @@ fn func_block_imports_unwind_and_isolate_callees() {
         )
         .expect_err("runtime must unwind bare guarded block imports too");
     assert!(
-        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        format!("{err:#}").contains("unknown placeholder function `LIB::WHO`"),
         "{err:#}"
     );
     // `ISOLATED` blocks scope the same way: the runtime runs the
@@ -1474,7 +1474,7 @@ fn func_block_imports_unwind_and_isolate_callees() {
         )
         .expect_err("runtime must unwind ISOLATED block imports too");
     assert!(
-        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        format!("{err:#}").contains("unknown placeholder function `LIB::WHO`"),
         "{err:#}"
     );
 }
@@ -1570,7 +1570,7 @@ fn const_inside_func_body_refuses_mutation() {
         )
         .expect_err("FUNC-local CONST mutation must fail");
     assert!(
-        format!("{err:#}").contains("cannot mutate CONST C"),
+        format!("{err:#}").contains("cannot mutate CONST `C`"),
         "{err:#}"
     );
 }
@@ -1650,7 +1650,7 @@ fn const_inner_const_shadows_outer_let() {
     // resolution half: the same shape with an inner `LET` shadow
     // mutates fine and leaves the outer `CONST` intact.
     assert!(
-        format!("{err:#}").contains("cannot mutate CONST X"),
+        format!("{err:#}").contains("cannot mutate CONST `X`"),
         "{err:#}"
     );
     Engine::new()
@@ -2046,7 +2046,7 @@ fn entry_const_call_before_declare_fails() {
         )
         .expect_err("call before CONST declaration must fail");
     assert!(
-        format!("{err:#}").contains("undefined variable $MARKER"),
+        format!("{err:#}").contains("undefined variable `$MARKER`"),
         "{err:#}"
     );
 }
@@ -2328,7 +2328,7 @@ fn entry_body_local_const_does_not_leak_to_nested_callee() {
         )
         .expect_err("body-local CONST must stay invisible to nested callees");
     assert!(
-        format!("{err:#}").contains("undefined variable $ONLY_LOCAL"),
+        format!("{err:#}").contains("undefined variable `$ONLY_LOCAL`"),
         "{err:#}"
     );
 }

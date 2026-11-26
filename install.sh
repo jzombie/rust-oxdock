@@ -19,7 +19,7 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   (export VERSION=v0.44.1-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
+#   (export VERSION=v0.45.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
 # =====================================================================
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.

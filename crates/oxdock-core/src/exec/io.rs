@@ -3,8 +3,7 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex, atomic::AtomicU64};
 
 use anyhow::Result;
-#[cfg(not(miri))]
-use anyhow::bail;
+use oxdock_diagnostics::DiagnosticResult;
 #[cfg(not(miri))]
 use oxdock_pipe::OsPipeWriter;
 use oxdock_pipe::{
@@ -85,10 +84,8 @@ pub(super) struct PipeRegistry;
 /// fresh declaration. No rebind rule exists by design: no rule can tell
 /// sequential loop reuse apart from concurrent fan-in sharing.
 #[cfg(not(miri))]
-fn spent_handle() -> anyhow::Error {
-    anyhow::anyhow!(
-        "OS pipe handle has already been consumed by another binding; declare a fresh LET $x: PIPE for a new session",
-    )
+fn spent_handle() -> oxdock_diagnostics::Diagnostic {
+    super::diagnostics::std_pipe_handle_spent()
 }
 
 impl PipeRegistry {
@@ -96,7 +93,7 @@ impl PipeRegistry {
     /// handle decides its kind from `promote` (the caller supplies full
     /// usage context); a decided handle is returned unchanged. Callers
     /// adapt mismatches through resolution below, never here.
-    pub(super) fn ensure_handle(handle: &PipeHandle, promote: bool) -> Result<()> {
+    pub(super) fn ensure_handle(handle: &PipeHandle, promote: bool) -> DiagnosticResult<()> {
         materialize(handle, promote)?;
         Ok(())
     }
@@ -109,7 +106,7 @@ impl PipeRegistry {
     /// Public so out-of-crate harnesses can assert on script-owned pipes
     /// after a run completes, via the `PIPE` values in the returned
     /// bindings. Only meaningful once writers detached (post-run).
-    pub fn peek_pipe_content(handle: &PipeHandle) -> Result<Vec<u8>> {
+    pub fn peek_pipe_content(handle: &PipeHandle) -> DiagnosticResult<Vec<u8>> {
         peek_handle(handle)
     }
 
@@ -123,7 +120,7 @@ impl PipeRegistry {
     /// unbound handles, which need no pin. Callers ensure the handle
     /// first so OS promotion is honored and this never forces a script
     /// backend into existence.
-    pub(super) fn pin_keeper(handle: &PipeHandle) -> Result<Option<KeeperGuard>> {
+    pub(super) fn pin_keeper(handle: &PipeHandle) -> DiagnosticResult<Option<KeeperGuard>> {
         Ok(script_backend(handle).map(KeeperGuard::new))
     }
 
@@ -137,7 +134,7 @@ impl PipeRegistry {
         handle: &PipeHandle,
         direct: bool,
         promote: bool,
-    ) -> Result<(CommandStdin, Option<Arc<PipeInner>>)> {
+    ) -> DiagnosticResult<(CommandStdin, Option<Arc<PipeInner>>)> {
         // `direct` serves only the OS-pipe arms below, which are
         // compiled out under Miri.
         let _ = direct;
@@ -167,7 +164,7 @@ impl PipeRegistry {
         handle: &PipeHandle,
         direct: bool,
         promote: bool,
-    ) -> Result<(StreamHandle, Option<Arc<PipeInner>>)> {
+    ) -> DiagnosticResult<(StreamHandle, Option<Arc<PipeInner>>)> {
         // `direct` serves only the OS-pipe arms below, which are
         // compiled out under Miri.
         let _ = direct;
@@ -199,7 +196,7 @@ impl PipeRegistry {
         handle: &PipeHandle,
         direct: bool,
         promote: bool,
-    ) -> Result<StreamHandle> {
+    ) -> DiagnosticResult<StreamHandle> {
         // `direct` serves only the OS-pipe arms below, which are
         // compiled out under Miri.
         let _ = direct;
@@ -368,9 +365,9 @@ where
         // OS entries to shared handles for them, and promotion only fires
         // for single RUN bodies. This arm is defensive only.
         #[cfg(not(miri))]
-        Some(StreamHandle::Os(_)) => {
-            bail!("cannot write DSL output to a live OS pipe")
-        }
+        Some(StreamHandle::Os(_)) => Err(anyhow::Error::new(
+            super::diagnostics::eval_write_live_pipe("stdout"),
+        )),
         // `None` inherits host stdout: only explicit `Stream` bindings
         // reroute DSL output.
         None => {
@@ -392,9 +389,9 @@ where
             Ok(())
         }
         #[cfg(not(miri))]
-        Some(StreamHandle::Os(_)) => {
-            bail!("cannot write DSL output to a live OS pipe")
-        }
+        Some(StreamHandle::Os(_)) => Err(anyhow::Error::new(
+            super::diagnostics::eval_write_live_pipe("stderr"),
+        )),
         None => {
             let mut stderr = io::stderr();
             op(&mut stderr)
@@ -806,7 +803,7 @@ impl ExecIo {
     /// [`PipeRegistry::ensure_handle`]). Main-flow bindings call this with
     /// the per-step trigger; task bodies are pre-decided by the spawn-time
     /// pin walk, making this a no-op there.
-    pub(super) fn ensure_handle(&self, handle: &PipeHandle, promote: bool) -> Result<()> {
+    pub(super) fn ensure_handle(&self, handle: &PipeHandle, promote: bool) -> DiagnosticResult<()> {
         PipeRegistry::ensure_handle(handle, promote)
     }
 
@@ -822,7 +819,7 @@ impl ExecIo {
     /// after a run completes, via the `PIPE` values in the returned
     /// bindings. Only meaningful once writers detached (post-run);
     /// unbound handles and OS pairs bail loudly.
-    pub fn peek_pipe_content(&self, handle: &PipeHandle) -> Result<Vec<u8>> {
+    pub fn peek_pipe_content(&self, handle: &PipeHandle) -> DiagnosticResult<Vec<u8>> {
         PipeRegistry::peek_pipe_content(handle)
     }
 
@@ -830,7 +827,7 @@ impl ExecIo {
     /// and unbound handles. Callers ensure the handle first so OS
     /// promotion is honored and this never forces a backend into
     /// existence.
-    pub(super) fn pin_keeper(&self, handle: &PipeHandle) -> Result<Option<KeeperGuard>> {
+    pub(super) fn pin_keeper(&self, handle: &PipeHandle) -> DiagnosticResult<Option<KeeperGuard>> {
         PipeRegistry::pin_keeper(handle)
     }
 
@@ -841,7 +838,7 @@ impl ExecIo {
         handle: &PipeHandle,
         direct: bool,
         promote: bool,
-    ) -> Result<(CommandStdin, Option<Arc<PipeInner>>)> {
+    ) -> DiagnosticResult<(CommandStdin, Option<Arc<PipeInner>>)> {
         PipeRegistry::resolve_stdin(handle, direct, promote)
     }
 
@@ -852,7 +849,7 @@ impl ExecIo {
         handle: &PipeHandle,
         direct: bool,
         promote: bool,
-    ) -> Result<(StreamHandle, Option<Arc<PipeInner>>)> {
+    ) -> DiagnosticResult<(StreamHandle, Option<Arc<PipeInner>>)> {
         PipeRegistry::resolve_stdout(handle, direct, promote)
     }
 
@@ -862,7 +859,7 @@ impl ExecIo {
         handle: &PipeHandle,
         direct: bool,
         promote: bool,
-    ) -> Result<StreamHandle> {
+    ) -> DiagnosticResult<StreamHandle> {
         PipeRegistry::resolve_stderr(handle, direct, promote)
     }
 

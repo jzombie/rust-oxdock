@@ -13,6 +13,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 oxdock-core.workspace = true
+oxdock-diagnostics.workspace = true
 oxdock-func-macro.workspace = true
 oxdock-parser.workspace = true
 oxdock-process.workspace = true

@@ -7,6 +7,7 @@
 //! enabled the server polls the script file and hot-swaps the session on
 //! change; broken edits keep serving the old tools.
 
+pub mod diagnostics;
 pub mod schema;
 pub mod server;
 pub mod tools;
@@ -18,6 +19,9 @@ pub use tools::{
 };
 
 use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
+
+use crate::diagnostics as mcp_diag;
 
 /// Parsed script plus the host surface needed to serve it.
 pub struct McpServerConfig {
@@ -70,28 +74,28 @@ pub fn init_handler(config: McpServerConfig) -> Result<OxDockHandler> {
 /// Serve the handler over stdio until the client disconnects. Spawns the
 /// hot-reload poll task first when watching is configured, handing it the
 /// peer so successful reloads also emit `tools/list_changed`.
-pub async fn serve_stdio(handler: OxDockHandler) -> Result<()> {
+pub async fn serve_stdio(handler: OxDockHandler) -> DiagnosticResult<()> {
     use rmcp::ServiceExt;
     let transport = rmcp::transport::io::stdio();
     let reloader = handler.clone();
     let service = handler
         .serve(transport)
         .await
-        .map_err(|err| anyhow::anyhow!("MCP stdio serve failed: {err}"))?;
+        .map_err(|err| mcp_diag::stdio_serve_failed(&anyhow::Error::new(err)))?;
     reloader.spawn_reloader(Some(service.peer().clone()));
     service
         .waiting()
         .await
-        .map_err(|err| anyhow::anyhow!("MCP stdio service failed: {err}"))?;
+        .map_err(|err| mcp_diag::stdio_service_failed(&anyhow::Error::new(err)))?;
     Ok(())
 }
 
 /// Blocking entry for hosts without a tokio runtime (the CLI): builds a
 /// current-thread runtime and serves until disconnect.
-pub fn serve_stdio_blocking(handler: OxDockHandler) -> Result<()> {
+pub fn serve_stdio_blocking(handler: OxDockHandler) -> DiagnosticResult<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|err| anyhow::anyhow!("build MCP tokio runtime: {err}"))?;
+        .map_err(|err| mcp_diag::serve_runtime_build_failed(&anyhow::Error::new(err)))?;
     runtime.block_on(serve_stdio(handler))
 }

@@ -1,9 +1,10 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 #[cfg(not(miri))]
 use std::fs;
 
 use super::{AccessMode, PathResolver};
 use crate::GuardedPath;
+use crate::diagnostics as fs_diag;
 
 #[allow(clippy::disallowed_types)]
 use crate::UnguardedPath;
@@ -24,7 +25,7 @@ fn refuse_final_symlink(path: &GuardedPath) -> Result<()> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e).with_context(|| format!("lstat denied for {}", path.display())),
             Ok(meta) if meta.file_type().is_symlink() => {
-                bail!("refuses symlink final component: {}", path.display())
+                Err(anyhow::Error::new(fs_diag::refuses_symlink_final(path)))
             }
             Ok(_) => Ok(()),
         }
@@ -151,7 +152,7 @@ impl PathResolver {
                     continue;
                 }
                 if part == ".." {
-                    bail!("refuses parent reference above {}", base.display());
+                    return Err(anyhow::Error::new(fs_diag::refuses_parent_reference(base)));
                 }
                 current.push(part);
                 match std::fs::symlink_metadata(&current) {
@@ -161,7 +162,7 @@ impl PathResolver {
                             .with_context(|| format!("lstat denied for {}", current.display()));
                     }
                     Ok(meta) if meta.file_type().is_symlink() => {
-                        bail!("refuses link ancestor {}", current.display());
+                        return Err(anyhow::Error::new(fs_diag::refuses_link_ancestor(&current)));
                     }
                     Ok(_) => {}
                 }
@@ -280,7 +281,7 @@ impl PathResolver {
         #[cfg(miri)]
         {
             let _ = path;
-            anyhow::bail!("metadata_unguarded not supported on Miri")
+            Err(anyhow::Error::new(fs_diag::metadata_unguarded_miri()))
         }
     }
     #[cfg(not(miri))]
@@ -327,7 +328,7 @@ impl PathResolver {
         #[cfg(miri)]
         {
             let _ = path;
-            anyhow::bail!("open_file_unguarded not supported on Miri")
+            Err(anyhow::Error::new(fs_diag::open_file_unguarded_miri()))
         }
     }
 
@@ -391,10 +392,10 @@ impl PathResolver {
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
         else {
-            bail!("remove_link denied for {rel}: no file name");
+            return Err(anyhow::Error::new(fs_diag::remove_link_no_file_name(rel)));
         };
         if name == "." || name == ".." {
-            bail!("remove_link denied for {rel}: no file name");
+            return Err(anyhow::Error::new(fs_diag::remove_link_no_file_name(rel)));
         }
         let parent_str = rel_path
             .parent()
@@ -406,7 +407,7 @@ impl PathResolver {
         };
         let link_path = parent_guard.as_path().join(&name);
         if !link_path.starts_with(parent_guard.as_path()) {
-            bail!("remove_link denied for {rel}: escapes root");
+            return Err(anyhow::Error::new(fs_diag::remove_link_escapes_root(rel)));
         }
         let meta = match std::fs::symlink_metadata(&link_path) {
             Ok(meta) => meta,
@@ -488,17 +489,17 @@ impl PathResolver {
 
     #[cfg(miri)]
     pub fn create_spill_file(&self, _path: &GuardedPath) -> Result<SpillFile> {
-        bail!("spill files are not supported under Miri (memory-only)")
+        Err(anyhow::Error::new(fs_diag::spill_files_miri()))
     }
 
     #[cfg(miri)]
     pub fn open_spill_file(&self, _path: &GuardedPath) -> Result<SpillFile> {
-        bail!("spill files are not supported under Miri (memory-only)")
+        Err(anyhow::Error::new(fs_diag::spill_files_miri()))
     }
 
     #[cfg(miri)]
     pub fn truncate_spill_file(&self, _path: &GuardedPath, _len: u64) -> Result<()> {
-        bail!("spill files are not supported under Miri (memory-only)")
+        Err(anyhow::Error::new(fs_diag::spill_files_miri()))
     }
 
     /// Write a secret file with `0600` enforced at open time (never
@@ -532,7 +533,7 @@ impl PathResolver {
 
     #[cfg(miri)]
     pub fn write_private_file(&self, _path: &GuardedPath, _contents: &[u8]) -> Result<()> {
-        bail!("private files are not supported under Miri (memory-only)")
+        Err(anyhow::Error::new(fs_diag::private_files_miri()))
     }
 }
 
@@ -602,16 +603,12 @@ impl PathResolver {
             .with_context(|| format!("symlink destination denied for {}", dst.display()))?;
 
         if guarded_dst.as_path().exists() {
-            bail!(
-                "SYMLINK destination already exists: {}",
-                guarded_dst.display()
-            );
+            return Err(anyhow::Error::new(fs_diag::symlink_dest_exists(
+                &guarded_dst,
+            )));
         }
         if guarded_src.as_path() == guarded_dst.as_path() {
-            bail!(
-                "SYMLINK source resolves to the destination itself: {}",
-                guarded_src.display()
-            );
+            return Err(anyhow::Error::new(fs_diag::symlink_self_link(&guarded_src)));
         }
 
         #[cfg(unix)]
@@ -653,11 +650,10 @@ impl PathResolver {
 
         #[cfg(not(any(unix, windows)))]
         {
-            bail!(
-                "SYMLINK unsupported on this platform ({} -> {})",
-                guarded_src.display(),
-                guarded_dst.display()
-            );
+            return Err(anyhow::Error::new(fs_diag::symlink_unsupported_platform(
+                &guarded_src,
+                &guarded_dst,
+            )));
         }
     }
 
@@ -671,18 +667,16 @@ impl PathResolver {
             .with_context(|| format!("symlink destination denied for {}", dst.display()))?;
 
         if self.entry_kind(&guarded_dst).is_ok() {
-            bail!(
-                "SYMLINK destination already exists: {}",
-                guarded_dst.display()
-            );
+            return Err(anyhow::Error::new(fs_diag::symlink_dest_exists(
+                &guarded_dst,
+            )));
         }
 
         let _ = self.entry_kind(&guarded_src)?;
-        bail!(
-            "SYMLINK unsupported under Miri ({} -> {})",
-            guarded_src.display(),
-            guarded_dst.display()
-        );
+        Err(anyhow::Error::new(fs_diag::symlink_unsupported_miri(
+            &guarded_src,
+            &guarded_dst,
+        )))
     }
 }
 

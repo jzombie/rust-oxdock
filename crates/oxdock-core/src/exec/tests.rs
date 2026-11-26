@@ -4975,21 +4975,21 @@ fn resolve_tag_rejects_generic_arity_violations() {
         .resolve_tag("LIST<MAP, STRING>")
         .expect_err("LIST with two args must fail");
     assert!(
-        format!("{err:#}").contains("LIST takes exactly one bare type argument"),
+        format!("{err:#}").contains("`LIST` takes exactly one bare type argument"),
         "{err:#}"
     );
     let err = state
         .resolve_tag("STRING<INT>")
         .expect_err("arguments on a scalar must fail");
     assert!(
-        format!("{err:#}").contains("'STRING' takes no type arguments"),
+        format!("{err:#}").contains("`STRING` takes no type arguments"),
         "{err:#}"
     );
     let err = state
         .resolve_tag("MAP<STRING>")
         .expect_err("bare MAP field must fail");
     assert!(
-        format!("{err:#}").contains("MAP fields require 'name: TYPE'"),
+        format!("{err:#}").contains("`MAP` fields require `name: TYPE`"),
         "{err:#}"
     );
     // Alias targets enforce the same rules: the violation rides
@@ -4999,7 +4999,7 @@ fn resolve_tag_rejects_generic_arity_violations() {
         .insert("BAD".to_string(), "LIST<MAP, STRING>".to_string());
     let err = state.resolve_tag("BAD").expect_err("alias arity must fail");
     assert!(
-        format!("{err:#}").contains("LIST takes exactly one bare type argument"),
+        format!("{err:#}").contains("`LIST` takes exactly one bare type argument"),
         "{err:#}"
     );
 }
@@ -5061,22 +5061,19 @@ fn resolve_tag_unions_admit_member_sets() {
         .resolve_tag("STRING|LIST")
         .expect_err("bare LIST member fails");
     assert!(
-        format!("{err:#}").contains("bare LIST is not a declaration type"),
+        format!("{err:#}").contains("bare `LIST` is not a declaration type"),
         "{err:#}"
     );
     // Empty members and unknown names fail naming the rule.
     let err = state
         .resolve_tag("STRING|")
         .expect_err("empty member fails");
-    assert!(
-        format!("{err:#}").contains("invalid type spelling"),
-        "{err:#}"
-    );
+    assert!(format!("{err:#}").contains("expected type name"), "{err:#}");
     let err = state
         .resolve_tag("NOPE|STRING")
         .expect_err("unknown member fails");
     assert!(
-        format!("{err:#}").contains("unknown type 'NOPE'"),
+        format!("{err:#}").contains("unknown type `NOPE`"),
         "{err:#}"
     );
     // Unions combine inside generics: members resolve as siblings.
@@ -5172,7 +5169,7 @@ fn int_params_reject_unconverted_words() {
     let fs: Box<dyn WorkspaceFs> = Box::new(MockFs::new());
     let err = run_expect_err(fs, &steps, MockProcessManager::default());
     assert!(
-        format!("{err:#}").contains("expected INT"),
+        format!("{err:#}").contains("expected `INT`"),
         "names the slot: {err:#}"
     );
 }
@@ -5484,7 +5481,7 @@ fn resolve_tag_combines_schema_and_alias_leaves() {
         .resolve_tag("LIST<MISSING>")
         .expect_err("unknown leaf must fail");
     assert!(
-        format!("{err:#}").contains("unknown type 'MISSING'"),
+        format!("{err:#}").contains("unknown type `MISSING`"),
         "{err:#}"
     );
 }
@@ -5701,7 +5698,7 @@ fn merge_maps_rejects_unknown_policy_at_boundary() {
     let fs = MockFs::new();
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
-        format!("{err:#}").contains("expected LIST"),
+        format!("{err:#}").contains("expected `LIST"),
         "boundary enforces the LIST shape: {err:#}"
     );
 
@@ -5754,6 +5751,67 @@ fn check_options_enforces_present_values() {
     let mut ok: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
     ok.insert("timeout".to_string(), Value::string("10s".to_string()));
     crate::check_options(&ok, &options, "F").expect("union member passes");
+}
+
+#[test]
+fn function_names_match_registry() {
+    // Every `function_names::FUNC_*` constant must equal the name its
+    // function registers under. `#[oxdock_func]` derives the registry
+    // name from the Rust function name, while diagnostics interpolate
+    // the constant: without this lock, renaming the Rust function
+    // moves the registry and rots the message text silently.
+    use super::function_names::*;
+    let registrations =
+        super::native::FunctionRegistry::<MockProcessManager>::builtin_registrations();
+    let registered: std::collections::HashSet<&str> =
+        registrations.iter().map(|entry| entry.name()).collect();
+    for name in [
+        FUNC_BASE64_DECODE,
+        FUNC_BASE64_ENCODE,
+        FUNC_BOOL,
+        FUNC_BOOL_OR,
+        FUNC_CONTAINS,
+        FUNC_FLOAT,
+        FUNC_FORMAT_BYTE_COUNT,
+        FUNC_FORMAT_DURATION,
+        FUNC_GLOB,
+        FUNC_HAS_KEY,
+        FUNC_INT,
+        FUNC_IS_EXEC,
+        FUNC_IS_TERMINAL,
+        FUNC_LEN,
+        FUNC_LOAD_JSON,
+        FUNC_LOAD_TOML,
+        FUNC_MAP_SET,
+        FUNC_MERGE_MAPS,
+        FUNC_PARSE_ARGS,
+        FUNC_PARSE_BYTE_COUNT,
+        FUNC_PARSE_DURATION,
+        FUNC_PARSE_FLAGS,
+        FUNC_PARSE_JSON,
+        FUNC_PARSE_POSITIONALS,
+        FUNC_PARSE_TOML,
+        FUNC_PATH_BASE,
+        FUNC_PATH_REL,
+        FUNC_PATH_TYPE,
+        FUNC_PATH_WRITABLE,
+        FUNC_SEMAPHORE_NEW,
+        FUNC_SHELL_SPLIT_ARGS,
+        FUNC_TEXT_COUNT,
+        FUNC_TEXT_COUNT_MATCHES,
+        FUNC_TEXT_EXTRACT,
+        FUNC_TEXT_GREP,
+        FUNC_TEXT_LINES_RANGE,
+        FUNC_TEXT_MATCH,
+        FUNC_TEXT_REPLACE,
+        FUNC_TEXT_REPLACE_REGEX,
+        FUNC_TO_JSON,
+    ] {
+        assert!(
+            registered.contains(name),
+            "function_names constant {name:?} has no registry entry: rename the constant or the Rust function"
+        );
+    }
 }
 
 #[test]
@@ -7360,7 +7418,7 @@ fn file_import_function_read_of_caller_var_fails() {
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
-        format!("{err:?}").contains("undefined variable $carrier"),
+        format!("{err:?}").contains("undefined variable `$carrier`"),
         "fails naming the unobservable variable: {err:?}"
     );
 }
@@ -7417,7 +7475,7 @@ fn entry_function_arg_and_template_share_one_gate() {
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
-        format!("{err:?}").contains("undefined variable $nope"),
+        format!("{err:?}").contains("undefined variable `$nope`"),
         "RUN args reject undeclared names: {err:?}"
     );
     let fs = MockFs::new();
@@ -7431,7 +7489,7 @@ fn entry_function_arg_and_template_share_one_gate() {
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
-        format!("{err:?}").contains("undefined variable $nope"),
+        format!("{err:?}").contains("undefined variable `$nope`"),
         "templates reject undeclared names through the same gate: {err:?}"
     );
 }
@@ -7656,7 +7714,7 @@ fn file_import_init_cannot_see_caller_vars() {
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
-        format!("{err:?}").contains("undefined variable $caller_var"),
+        format!("{err:?}").contains("undefined variable `$caller_var`"),
         "fails naming the unobservable variable: {err:?}"
     );
 }
@@ -9559,7 +9617,7 @@ fn dead_guarded_import_leaves_alias_unknown() {
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
     assert!(
-        rendered.contains("unknown placeholder function 'ALIAS::F'"),
+        rendered.contains("unknown placeholder function `ALIAS::F`"),
         "dead import must leave the placeholder unknown, got: {rendered}"
     );
     assert!(
@@ -11021,7 +11079,7 @@ fn template_rejects_script_and_stateful_callees_with_pure_arity() {
     for (body, needle) in [
         (
             "{{ SCRIPT::FOO() }}",
-            "unknown placeholder function 'SCRIPT::FOO'",
+            "unknown placeholder function `SCRIPT::FOO`",
         ),
         (
             "{{ CB::F($x) }}",
@@ -11029,7 +11087,7 @@ fn template_rejects_script_and_stateful_callees_with_pure_arity() {
         ),
         (
             "{{ STD::TYPO() }}",
-            "unknown placeholder function 'STD::TYPO'",
+            "unknown placeholder function `STD::TYPO`",
         ),
         ("{{ STD::LEN() }}", "expects 1 argument"),
     ] {
@@ -11095,7 +11153,7 @@ fn template_sibling_alias_does_not_leak_script_hint() {
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
     assert!(
-        rendered.contains("unknown placeholder function 'LIBB::BAR'"),
+        rendered.contains("unknown placeholder function `LIBB::BAR`"),
         "sibling alias must fail unknown, got: {rendered}"
     );
     assert!(
@@ -11146,7 +11204,7 @@ fn template_in_module_body_uses_module_aliases_not_importer() {
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
     assert!(
-        rendered.contains("unknown placeholder function 'CB::F'"),
+        rendered.contains("unknown placeholder function `CB::F`"),
         "module body must not see the importer's alias, got: {rendered}"
     );
     assert!(
@@ -11252,7 +11310,7 @@ fn template_module_init_inside_entry_func_resolves_against_module() {
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
     assert!(
-        rendered.contains("unknown placeholder function 'CB::F'"),
+        rendered.contains("unknown placeholder function `CB::F`"),
         "module init must not inherit the entry frame's aliases, got: {rendered}"
     );
     assert!(
@@ -11321,7 +11379,7 @@ fn template_module_init_call_into_other_uses_callee_aliases() {
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
     assert!(
-        rendered.contains("unknown placeholder function 'CB::F'"),
+        rendered.contains("unknown placeholder function `CB::F`"),
         "callee must resolve against its own imports, got: {rendered}"
     );
     assert!(

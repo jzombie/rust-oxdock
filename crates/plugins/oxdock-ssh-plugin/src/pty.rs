@@ -17,7 +17,9 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use oxdock_diagnostics::DiagnosticResult;
+
+use crate::diagnostics as ssh_diag;
 use oxdock_core::{StepCtx, Value};
 use oxdock_fs::command_path;
 use oxdock_process::{self, ProcessManager, read_pump_chunk};
@@ -83,13 +85,13 @@ pub fn pump_pty_session<P: ProcessManager>(
     in_pipe: &Value,
     out_pipe: &Value,
     on_exit: Option<Arc<dyn Fn(u32) + Send + Sync>>,
-) -> Result<i64> {
+) -> DiagnosticResult<i64> {
     let reader = cx
         .pipe_reader(in_pipe)
-        .context("SSH pty cannot borrow the input pipe")?;
+        .map_err(ssh_diag::pty_borrow_input_failed)?;
     let writer = cx
         .pipe_writer(out_pipe)
-        .context("SSH pty cannot borrow the output pipe")?;
+        .map_err(ssh_diag::pty_borrow_output_failed)?;
     // Interruptible chunk reads with the backend's keeper semantics,
     // unchanged from the inlined pump: `read_pump_chunk` carries the
     // timeout and wake contract, so the shared runner sees the exact
@@ -113,11 +115,13 @@ pub fn pump_pty_session<P: ProcessManager>(
     {
         let mut guard = writer
             .lock()
-            .map_err(|_| anyhow::anyhow!("SSH pty output lock poisoned"))?;
+            .map_err(|_| ssh_diag::pty_output_lock_poisoned())?;
         guard
             .write_all(b"\x1b[2J\x1b[H")
-            .context("SSH pty session init write failed")?;
-        guard.flush().context("SSH pty session init flush failed")?;
+            .map_err(ssh_diag::pty_session_init_write_failed)?;
+        guard
+            .flush()
+            .map_err(ssh_diag::pty_session_init_flush_failed)?;
     }
     let hub = cx.cancel_hub();
     let outcome = run_pty_session(PtyRequest {
@@ -150,7 +154,7 @@ pub fn pump_pty_session<P: ProcessManager>(
         PtyOutcome::Cancelled => {
             let _ = cx.close_pipe(in_pipe);
             let _ = cx.close_pipe(out_pipe);
-            anyhow::bail!("SSH pty run interrupted by cancellation")
+            Err(ssh_diag::pty_interrupted_by_cancellation())
         }
     }
 }

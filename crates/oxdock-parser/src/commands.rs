@@ -35,7 +35,9 @@ use crate::constants::{
     KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE,
     KEYWORD_WHILE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WORKSPACE, KEYWORD_WRITE, sigil_var,
 };
-use crate::error::{ParseError, ParseResult, SpanContext};
+use crate::diagnostics as dsl_diag;
+use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
+use crate::tag::{HANDLE_TYPE_NAME, PIPE_TYPE_NAME, STRING_TYPE_NAME, VOID_TYPE_NAME};
 use indoc::indoc;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -74,9 +76,11 @@ pub fn is_valid_remote_target(target: &str) -> bool {
 /// with single-space separators so `$x` is never silently dropped.
 fn join_value(args: Vec<Arg>, cmd_name: &str) -> ParseResult<Arg> {
     if args.is_empty() {
-        return Err(ParseError::validation(
-            cmd_name,
-            format!("{cmd_name} requires at least one argument"),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: cmd_name.to_string(),
+            },
+            dsl_diag::needs_value(cmd_name),
             &SpanContext::line_only(0),
         ));
     }
@@ -111,19 +115,29 @@ fn join_value(args: Vec<Arg>, cmd_name: &str) -> ParseResult<Arg> {
 /// assignments on raw spans first (see `lower_env_command` in parser.rs).
 pub fn lower_env_assignment(args: Vec<Arg>) -> ParseResult<StepKind> {
     let arg = args.into_iter().next().ok_or_else(|| {
-        ParseError::validation(
-            KEYWORD_ENV,
-            "ENV requires KEY=value".to_string(),
+        ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: KEYWORD_ENV.to_string(),
+            },
+            dsl_diag::env_requires_assignment(),
             &SpanContext::line_only(0),
         )
     })?;
     let Some((key, value)) = split_assignment(arg.as_str()).map_err(|e| {
-        ParseError::validation(KEYWORD_ENV, e.to_string(), &SpanContext::line_only(0))
+        ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: KEYWORD_ENV.to_string(),
+            },
+            dsl_diag::env_assignment_error(e),
+            &SpanContext::line_only(0),
+        )
     })?
     else {
-        return Err(ParseError::validation(
-            KEYWORD_ENV,
-            "ENV requires KEY=value format".to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: KEYWORD_ENV.to_string(),
+            },
+            dsl_diag::env_bad_format(),
             &SpanContext::line_only(0),
         ));
     };
@@ -415,24 +429,18 @@ pub(crate) fn invalid_syntax_error(name: &str, raw_args: &[Arg]) -> ParseError {
         .map(|meta| vec![meta.syntax.to_string()])
         .unwrap_or_default();
     let ctx = SpanContext::line_only(0);
-    match structural_hint(name, &received) {
-        Some(hint) => ParseError::invalid_syntax(
-            name,
-            format!("invalid syntax for command {name}: {hint}"),
-            found,
-            expected,
-            Some(hint),
-            &ctx,
-        ),
-        None => ParseError::invalid_syntax(
-            name,
-            format!("invalid syntax for command {name}: got {got}."),
-            found,
-            expected,
-            None,
-            &ctx,
-        ),
-    }
+    let hint = structural_hint(name, &received);
+    let diag = dsl_diag::invalid_syntax(name, &got, hint.as_deref());
+    ParseError::from_diagnostic(
+        ParseErrorKind::InvalidSyntax {
+            command: name.to_string(),
+        },
+        diag,
+        &ctx,
+    )
+    .with_found(found)
+    .with_expected(expected)
+    .with_hint(hint)
 }
 
 fn unknown_command_error(name: &str, raw_args: &[Arg]) -> ParseError {
@@ -443,15 +451,15 @@ fn unknown_command_error(name: &str, raw_args: &[Arg]) -> ParseError {
         .join(" ");
     let hint = structural_hint(name, &received).or_else(|| case_hint(name));
     let ctx = SpanContext::line_only(0);
-    match hint {
-        Some(hint) => ParseError::unknown_command(
-            name,
-            format!("unknown command: {name}\n{hint}"),
-            Some(hint),
-            &ctx,
-        ),
-        None => ParseError::unknown_command(name, format!("unknown command: {name}"), None, &ctx),
-    }
+    let diag = dsl_diag::unknown_command(name, hint.as_deref());
+    ParseError::from_diagnostic(
+        ParseErrorKind::UnknownCommand {
+            name: name.to_string(),
+        },
+        diag,
+        &ctx,
+    )
+    .with_hint(hint)
 }
 
 /// Single decision function for the lowering fallback: keyword led lines
@@ -476,70 +484,70 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
     match name {
         name if name == KEYWORD_WITH_IO => Some(with_io_hint(&got, received)),
         name if name == KEYWORD_AWAIT => Some(format!(
-            "AWAIT waits for a background task variable, e.g. `LET $t: HANDLE<VOID> = ASYNC ECHO hi` then `AWAIT $t`; got {got}."
+            "{KEYWORD_AWAIT} waits for a background task variable, e.g. `{KEYWORD_LET} $t: {HANDLE_TYPE_NAME}<{VOID_TYPE_NAME}> = {KEYWORD_ASYNC} {KEYWORD_ECHO} hi` then `{KEYWORD_AWAIT} $t`; got {got}"
         )),
         name if name == KEYWORD_CANCEL => Some(format!(
-            "CANCEL stops a background task variable, e.g. `CANCEL $t` (from `LET $t: HANDLE<VOID> = ASYNC ...`); got {got}."
+            "{KEYWORD_CANCEL} stops a background task variable, e.g. `{KEYWORD_CANCEL} $t` (from `{KEYWORD_LET} $t: {HANDLE_TYPE_NAME}<{VOID_TYPE_NAME}> = {KEYWORD_ASYNC} ...`); got {got}"
         )),
         name if name == KEYWORD_ASYNC => Some(format!(
-            "ASYNC runs a command in the background, e.g. `ASYNC RUN ...`, `ASYNC {{ ... }}`, or `LET $t: HANDLE<T> = ASYNC ...`; got {got}."
+            "{KEYWORD_ASYNC} runs a command in the background, e.g. `{KEYWORD_ASYNC} {KEYWORD_RUN} ...`, `{KEYWORD_ASYNC} {{ ... }}`, or `{KEYWORD_LET} $t: {HANDLE_TYPE_NAME}<T> = {KEYWORD_ASYNC} ...`; got {got}"
         )),
         name if name == KEYWORD_FOR => Some(format!(
-            "FOR loops need `FOR $item: TYPE IN <expr> {{ ... }}` (or `FOR $key: STRING, $value: TYPE IN <expr> {{ ... }}`); got {got}."
+            "{KEYWORD_FOR} loops need `{KEYWORD_FOR} $item: {KEYWORD_TYPE} IN <expr> {{ ... }}` (or `{KEYWORD_FOR} $key: {STRING_TYPE_NAME}, $value: {KEYWORD_TYPE} IN <expr> {{ ... }}`); got {got}"
         )),
         name if name == KEYWORD_IF => Some(format!(
-            "IF needs a condition and a block, e.g. `IF true {{ ECHO yes }}`; got {got}."
+            "{KEYWORD_IF} needs a condition and a block, e.g. `{KEYWORD_IF} true {{ {KEYWORD_ECHO} yes }}`; got {got}"
         )),
         name if name == KEYWORD_ELSE => Some(format!(
-            "ELSE must directly follow an `IF ... {{ ... }}` block, e.g. `IF true {{ ECHO yes }} ELSE {{ ECHO no }}`; got {got}."
+            "{KEYWORD_ELSE} must directly follow an `{KEYWORD_IF} ... {{ ... }}` block, e.g. `{KEYWORD_IF} true {{ {KEYWORD_ECHO} yes }} {KEYWORD_ELSE} {{ {KEYWORD_ECHO} no }}`; got {got}"
         )),
         name if name == KEYWORD_SWITCH => Some(format!(
-            "SWITCH needs a value or bare condition list plus braced CASE arms, e.g. `SWITCH $cmd {{ CASE \"a\" {{ ECHO yes }} DEFAULT {{ ECHO no }} }}`; got {got}."
+            "{KEYWORD_SWITCH} needs a value or bare condition list plus braced {KEYWORD_CASE} arms, e.g. `{KEYWORD_SWITCH} $cmd {{ {KEYWORD_CASE} \"a\" {{ {KEYWORD_ECHO} yes }} {KEYWORD_DEFAULT} {{ {KEYWORD_ECHO} no }} }}`; got {got}"
         )),
         name if name == KEYWORD_CASE => Some(format!(
-            "CASE only appears inside a SWITCH body, e.g. `SWITCH $cmd {{ CASE \"a\", \"b\" {{ ECHO yes }} }}`; got {got}."
+            "{KEYWORD_CASE} only appears inside a {KEYWORD_SWITCH} body, e.g. `{KEYWORD_SWITCH} $cmd {{ {KEYWORD_CASE} \"a\", \"b\" {{ {KEYWORD_ECHO} yes }} }}`; got {got}"
         )),
         name if name == KEYWORD_DEFAULT => Some(format!(
-            "DEFAULT only appears inside a SWITCH body, e.g. `SWITCH $cmd {{ CASE \"a\" {{ ECHO yes }} DEFAULT {{ ECHO no }} }}`; got {got}."
+            "{KEYWORD_DEFAULT} only appears inside a {KEYWORD_SWITCH} body, e.g. `{KEYWORD_SWITCH} $cmd {{ {KEYWORD_CASE} \"a\" {{ {KEYWORD_ECHO} yes }} {KEYWORD_DEFAULT} {{ {KEYWORD_ECHO} no }} }}`; got {got}"
         )),
         name if name == KEYWORD_LET => Some(format!(
-            "LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE<T> = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = {{ ... }}` (inline block); got {got}."
+            "{KEYWORD_LET} assigns a variable, e.g. `{KEYWORD_LET} $name: {STRING_TYPE_NAME} = <expr>`, `{KEYWORD_LET} $t: {HANDLE_TYPE_NAME}<T> = {KEYWORD_ASYNC} ...`, `{KEYWORD_LET} $out: {STRING_TYPE_NAME} = <command>` (capture), `{KEYWORD_LET} $out: {STRING_TYPE_NAME} = {KEYWORD_AWAIT} $t`, or `{KEYWORD_LET} $var: {KEYWORD_TYPE} = {{ ... }}` (inline block); got {got}"
         )),
         "SET" => Some(
-            "`SET` is not a keyword; mutate a declared variable with `$var = <expr>`, e.g. `$count = 2`.".to_string(),
+            "`SET` is not a keyword; mutate a declared variable with `$var = <expr>`, e.g. `$count = 2`".to_string(),
         ),
         name if name == KEYWORD_TIMEOUT => Some(format!(
-            "TIMEOUT needs a duration and a command or block, e.g. `TIMEOUT 30s RUN ...`; got {got}."
+            "{KEYWORD_TIMEOUT} needs a duration and a command or block, e.g. `{KEYWORD_TIMEOUT} 30s {KEYWORD_RUN} ...`; got {got}"
         )),
         name if name == KEYWORD_FAIL => Some(format!(
-            "FAIL needs a message, a code, or a block, e.g. `FAIL \"boom\"`, `FAIL 2 \"boom\"`, or `FAIL \"boom\" {{ ECHO usage }}`; got {got}."
+            "{KEYWORD_FAIL} needs a message, a code, or a block, e.g. `{KEYWORD_FAIL} \"boom\"`, `{KEYWORD_FAIL} 2 \"boom\"`, or `{KEYWORD_FAIL} \"boom\" {{ {KEYWORD_ECHO} usage }}`; got {got}"
         )),
         name if name == KEYWORD_REMOTE => Some(format!(
-            "REMOTE needs a target and a braced block, e.g. `REMOTE prod [$version, env:DEPLOY_ENV] {{ ... }}`; got {got}."
+            "{KEYWORD_REMOTE} needs a target and a braced block, e.g. `{KEYWORD_REMOTE} prod [$version, env:DEPLOY_ENV] {{ ... }}`; got {got}"
         )),
         name if name == KEYWORD_FUNC => Some(format!(
-            "FUNC defines a function, e.g. `FUNC GREET($name: STRING): STRING {{ RETURN $name }}`; got {got}."
+            "{KEYWORD_FUNC} defines a function, e.g. `{KEYWORD_FUNC} GREET($name: {STRING_TYPE_NAME}): {STRING_TYPE_NAME} {{ {KEYWORD_RETURN} $name }}`; got {got}"
         )),
         name if name == KEYWORD_RETURN => Some(format!(
-            "RETURN ends the nearest function, ASYNC task, or inline LET block with a value, e.g. `RETURN $x`; got {got}."
+            "{KEYWORD_RETURN} ends the nearest function, {KEYWORD_ASYNC} task, or inline {KEYWORD_LET} block with a value, e.g. `{KEYWORD_RETURN} $x`; got {got}"
         )),
         name if name == KEYWORD_WHILE => Some(format!(
-            "WHILE needs a Bool condition and a block, e.g. `WHILE !$done {{ ... }}`; got {got}."
+            "{KEYWORD_WHILE} needs a Bool condition and a block, e.g. `{KEYWORD_WHILE} !$done {{ ... }}`; got {got}"
         )),
         name if name == KEYWORD_BREAK => Some(
-            "`BREAK` exits the innermost enclosing FOR/WHILE loop or SWITCH; it must appear inside a loop or SWITCH.".to_string(),
+            "`{KEYWORD_BREAK}` exits the innermost enclosing {KEYWORD_FOR}/{KEYWORD_WHILE} loop or {KEYWORD_SWITCH}; it must appear inside a loop or {KEYWORD_SWITCH}".to_string(),
         ),
         name if name == KEYWORD_CONTINUE => Some(
-            "`CONTINUE` skips to the next iteration of the innermost enclosing FOR/WHILE loop; it must appear inside a loop (a SWITCH never captures it).".to_string(),
+            "`{KEYWORD_CONTINUE}` skips to the next iteration of the innermost enclosing {KEYWORD_FOR}/{KEYWORD_WHILE} loop; it must appear inside a loop (a {KEYWORD_SWITCH} never captures it)".to_string(),
         ),
         name if name == KEYWORD_INHERIT_ENV => Some(format!(
-            "INHERIT_ENV takes a key list, e.g. `INHERIT_ENV [HOME, PATH]`; got {got}."
+            "{KEYWORD_INHERIT_ENV} takes a key list, e.g. `{KEYWORD_INHERIT_ENV} [HOME, PATH]`; got {got}"
         )),
         name if name == KEYWORD_IMPORT => Some(format!(
-            "IMPORT brings module functions into bare-call scope, e.g. `IMPORT [STD]` or `IMPORT [STD, MOCK]`; file imports take a quoted path with a mandatory alias, e.g. `IMPORT [\"./lib.oxdock\" AS LIB]`, and brackets mix both across lines, e.g. `IMPORT [STD, \"a.oxdock\" AS A]`; got {got}."
+            "{KEYWORD_IMPORT} brings module functions into bare-call scope, e.g. `{KEYWORD_IMPORT} [STD]` or `{KEYWORD_IMPORT} [STD, MOCK]`; file imports take a quoted path with a mandatory alias, e.g. `{KEYWORD_IMPORT} [\"./lib.oxdock\" AS LIB]`, and brackets mix both across lines, e.g. `{KEYWORD_IMPORT} [STD, \"a.oxdock\" AS A]`; got {got}"
         )),
         name if name == KEYWORD_EXPORT => Some(
-            "EXPORT marks script FUNCs and qualified host functions as tools, e.g. `EXPORT FOO`, `EXPORT [FOO, STD::INT]`."
+            "{KEYWORD_EXPORT} marks script FUNCs and qualified host functions as tools, e.g. `{KEYWORD_EXPORT} FOO`, `{KEYWORD_EXPORT} [FOO, STD::INT]`"
                 .to_string(),
         ),
         _ => None,
@@ -550,13 +558,23 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
 /// binding list (bindings are bare streams, `<stream>=$var`, bare `tty`,
 /// or `rows`/`cols` dimensions).
 fn with_io_hint(got: &str, received: &str) -> String {
-    const SYNTAX: &str =
-        "WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`";
-    const BINDINGS: &str = "bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`); `tty` is a bare flag for RUN steps, with `rows = <int>` / `cols = <int>` geometry (e.g. `[tty, rows=40, cols=100]`)";
+    fn with_io_syntax() -> String {
+        format!(
+            "{KEYWORD_WITH_IO} needs `{KEYWORD_WITH_IO} [bindings] <command>` or `{KEYWORD_WITH_IO} [bindings] {{ <commands> }}`"
+        )
+    }
+    fn with_io_bindings() -> String {
+        format!(
+            "bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a {PIPE_TYPE_NAME}-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`); `tty` is a bare flag for {KEYWORD_RUN} steps, with `rows = <int>` / `cols = <int>` geometry (e.g. `[tty, rows=40, cols=100]`)"
+        )
+    }
     if let Some(after_open) = received.strip_prefix('[') {
         match after_open.split_once(']') {
             None => {
-                return format!("{SYNTAX}: missing closing `]` in the binding list; got {got}.");
+                return format!(
+                    "{}: missing closing `]` in the binding list; got {got}",
+                    with_io_syntax()
+                );
             }
             Some((bindings, _)) => {
                 for part in bindings.split(',') {
@@ -576,7 +594,8 @@ fn with_io_hint(got: &str, received: &str) -> String {
                         });
                         if !valid {
                             return format!(
-                                "{SYNTAX}: invalid geometry `{part}`; `rows`/`cols` need a positive integer 1-65535 (e.g. `rows=40`) and require `tty`; got {got}."
+                                "{}: invalid geometry `{part}`; `rows`/`cols` need a positive integer 1-65535 (e.g. `rows=40`) and require `tty`; got {got}",
+                                with_io_syntax()
                             );
                         }
                         continue;
@@ -584,14 +603,16 @@ fn with_io_hint(got: &str, received: &str) -> String {
                     if stream == "tty" {
                         if binding.is_some() {
                             return format!(
-                                "{SYNTAX}: invalid binding `{part}`; `tty` is a bare flag (geometry rides `rows`/`cols`, e.g. `[tty, rows=40]`); got {got}."
+                                "{}: invalid binding `{part}`; `tty` is a bare flag (geometry rides `rows`/`cols`, e.g. `[tty, rows=40]`); got {got}",
+                                with_io_syntax()
                             );
                         }
                         continue;
                     }
                     if !matches!(stream, "stdin" | "stdout" | "stderr") {
                         return format!(
-                            "{SYNTAX}: invalid stream `{stream}`; expected `stdin`, `stdout`, `stderr`, or `tty`; got {got}."
+                            "{}: invalid stream `{stream}`; expected `stdin`, `stdout`, `stderr`, or `tty`; got {got}",
+                            with_io_syntax()
                         );
                     }
                     let valid = match binding {
@@ -603,14 +624,16 @@ fn with_io_hint(got: &str, received: &str) -> String {
                     };
                     if !valid {
                         return format!(
-                            "{SYNTAX}: invalid binding `{part}`; {BINDINGS}; got {got}."
+                            "{}: invalid binding `{part}`; {}; got {got}",
+                            with_io_syntax(),
+                            with_io_bindings()
                         );
                     }
                 }
             }
         }
     }
-    format!("{SYNTAX}; got {got}. {BINDINGS}.")
+    format!("{}; got {got}; {}", with_io_syntax(), with_io_bindings())
 }
 
 /// `echo hi` is almost certainly `ECHO hi`: commands are uppercase.
@@ -621,7 +644,7 @@ fn case_hint(name: &str) -> Option<String> {
             .iter()
             .any(|meta| meta.name == upper.as_str())
     {
-        return Some(format!("did you mean `{upper}`? commands are uppercase."));
+        return Some(format!("did you mean `{upper}`? commands are uppercase"));
     }
     None
 }
@@ -1305,9 +1328,11 @@ fn lower_equality_args(
         .map(|(_, v)| v.as_str().to_string());
     let mut it = args.into_iter();
     let actual = lower_assert_target(it.next().ok_or_else(|| {
-        ParseError::validation(
-            verb,
-            format!("{verb} requires a value"),
+        ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: verb.to_string(),
+            },
+            dsl_diag::assert_equality_requires_value(verb),
             &SpanContext::line_only(0),
         )
     })?)?;
@@ -1316,17 +1341,21 @@ fn lower_equality_args(
         if hash.is_some() {
             None
         } else {
-            return Err(ParseError::validation(
-                verb,
-                format!("{verb} requires an expected value"),
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: verb.to_string(),
+                },
+                dsl_diag::assert_equality_requires_expected(verb),
                 &SpanContext::line_only(0),
             ));
         }
     } else {
         if hash.is_some() {
-            return Err(ParseError::validation(
-                verb,
-                format!("{verb} --hash cannot be combined with an expected value"),
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: verb.to_string(),
+                },
+                dsl_diag::assert_equality_hash_with_expected(verb),
                 &SpanContext::line_only(0),
             ));
         }
@@ -1422,7 +1451,15 @@ declare_commands! {
             ASSERT_EQ $body "inner"
         "#} } ],
         lower: |_flags, args| {
-            let path = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_WORKDIR, "WORKDIR requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = args.into_iter().next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_WORKDIR.to_string(),
+                    },
+                    dsl_diag::workdir_requires_path(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             Ok(StepKind::Workdir(path))
         },
     ],
@@ -1469,14 +1506,34 @@ declare_commands! {
         "#} } ],
         lower: |flags, args| {
             let local = flags.iter().any(|(k, _)| k == "local");
-            let target = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_WORKSPACE, "WORKSPACE requires a target".to_string(), &SpanContext::line_only(0)))?;
+            let target = args.into_iter().next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_WORKSPACE.to_string(),
+                    },
+                    dsl_diag::workspace_requires_target(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             match target.as_str() {
-                "SNAPSHOT" | "LOCAL" | "SYSTEM" if local => Err(ParseError::validation(KEYWORD_WORKSPACE, "WORKSPACE --local requires CACHE".to_string(), &SpanContext::line_only(0))),
+                "SNAPSHOT" | "LOCAL" | "SYSTEM" if local => Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_WORKSPACE.to_string(),
+                    },
+                    dsl_diag::workspace_local_needs_cache(),
+                    &SpanContext::line_only(0),
+                )),
                 "SNAPSHOT" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
                 "LOCAL" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
                 "CACHE" => Ok(StepKind::Workspace(WorkspaceTarget::Cache { local })),
                 "SYSTEM" => Ok(StepKind::Workspace(WorkspaceTarget::System)),
-                other => Err(ParseError::validation(KEYWORD_WORKSPACE, format!("unknown workspace target: {other}"), &SpanContext::line_only(0))),
+                other => Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_WORKSPACE.to_string(),
+                    },
+                    dsl_diag::workspace_unknown_target(other),
+                    &SpanContext::line_only(0),
+                )),
             }
         },
     ],
@@ -1711,7 +1768,13 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| match args.as_slice() {
             [Arg::Expr(Expr::List(elems))] if elems.is_empty() => {
-                Err(ParseError::validation(KEYWORD_RUN, "RUN requires at least one argument".to_string(), &SpanContext::line_only(0)))
+                Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_RUN.to_string(),
+                    },
+                    dsl_diag::needs_value(KEYWORD_RUN),
+                    &SpanContext::line_only(0),
+                ))
             }
             [Arg::Expr(Expr::List(elems))] => Ok(StepKind::RunExec {
                 argv: elems.iter().cloned().map(Arg::Expr).collect(),
@@ -1760,16 +1823,44 @@ declare_commands! {
                     "LOCAL" => Ok(WorkspaceTarget::Local),
                     "CACHE" => Ok(WorkspaceTarget::Cache { local: false }),
                     "SYSTEM" => Ok(WorkspaceTarget::System),
-                    other => Err(ParseError::validation(KEYWORD_COPY, format!("unknown workspace source: {other}"), &SpanContext::line_only(0))),
+                    other => Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_COPY.to_string(),
+                        },
+                        dsl_diag::unknown_workspace_source(KEYWORD_COPY, other),
+                        &SpanContext::line_only(0),
+                    )),
                 })
                 .transpose()?;
             let mut it = args.into_iter();
-            let from = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY, "COPY requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let to = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY, "COPY requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let from = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_COPY.to_string(),
+                    },
+                    dsl_diag::copy_requires_source(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
+            let to = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_COPY.to_string(),
+                    },
+                    dsl_diag::copy_requires_destination(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             let from_host = flags.iter().any(|(k, _)| k == "from_host");
             let to_host = flags.iter().any(|(k, _)| k == "to_host");
             if from_host && to_host {
-                return Err(ParseError::validation(KEYWORD_COPY, "COPY --from-host and --to-host are mutually exclusive".to_string(), &SpanContext::line_only(0)));
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_COPY.to_string(),
+                    },
+                    dsl_diag::copy_host_exclusion(),
+                    &SpanContext::line_only(0),
+                ));
             }
             Ok(StepKind::Copy { from_workspace, from_host, to_host, from, to })
         },
@@ -1792,9 +1883,33 @@ declare_commands! {
         lower: |flags, args| {
             let include_dirty = flags.iter().any(|(k, _)| k == "dirty");
             let mut it = args.into_iter();
-            let rev = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY_GIT, "COPY_GIT requires a revision".to_string(), &SpanContext::line_only(0)))?;
-            let from = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY_GIT, "COPY_GIT requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let to = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY_GIT, "COPY_GIT requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let rev = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_COPY_GIT.to_string(),
+                    },
+                    dsl_diag::copy_git_requires_revision(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
+            let from = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_COPY_GIT.to_string(),
+                    },
+                    dsl_diag::copy_git_requires_source(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
+            let to = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_COPY_GIT.to_string(),
+                    },
+                    dsl_diag::copy_git_requires_destination(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             Ok(StepKind::CopyGit { rev, from, to, include_dirty })
         },
     ],
@@ -1839,12 +1954,34 @@ declare_commands! {
                     "LOCAL" => Ok(WorkspaceTarget::Local),
                     "CACHE" => Ok(WorkspaceTarget::Cache { local: false }),
                     "SYSTEM" => Ok(WorkspaceTarget::System),
-                    other => Err(ParseError::validation(KEYWORD_SYMLINK, format!("unknown workspace source: {other}"), &SpanContext::line_only(0))),
+                    other => Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_SYMLINK.to_string(),
+                        },
+                        dsl_diag::unknown_workspace_source(KEYWORD_SYMLINK, other),
+                        &SpanContext::line_only(0),
+                    )),
                 })
                 .transpose()?;
             let mut it = args.into_iter();
-            let from = it.next().ok_or_else(|| ParseError::validation(KEYWORD_SYMLINK, "SYMLINK requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let to = it.next().ok_or_else(|| ParseError::validation(KEYWORD_SYMLINK, "SYMLINK requires a target".to_string(), &SpanContext::line_only(0)))?;
+            let from = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_SYMLINK.to_string(),
+                    },
+                    dsl_diag::symlink_requires_source(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
+            let to = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_SYMLINK.to_string(),
+                    },
+                    dsl_diag::symlink_requires_target(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             Ok(StepKind::Symlink { from_workspace, from, to })
         },
     ],
@@ -1865,7 +2002,11 @@ declare_commands! {
             LET $t: STRING = PATH_TYPE("deeply/nested/tree")
             ASSERT_EQ $t "dir"
         "#} } ],
-        lower: |_flags, args| Ok(StepKind::Mkdir(args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_MKDIR, "MKDIR requires a path".to_string(), &SpanContext::line_only(0)))?)),
+        lower: |_flags, args| Ok(StepKind::Mkdir(args.into_iter().next().ok_or_else(|| ParseError::from_diagnostic(
+            ParseErrorKind::Validation { command: KEYWORD_MKDIR.to_string() },
+            dsl_diag::mkdir_requires_path(),
+            &SpanContext::line_only(0),
+        ))?)),
     ],
 
     Install => [
@@ -1891,8 +2032,16 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let from = it.next().ok_or_else(|| ParseError::validation(KEYWORD_INSTALL, "INSTALL requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let to = it.next().ok_or_else(|| ParseError::validation(KEYWORD_INSTALL, "INSTALL requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let from = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_INSTALL.to_string() },
+                dsl_diag::install_requires_source(),
+                &SpanContext::line_only(0),
+            ))?;
+            let to = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_INSTALL.to_string() },
+                dsl_diag::install_requires_destination(),
+                &SpanContext::line_only(0),
+            ))?;
             Ok(StepKind::Install { from, to })
         },
     ],
@@ -1915,7 +2064,11 @@ declare_commands! {
             LET $t: STRING = PATH_TYPE("tool.sh")
             ASSERT_EQ $t "file"
         "#} } ],
-        lower: |_flags, args| Ok(StepKind::SetExecutable { path: args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_SET_EXECUTABLE, "SET_EXECUTABLE requires a path".to_string(), &SpanContext::line_only(0)))? }),
+        lower: |_flags, args| Ok(StepKind::SetExecutable { path: args.into_iter().next().ok_or_else(|| ParseError::from_diagnostic(
+            ParseErrorKind::Validation { command: KEYWORD_SET_EXECUTABLE.to_string() },
+            dsl_diag::set_executable_requires_path(),
+            &SpanContext::line_only(0),
+        ))? }),
     ],
 
     Archive => [
@@ -1973,8 +2126,16 @@ declare_commands! {
         lower: |flags, args| {
             let raw = flags.iter().any(|(k, _)| k == "raw");
             let mut it = args.into_iter();
-            let src = it.next().ok_or_else(|| ParseError::validation(KEYWORD_ARCHIVE, "ARCHIVE requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let dst = it.next().ok_or_else(|| ParseError::validation(KEYWORD_ARCHIVE, "ARCHIVE requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let src = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_ARCHIVE.to_string() },
+                dsl_diag::archive_requires_source(),
+                &SpanContext::line_only(0),
+            ))?;
+            let dst = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_ARCHIVE.to_string() },
+                dsl_diag::archive_requires_destination(),
+                &SpanContext::line_only(0),
+            ))?;
             Ok(StepKind::Archive { src, dst, raw })
         },
     ],
@@ -2027,8 +2188,16 @@ declare_commands! {
         "#} } ],
         lower: |flags, args| {
             let mut it = args.into_iter();
-            let src = it.next().ok_or_else(|| ParseError::validation(KEYWORD_UNARCHIVE, "UNARCHIVE requires an archive".to_string(), &SpanContext::line_only(0)))?;
-            let dst = it.next().ok_or_else(|| ParseError::validation(KEYWORD_UNARCHIVE, "UNARCHIVE requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let src = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_UNARCHIVE.to_string() },
+                dsl_diag::unarchive_requires_archive(),
+                &SpanContext::line_only(0),
+            ))?;
+            let dst = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_UNARCHIVE.to_string() },
+                dsl_diag::unarchive_requires_destination(),
+                &SpanContext::line_only(0),
+            ))?;
             let max_bytes = flags
                 .into_iter()
                 .find_map(|(k, v)| (k == "max_bytes").then_some(v));
@@ -2039,9 +2208,11 @@ declare_commands! {
                 && !text.contains("{{")
                 && let Err(e) = crate::command::parse_byte_count(text)
             {
-                return Err(ParseError::validation(
-                    "UNARCHIVE",
-                    format!("UNARCHIVE --max-bytes {e:#}"),
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: "UNARCHIVE".to_string(),
+                    },
+                    dsl_diag::unarchive_bad_max_bytes(e),
                     &SpanContext::line_only(0),
                 ));
             }
@@ -2108,16 +2279,39 @@ declare_commands! {
             ASSERT_EQ $reply "first"
         "#} } ],
         lower: |_flags, args| {
-            let arg = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_READ_LINE, "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))?;
+            let arg = args.into_iter().next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_READ_LINE.to_string(),
+                    },
+                    dsl_diag::read_line_requires_variable(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             let var = match arg {
                 Arg::Expr(Expr::Var { name, .. }) => name,
                 // Quoted "$var" keeps its sigil through the generic string
                 // path; templates defer untouched exactly as before.
                 Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
-                other => return Err(ParseError::validation(KEYWORD_READ_LINE, format!("READ_LINE requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
+                other => {
+                    let got = other.render();
+                    return Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_READ_LINE.to_string(),
+                        },
+                        dsl_diag::read_line_requires_sigil(&got),
+                        &SpanContext::line_only(0),
+                    ));
+                }
             };
             if var.is_empty() {
-                return Err(ParseError::validation(KEYWORD_READ_LINE, "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_READ_LINE.to_string(),
+                    },
+                    dsl_diag::read_line_requires_variable(),
+                    &SpanContext::line_only(0),
+                ));
             }
             Ok(StepKind::ReadLine { var })
         },
@@ -2151,16 +2345,47 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let var_arg = it.next().ok_or_else(|| ParseError::validation(KEYWORD_PROMPT, "PROMPT requires a variable".to_string(), &SpanContext::line_only(0)))?;
+            let var_arg = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_PROMPT.to_string(),
+                    },
+                    dsl_diag::prompt_requires_variable(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             let var = match var_arg {
                 Arg::Expr(Expr::Var { name, .. }) => name,
                 Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
-                other => return Err(ParseError::validation(KEYWORD_PROMPT, format!("PROMPT requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
+                other => {
+                    let got = other.render();
+                    return Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_PROMPT.to_string(),
+                        },
+                        dsl_diag::prompt_requires_sigil(&got),
+                        &SpanContext::line_only(0),
+                    ));
+                }
             };
             if var.is_empty() {
-                return Err(ParseError::validation(KEYWORD_PROMPT, "PROMPT requires a variable".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_PROMPT.to_string(),
+                    },
+                    dsl_diag::prompt_requires_variable(),
+                    &SpanContext::line_only(0),
+                ));
             }
-            let message = it.next().ok_or_else(|| ParseError::validation(KEYWORD_PROMPT, "PROMPT requires a message".to_string(), &SpanContext::line_only(0)))?;
+            let message = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_PROMPT.to_string(),
+                    },
+                    dsl_diag::prompt_requires_message(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             let default = it.next();
             Ok(StepKind::Prompt { var, message, default })
         },
@@ -2185,7 +2410,11 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let path = it.next().ok_or_else(|| ParseError::validation(KEYWORD_WRITE, "WRITE requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_WRITE.to_string() },
+                dsl_diag::write_requires_path(),
+                &SpanContext::line_only(0),
+            ))?;
             let remaining: Vec<Arg> = it.collect();
             let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, KEYWORD_WRITE)?) };
             Ok(StepKind::Write { path, contents })
@@ -2215,7 +2444,11 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let path = it.next().ok_or_else(|| ParseError::validation(KEYWORD_APPEND, "APPEND requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_APPEND.to_string() },
+                dsl_diag::append_requires_path(),
+                &SpanContext::line_only(0),
+            ))?;
             let remaining: Vec<Arg> = it.collect();
             let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, KEYWORD_APPEND)?) };
             Ok(StepKind::Append { path, contents })
@@ -2245,7 +2478,11 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let path = it.next().ok_or_else(|| ParseError::validation(KEYWORD_APPEND_LINE, "APPEND_LINE requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_APPEND_LINE.to_string() },
+                dsl_diag::append_line_requires_path(),
+                &SpanContext::line_only(0),
+            ))?;
             let remaining: Vec<Arg> = it.collect();
             let contents = join_value(remaining, KEYWORD_APPEND_LINE)?;
             Ok(StepKind::AppendLine { path, contents })
@@ -2278,7 +2515,11 @@ declare_commands! {
         "#} } ],
         lower: |flags, args| {
             let recursive = flags.iter().any(|(k, _)| k == "recursive");
-            let path = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_REMOVE, "REMOVE requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = args.into_iter().next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_REMOVE.to_string() },
+                dsl_diag::remove_requires_path(),
+                &SpanContext::line_only(0),
+            ))?;
             Ok(StepKind::Remove { path, recursive })
         },
     ],
@@ -2425,10 +2666,26 @@ declare_commands! {
             let mut overrides = Vec::new();
             for arg in args {
                 let text = arg.as_str();
-                if let Some((key, value)) = split_assignment(text).map_err(|e| ParseError::validation(KEYWORD_EXPAND, e.to_string(), &SpanContext::line_only(0)))? {
+                if let Some((key, value)) = split_assignment(text).map_err(|e| {
+                    ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_EXPAND.to_string(),
+                        },
+                        dsl_diag::expand_assignment_error(e),
+                        &SpanContext::line_only(0),
+                    )
+                })? {
                     overrides.push((key, value));
                 } else if path.is_none() { path = Some(arg); }
-                else { return Err(ParseError::validation(KEYWORD_EXPAND, "EXPAND accepts at most one path".to_string(), &SpanContext::line_only(0))) }
+                else {
+                    return Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_EXPAND.to_string(),
+                        },
+                        dsl_diag::expand_extra_path(),
+                        &SpanContext::line_only(0),
+                    ));
+                }
             }
             Ok(StepKind::Expand { path, overrides })
         },
@@ -2562,12 +2819,26 @@ declare_commands! {
         lower: |flags, args| {
             let _ = flags;
             let mut it = args.into_iter();
-            let haystack = lower_assert_target(it.next().ok_or_else(|| ParseError::validation(Command::AssertContains.as_str(), format!("{} requires a value", Command::AssertContains.as_str()), &SpanContext::line_only(0)))?)?;
+            let haystack = lower_assert_target(it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: Command::AssertContains.as_str().to_string(),
+                    },
+                    dsl_diag::assert_contains_requires_value(),
+                    &SpanContext::line_only(0),
+                )
+            })?)?;
             let remaining: Vec<Arg> = it
                 .map(lower_assert_operand)
                 .collect::<Vec<Arg>>();
             if remaining.is_empty() {
-                return Err(ParseError::validation(Command::AssertContains.as_str(), format!("{} requires a needle", Command::AssertContains.as_str()), &SpanContext::line_only(0)))
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: Command::AssertContains.as_str().to_string(),
+                    },
+                    dsl_diag::assert_contains_requires_needle(),
+                    &SpanContext::line_only(0),
+                ));
             }
             let needle = join_value(remaining, Command::AssertContains.as_str())?;
             Ok(StepKind::AssertContains { haystack, needle })
@@ -2597,7 +2868,15 @@ declare_commands! {
         lower: |_flags, args| {
             // Static literals were already Int-checked by the central
             // validator; dynamics resolve (and validate) at runtime.
-            let code = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_EXIT, "EXIT requires a code".to_string(), &SpanContext::line_only(0)))?;
+            let code = args.into_iter().next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_EXIT.to_string(),
+                    },
+                    dsl_diag::exit_requires_code(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             Ok(StepKind::Exit(code))
         },
     ],
@@ -2637,9 +2916,21 @@ declare_commands! {
             let mut it = args.into_iter();
             let raw = it
                 .next()
-                .ok_or_else(|| ParseError::validation(KEYWORD_SLEEP, "SLEEP requires a duration (e.g. SLEEP 500ms)".to_string(), &SpanContext::line_only(0)))?;
+                .ok_or_else(|| ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_SLEEP.to_string(),
+                    },
+                    dsl_diag::sleep_requires_duration(),
+                    &SpanContext::line_only(0),
+                ))?;
             if it.next().is_some() {
-                return Err(ParseError::validation(KEYWORD_SLEEP, "SLEEP takes exactly one duration argument".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_SLEEP.to_string(),
+                    },
+                    dsl_diag::sleep_takes_one(),
+                    &SpanContext::line_only(0),
+                ));
             }
             // Static literals were Duration-checked by the central
             // validator; dynamics ($var, templates) resolve at runtime.
@@ -2678,20 +2969,53 @@ declare_commands! {
             let mut it = args.into_iter();
             let raw_list = it
                 .next()
-                .ok_or_else(|| ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))?;
+                .ok_or_else(|| ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_LIST_APPEND.to_string(),
+                    },
+                    dsl_diag::list_append_requires_list(),
+                    &SpanContext::line_only(0),
+                ))?;
             let list = match raw_list {
                 Arg::Expr(Expr::Var { name, .. }) => name,
                 Arg::String(s, _) => s.trim_start_matches('$').to_string(),
-                other => return Err(ParseError::validation(KEYWORD_LIST_APPEND, format!("LIST_APPEND requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
+                other => {
+                    let got = other.render();
+                    return Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_LIST_APPEND.to_string(),
+                        },
+                        dsl_diag::list_append_requires_sigil(&got),
+                        &SpanContext::line_only(0),
+                    ));
+                }
             };
             if list.is_empty() {
-                return Err(ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_LIST_APPEND.to_string(),
+                    },
+                    dsl_diag::list_append_requires_list(),
+                    &SpanContext::line_only(0),
+                ));
             }
             let item = it
                 .next()
-                .ok_or_else(|| ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND requires an item to append (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))?;
+                .ok_or_else(|| ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_LIST_APPEND.to_string(),
+                    },
+                    dsl_diag::list_append_requires_item(),
+                    &SpanContext::line_only(0),
+                ))?;
             if it.next().is_some() {
-                return Err(ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND takes exactly two arguments: LIST_APPEND $list <item>".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_LIST_APPEND.to_string(),
+                    },
+                    dsl_diag::list_append_takes_two(),
+                    &SpanContext::line_only(0),
+                ));
             }
             Ok(StepKind::ListAppend { list, item })
         },
@@ -5876,9 +6200,11 @@ pub(crate) enum InsToken {
 
 pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult<StepKind> {
     if tokens.is_empty() {
-        return Err(ParseError::validation(
-            KEYWORD_ENV,
-            "ENV requires KEY=value".to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: KEYWORD_ENV.to_string(),
+            },
+            dsl_diag::env_requires_assignment(),
             ctx,
         ));
     }
@@ -5887,12 +6213,22 @@ pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> Pars
             // Same KEY=value check the ENV lower applies on the
             // `lower_command` path, over the joined assignment form.
             if crate::command::split_assignment(&format!("{key}={}", value.render()))
-                .map_err(|e| ParseError::validation(KEYWORD_ENV, e.to_string(), ctx))?
+                .map_err(|e| {
+                    ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_ENV.to_string(),
+                        },
+                        dsl_diag::env_assignment_error(e),
+                        ctx,
+                    )
+                })?
                 .is_none()
             {
-                return Err(ParseError::validation(
-                    KEYWORD_ENV,
-                    "ENV requires KEY=value format".to_string(),
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_ENV.to_string(),
+                    },
+                    dsl_diag::env_bad_format(),
                     ctx,
                 ));
             }
@@ -5902,18 +6238,29 @@ pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> Pars
             })
         }
         [InsToken::Pos(Arg::String(text, _))] => match crate::command::split_assignment(text)
-            .map_err(|e| ParseError::validation(KEYWORD_ENV, e.to_string(), ctx))?
-        {
+            .map_err(|e| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_ENV.to_string(),
+                    },
+                    dsl_diag::env_assignment_error(e),
+                    ctx,
+                )
+            })? {
             Some((key, value)) => Ok(StepKind::Env { key, value }),
-            None => Err(ParseError::validation(
-                KEYWORD_ENV,
-                "ENV requires KEY=value format".to_string(),
+            None => Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: KEYWORD_ENV.to_string(),
+                },
+                dsl_diag::env_bad_format(),
                 ctx,
             )),
         },
-        _ => Err(ParseError::validation(
-            KEYWORD_ENV,
-            "ENV requires KEY=value format".to_string(),
+        _ => Err(ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: KEYWORD_ENV.to_string(),
+            },
+            dsl_diag::env_bad_format(),
             ctx,
         )),
     }
@@ -5932,9 +6279,11 @@ pub(crate) fn lower_expand_tokens(
         match token {
             InsToken::Assign(key, value) => {
                 if key.is_empty() {
-                    return Err(ParseError::validation(
-                        KEYWORD_EXPAND,
-                        "EXPAND requires KEY=value format for overrides".to_string(),
+                    return Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_EXPAND.to_string(),
+                        },
+                        dsl_diag::expand_bad_override(),
                         ctx,
                     ));
                 }
@@ -5942,12 +6291,22 @@ pub(crate) fn lower_expand_tokens(
             }
             InsToken::Pos(arg) => match &arg {
                 Arg::String(text, quoted) if !quoted && text.contains('=') => {
-                    let Some((key, value)) = crate::command::split_assignment(text)
-                        .map_err(|e| ParseError::validation(KEYWORD_EXPAND, e.to_string(), ctx))?
+                    let Some((key, value)) =
+                        crate::command::split_assignment(text).map_err(|e| {
+                            ParseError::from_diagnostic(
+                                ParseErrorKind::Validation {
+                                    command: KEYWORD_EXPAND.to_string(),
+                                },
+                                dsl_diag::expand_assignment_error(e),
+                                ctx,
+                            )
+                        })?
                     else {
-                        return Err(ParseError::validation(
-                            KEYWORD_EXPAND,
-                            "EXPAND requires KEY=value format for overrides".to_string(),
+                        return Err(ParseError::from_diagnostic(
+                            ParseErrorKind::Validation {
+                                command: KEYWORD_EXPAND.to_string(),
+                            },
+                            dsl_diag::expand_bad_override(),
                             ctx,
                         ));
                     };
@@ -5959,13 +6318,21 @@ pub(crate) fn lower_expand_tokens(
                         // `lower_command` path arg (literals always pass;
                         // resolution stays runtime).
                         ArgType::Path.check_arg(&arg).map_err(|e| {
-                            ParseError::validation(KEYWORD_EXPAND, e.to_string(), ctx)
+                            ParseError::from_diagnostic(
+                                ParseErrorKind::Validation {
+                                    command: KEYWORD_EXPAND.to_string(),
+                                },
+                                dsl_diag::expand_path_error(e),
+                                ctx,
+                            )
                         })?;
                         path = Some(arg);
                     } else {
-                        return Err(ParseError::validation(
-                            KEYWORD_EXPAND,
-                            "EXPAND accepts at most one path".to_string(),
+                        return Err(ParseError::from_diagnostic(
+                            ParseErrorKind::Validation {
+                                command: KEYWORD_EXPAND.to_string(),
+                            },
+                            dsl_diag::expand_extra_path(),
                             ctx,
                         ));
                     }
@@ -6073,7 +6440,13 @@ pub(crate) fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> Par
         }
     };
     if bad {
-        return Err(ParseError::structural("let", "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE<T> = ASYNC ... then LET $o: STRING = AWAIT $t".to_string(), ctx));
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: KEYWORD_LET.to_lowercase(),
+            },
+            dsl_diag::let_capture_async(),
+            ctx,
+        ));
     }
     Ok(())
 }
@@ -6084,10 +6457,11 @@ pub(crate) fn reject_pipe_stdout_in_capture(ctx: &SpanContext, kind: &StepKind) 
     if let StepKind::WithIo { bindings, .. } = kind
         && has_stdout_pipe(bindings)
     {
-        return Err(ParseError::structural(
-            "let",
-            "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
-                .to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: KEYWORD_LET.to_lowercase(),
+            },
+            dsl_diag::let_capture_pipe_stdout(),
             ctx,
         ));
     }
@@ -6182,9 +6556,11 @@ pub(crate) fn contains_inherit_env(kind: &StepKind) -> bool {
 /// inside `ISOLATED` bodies, which never reach here).
 pub(crate) fn reject_nested_inherit_env(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
     if contains_inherit_env(kind) {
-        return Err(ParseError::structural(
-            "inherit_env",
-            "INHERIT_ENV cannot be nested inside other commands".to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: KEYWORD_INHERIT_ENV.to_lowercase(),
+            },
+            dsl_diag::nested_inherit_env(),
             ctx,
         ));
     }
@@ -6201,9 +6577,11 @@ pub(crate) fn check_tty_wrapping(
         .iter()
         .any(|b| matches!(b.stream, IoStream::Rows(_) | IoStream::Cols(_)));
     if has_geometry && !has_tty {
-        return Err(ParseError::structural(
-            "with_io",
-            "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size".to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: KEYWORD_WITH_IO.to_lowercase(),
+            },
+            dsl_diag::tty_geometry_without_tty(),
             span,
         ));
     }
@@ -6214,17 +6592,21 @@ pub(crate) fn check_tty_wrapping(
         .iter()
         .any(|b| matches!(b.stream, IoStream::Stderr))
     {
-        return Err(ParseError::structural(
-            "with_io",
-            "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex".to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: KEYWORD_WITH_IO.to_lowercase(),
+            },
+            dsl_diag::tty_with_stderr(),
             span,
         ));
     }
     match cmd {
         Some(StepKind::Run(_) | StepKind::RunExec { .. }) | None => Ok(()),
-        Some(_) => Err(ParseError::structural(
-            "with_io",
-            "WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it".to_string(),
+        Some(_) => Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: KEYWORD_WITH_IO.to_lowercase(),
+            },
+            dsl_diag::tty_wraps_non_run(),
             span,
         )),
     }
@@ -6235,7 +6617,13 @@ pub(crate) fn check_tty_wrapping(
 pub(crate) fn reject_with_io_in_async(ctx: &SpanContext, body: &[Step]) -> ParseResult<()> {
     for step in body {
         if matches!(&step.kind, StepKind::WithIo { .. }) {
-            return Err(ParseError::structural("async", "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)".to_string(), ctx));
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Structural {
+                    rule: KEYWORD_ASYNC.to_lowercase(),
+                },
+                dsl_diag::with_io_in_async(),
+                ctx,
+            ));
         }
     }
     Ok(())
@@ -6285,9 +6673,11 @@ pub(crate) fn validate_exports(
             },
         };
         if !valid {
-            return Err(ParseError::validation(
-                crate::constants::KEYWORD_EXPORT,
-                format!("EXPORT `{name}` does not match any top-level FUNC or known module member"),
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: crate::constants::KEYWORD_EXPORT.to_string(),
+                },
+                dsl_diag::export_unknown_func(name),
                 ctx,
             ));
         }
@@ -6302,18 +6692,20 @@ pub(crate) fn validate_exports(
         // imports, so `EXPORT PERSON` after `IMPORT ["lib" AS LIB]`
         // can promote the imported type.
         if crate::constants::split_qualified(name).is_some() {
-            return Err(ParseError::validation(
-                crate::constants::KEYWORD_EXPORT,
-                format!(
-                    "EXPORT TYPE `{name}` must be bare: qualified ALIAS::TYPE re-exports are not served; import the file and re-export the bare name"
-                ),
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: crate::constants::KEYWORD_EXPORT.to_string(),
+                },
+                dsl_diag::export_type_qualified(name),
                 ctx,
             ));
         }
         if !top_types.contains(name) && top_imports.is_empty() {
-            return Err(ParseError::validation(
-                crate::constants::KEYWORD_EXPORT,
-                format!("EXPORT TYPE `{name}` does not match any top-level TYPE"),
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: crate::constants::KEYWORD_EXPORT.to_string(),
+                },
+                dsl_diag::export_unknown_type(name),
                 ctx,
             ));
         }
@@ -6337,20 +6729,18 @@ pub(crate) fn validate_exports(
             Some((module, _base)) => top_imports.iter().any(|m| m == module),
         };
         if !valid {
-            let msg = match crate::constants::split_qualified(name) {
-                Some((module, _)) if module == crate::constants::SCRIPT_MODULE_NAME => format!(
-                    "EXPORT CONST `{name}` must name a top-level CONST (`$NAME`) or `$ALIAS::NAME` for a visible import: `SCRIPT::` is not a CONST namespace"
-                ),
-                Some((module, _)) => format!(
-                    "EXPORT CONST `{name}` names unknown import alias `{module}`: import a file as `{module}` to re-export its CONSTs"
-                ),
-                None => format!(
-                    "EXPORT CONST `{name}` does not match any top-level CONST (LET bindings are never exportable)"
-                ),
+            let diag = match crate::constants::split_qualified(name) {
+                Some((module, _)) if module == crate::constants::SCRIPT_MODULE_NAME => {
+                    dsl_diag::export_const_script_namespace(name)
+                }
+                Some((module, _)) => dsl_diag::export_const_unknown_alias(name, module),
+                None => dsl_diag::export_const_unknown(name),
             };
-            return Err(ParseError::validation(
-                crate::constants::KEYWORD_EXPORT,
-                msg,
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: crate::constants::KEYWORD_EXPORT.to_string(),
+                },
+                diag,
                 ctx,
             ));
         }
@@ -6372,9 +6762,11 @@ pub(crate) fn validate_remote_copy_placement(steps: &[Step], ctx: &SpanContext) 
             && (*from_host || *to_host)
             && !in_remote
         {
-            return Err(ParseError::structural(
-                "copy",
-                "COPY --from-host and --to-host are only valid inside a REMOTE block".to_string(),
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Structural {
+                    rule: KEYWORD_COPY.to_lowercase(),
+                },
+                dsl_diag::copy_host_outside_remote(),
                 ctx,
             ));
         }
@@ -6461,9 +6853,11 @@ pub(crate) fn collect_remote_kind_symbols(
 /// backend): operates on `Expr`, never on token pairs.
 pub(crate) fn reject_boundary(ctx: &SpanContext, expr: &Expr) -> ParseResult<()> {
     if matches!(expr, Expr::UnsignedIntBoundary(_)) {
-        return Err(ParseError::structural(
-            "expr",
-            "integer overflow: 9223372036854775808 exceeds i64::MAX".to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: "expr".to_string(),
+            },
+            dsl_diag::int_boundary_overflow(),
             ctx,
         ));
     }
@@ -6501,9 +6895,11 @@ pub(crate) fn apply_unary_neg(ctx: &SpanContext, expr: Expr) -> ParseResult<Expr
             if n == i64::MAX as u64 + 1 {
                 Ok(Expr::Literal(Value::int(i64::MIN)))
             } else {
-                Err(ParseError::structural(
-                    "expr",
-                    format!("integer overflow: {} exceeds i64::MAX", n),
+                Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Structural {
+                        rule: "expr".to_string(),
+                    },
+                    dsl_diag::int_overflow(n),
                     ctx,
                 ))
             }
@@ -6790,7 +7186,7 @@ mod tests {
     #[test]
     fn malformed_with_io_binding_names_the_bad_binding() {
         let err = parse_err("WITH_IO [stdout=discard] ECHO \"test\"\n");
-        assert!(err.contains("invalid syntax for command WITH_IO"), "{err}");
+        assert!(err.contains("WITH_IO"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
         assert!(err.contains("stdout=discard"), "{err}");
         assert!(err.contains("[stdout=$p]"), "{err}");
@@ -6817,7 +7213,7 @@ mod tests {
     #[test]
     fn await_without_task_variable_points_at_syntax() {
         let err = parse_err("AWAIT ECHO \"test\"\n");
-        assert!(err.contains("invalid syntax for command AWAIT"), "{err}");
+        assert!(err.starts_with("AWAIT"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
         assert!(err.contains("AWAIT $t"), "{err}");
         assert!(err.contains("ECHO"), "{err}");
@@ -7251,10 +7647,7 @@ mod tests {
             ("ELSE foo\n", "ELSE"),
         ] {
             let err = parse_err(script);
-            assert!(
-                err.contains(&format!("invalid syntax for command {cmd}")),
-                "{cmd}: {err}"
-            );
+            assert!(err.starts_with(cmd), "{cmd}: {err}");
             assert!(!err.contains("unknown command"), "{cmd}: {err}");
         }
     }
@@ -7289,9 +7682,9 @@ mod tests {
     }
 
     #[test]
-    fn leaf_arity_errors_carry_invalid_syntax_prefix() {
+    fn leaf_arity_errors_are_command_lead() {
         let err = parse_err("SLEEP 1s 2s\n");
-        assert!(err.contains("invalid syntax for command SLEEP"), "{err}");
+        assert!(err.starts_with("SLEEP"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
     }
 
@@ -7343,10 +7736,7 @@ mod tests {
             "LIST_APPEND $items \"a\" \"b\"\n",
         ] {
             let err = parse_err(script);
-            assert!(
-                err.contains("invalid syntax for command LIST_APPEND"),
-                "{script}: {err}"
-            );
+            assert!(err.starts_with("LIST_APPEND"), "{script}: {err}");
             assert!(!err.contains("unknown command"), "{script}: {err}");
         }
     }
@@ -7354,18 +7744,12 @@ mod tests {
     #[test]
     fn list_append_rejects_non_variable_target() {
         let err = parse_err("LIST_APPEND items \"a\"\n");
-        assert!(
-            err.contains("invalid syntax for command LIST_APPEND"),
-            "{err}"
-        );
+        assert!(err.starts_with("LIST_APPEND"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
         // Bare uppercase words are literal text, never variable
         // targets: a `CONST` list cannot be named here at all.
         let err = parse_err("LIST_APPEND ITEMS \"a\"\n");
-        assert!(
-            err.contains("invalid syntax for command LIST_APPEND"),
-            "{err}"
-        );
+        assert!(err.starts_with("LIST_APPEND"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
     }
 
@@ -7386,7 +7770,7 @@ mod tests {
     #[test]
     fn genuinely_unknown_command_keeps_bare_message() {
         let err = parse_err("FROBNICATE hi\n");
-        assert!(err.contains("unknown command: FROBNICATE"), "{err}");
+        assert!(err.contains("unknown command \"FROBNICATE\""), "{err}");
         assert!(!err.contains("did you mean"), "{err}");
     }
 
@@ -7398,7 +7782,7 @@ mod tests {
         let err = lower_command("echo", vec![Arg::String("hi".to_string(), false)])
             .expect_err("must fail")
             .to_string();
-        assert!(err.contains("unknown command: echo"), "{err}");
+        assert!(err.contains("unknown command \"echo\""), "{err}");
         assert!(err.contains("did you mean `ECHO`"), "{err}");
     }
 
@@ -7499,7 +7883,7 @@ mod tests {
         // `FUNC FOO() ECHO hi` still misses to generic: the
         // header-only invalid syntax echoes just the header.
         let err = parse_err("FUNC FOO() ECHO hi\n");
-        assert!(err.contains("invalid syntax for command FUNC"), "{err}");
+        assert!(err.starts_with("FUNC"), "{err}");
         assert!(err.contains("got `FOO() ECHO hi`"), "{err}");
     }
 

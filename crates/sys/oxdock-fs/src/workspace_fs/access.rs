@@ -1,6 +1,6 @@
 #[cfg(not(miri))]
 use anyhow::Context;
-use anyhow::{Result, bail};
+use anyhow::Result;
 #[cfg(not(miri))]
 #[allow(clippy::disallowed_types)]
 use std::ffi::OsString;
@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::path::PathBuf;
 
 use super::{AccessMode, GuardedPath, PathResolver};
+use crate::diagnostics as fs_diag;
 
 /// Ensure `candidate` stays within `root`, even if parts of the path do not yet exist.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -38,12 +39,11 @@ pub(crate) fn guard_path(
 
         let cand_abs = normalize_candidate(&root_abs, candidate)?;
         if !cand_abs.starts_with(&root_abs) {
-            bail!(
-                "{} access to {} escapes allowed root {}",
+            return Err(anyhow::Error::new(fs_diag::guard_access_escapes(
                 mode.name(),
-                cand_abs.display(),
-                root_abs.display()
-            );
+                &cand_abs,
+                &root_abs,
+            )));
         }
 
         Ok(cand_abs)
@@ -126,12 +126,11 @@ fn guard_path_miri(root: &Path, candidate: &Path, mode: AccessMode) -> Result<Pa
     };
 
     if !candidate_abs.starts_with(&root_abs) {
-        bail!(
-            "{} access to {} escapes allowed root {}",
+        return Err(anyhow::Error::new(fs_diag::guard_access_escapes(
             mode.name(),
-            candidate_abs.display(),
-            root_abs.display()
-        );
+            &candidate_abs,
+            &root_abs,
+        )));
     }
 
     Ok(candidate_abs)
@@ -222,10 +221,9 @@ impl PathResolver {
         // anchor-rooted candidate arriving here while still pending bypassed
         // them. Bail instead of creating.
         if self.is_snapshot_pending() && candidate.starts_with(self.anchor_path()) {
-            bail!(
-                "snapshot root not materialized; resolve through the snapshot choke point first: {}",
-                candidate.display()
-            );
+            return Err(anyhow::Error::new(
+                fs_diag::guard_snapshot_not_materialized(candidate),
+            ));
         }
         // SYSTEM bypass: anchor each result at its own filesystem anchor
         // (drive root, UNC share, or `/`) instead of the single

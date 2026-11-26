@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::contract::CommandContext;
+use crate::diagnostics as expand_diag;
 
 /// Maximum bytes to buffer while scanning for closing delimiter.
 /// If exceeded without finding closing delimiter, buffered bytes are flushed as literals.
@@ -105,7 +107,7 @@ impl StreamingExpand {
 
     /// Process a chunk of input bytes, writing expanded output to `out`.
     /// Returns early on empty input to preserve pending boundary state.
-    pub fn process_bytes(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<usize> {
+    pub fn process_bytes(&mut self, input: &[u8], out: &mut Vec<u8>) -> DiagnosticResult<usize> {
         if input.is_empty() {
             return Ok(0);
         }
@@ -254,7 +256,7 @@ impl StreamingExpand {
     }
 
     /// Flush remaining buffer. Incomplete placeholders are treated as literals.
-    pub fn flush(mut self, out: &mut Vec<u8>) -> Result<()> {
+    pub fn flush(mut self, out: &mut Vec<u8>) -> DiagnosticResult<()> {
         // Emit deferred closing byte if present
         if self.pending_close_brace {
             self.buffer.push(self.delimiters.close[0]);
@@ -288,7 +290,7 @@ impl StreamingExpand {
     }
 
     /// Process a complete string (convenience for short command arguments).
-    pub fn expand_string(self, input: &str) -> Result<String> {
+    pub fn expand_string(self, input: &str) -> DiagnosticResult<String> {
         let mut out = Vec::with_capacity(input.len());
         let mut expander = self;
         expander.process_bytes(input.as_bytes(), &mut out)?;
@@ -298,7 +300,12 @@ impl StreamingExpand {
 
     /// Scan for closing delimiter starting at position `i`.
     /// Returns the next position to process after the placeholder.
-    fn scan_placeholder(&mut self, input: &[u8], mut i: usize, out: &mut Vec<u8>) -> Result<usize> {
+    fn scan_placeholder(
+        &mut self,
+        input: &[u8],
+        mut i: usize,
+        out: &mut Vec<u8>,
+    ) -> DiagnosticResult<usize> {
         while i < input.len() {
             if input[i] == self.delimiters.close[0] {
                 if i + 1 < input.len() && input[i + 1] == self.delimiters.close[1] {
@@ -359,7 +366,7 @@ fn lookup(
     env: &HashMap<String, String>,
     vars: &HashMap<String, oxdock_parser::Value>,
     calls: Option<&PlaceholderCall>,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     use oxdock_parser::template::{PlaceholderKey, classify_placeholder_key, split_var_path};
     let key = raw_key.trim();
 
@@ -380,17 +387,13 @@ fn lookup(
             // Empty names bail explicitly (same message as the miss
             // below) instead of relying on the lookup miss alone.
             if env_key.is_empty() {
-                bail!("undefined environment variable: ''");
+                return Err(expand_diag::undefined_env_var("", false));
             }
             if let Some(val) = overrides.get(env_key).or_else(|| env.get(env_key)) {
                 return Ok(val.clone());
             }
-            let hint = if vars.contains_key(env_key) {
-                format!("; did you mean '${env_key}' (script variable)?")
-            } else {
-                String::new()
-            };
-            bail!("undefined environment variable: '{env_key}'{hint}");
+            let suggest_script_var = vars.contains_key(env_key);
+            return Err(expand_diag::undefined_env_var(env_key, suggest_script_var));
         }
 
         // 3. Script variables: must be prefixed with "$". Path split
@@ -402,14 +405,14 @@ fn lookup(
                 if let Some(val) = vars.get(&parts[0]) {
                     return format_value_for_string(val);
                 }
-                let hint = if env.contains_key(rest) {
-                    format!("; did you mean 'env:{rest}' (environment variable)?")
+                let suggest = if env.contains_key(rest) {
+                    Some(expand_diag::ScriptSuggest::Env)
                 } else if overrides.contains_key(rest) {
-                    format!("; did you mean '{rest}' (step override)?")
+                    Some(expand_diag::ScriptSuggest::StepOverride)
                 } else {
-                    String::new()
+                    None
                 };
-                bail!("undefined script variable: '${rest}'{hint}");
+                return Err(expand_diag::undefined_script_var(rest, suggest));
             }
             return resolve_key_path_strict(&parts, vars);
         }
@@ -424,22 +427,18 @@ fn lookup(
                 // Bare `FUNC(...)` has no registry entry in override
                 // expansion: explicit invalid-format error, never silent
                 // fallthrough.
-                bail!(
-                    "invalid placeholder format '{key}': script variables must start with '$' and environment variables with 'env:'"
-                );
+                return Err(expand_diag::invalid_placeholder_format(key));
             };
             let (name, args_raw) = (call.name, call.args_raw);
             let Some(resolver) = calls else {
-                bail!(
-                    "placeholder call '{module}::{name}' has no function registry; register one with with_call_resolver"
-                );
+                return Err(expand_diag::call_without_registry(module, name));
             };
             let args_src = oxdock_parser::template::split_placeholder_args(args_raw);
             let mut args = Vec::with_capacity(args_src.len());
             for src in args_src {
                 args.push(resolve_call_arg(&src, vars)?);
             }
-            let result = resolver(module, name, args)?;
+            let result = resolver(module, name, args).map_err(expand_diag::from_anyhow)?;
             return format_value_for_string(&result);
         }
 
@@ -452,9 +451,7 @@ fn lookup(
         // `$ALIAS::NAME` is invalid here like everywhere: the split
         // lives in the template owner.
         PlaceholderKey::DollarQualified { .. } => {
-            bail!(
-                "invalid placeholder format '{key}': script variables must start with '$' and environment variables with 'env:'"
-            );
+            return Err(expand_diag::invalid_placeholder_format(key));
         }
         PlaceholderKey::ConstRef { .. } | PlaceholderKey::KeyPath { .. } => {}
         PlaceholderKey::Var(name) | PlaceholderKey::Bare(name) => {
@@ -463,14 +460,14 @@ fn lookup(
                     .chars()
                     .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
             {
-                let hint = if vars.contains_key(name) {
-                    format!("; did you mean '${name}' (script variable)?")
+                let suggest = if vars.contains_key(name) {
+                    Some(expand_diag::OverrideSuggest::ScriptVar)
                 } else if env.contains_key(name) {
-                    format!("; did you mean 'env:{name}' (environment variable)?")
+                    Some(expand_diag::OverrideSuggest::EnvVar)
                 } else {
-                    String::new()
+                    None
                 };
-                bail!("missing required step override argument: '{name}'{hint}");
+                return Err(expand_diag::missing_step_override(name, suggest));
             }
         }
         PlaceholderKey::ScriptEnv(name) => {
@@ -478,14 +475,12 @@ fn lookup(
             // has no meaning here and falls through to the invalid
             // placeholder error below, as before.
             if name.trim().is_empty() {
-                bail!("undefined environment variable: ''");
+                return Err(expand_diag::undefined_env_var("", false));
             }
         }
         PlaceholderKey::Empty => {}
     }
-    bail!(
-        "invalid placeholder format '{key}': script variables must start with '$' and environment variables with 'env:'"
-    );
+    Err(expand_diag::invalid_placeholder_format(key))
 }
 
 /// Split a `MODULE::FUNC(args)` placeholder body for call resolution
@@ -516,7 +511,7 @@ const MAX_LITERAL_DEPTH: usize = oxdock_parser::template::MAX_TEMPLATE_ARG_DEPTH
 pub fn resolve_placeholder_arg(
     src: &str,
     vars: &HashMap<String, oxdock_parser::Value>,
-) -> Result<oxdock_parser::Value> {
+) -> DiagnosticResult<oxdock_parser::Value> {
     resolve_call_arg(src, vars)
 }
 
@@ -526,7 +521,7 @@ pub fn resolve_placeholder_arg(
 fn resolve_call_arg(
     src: &str,
     vars: &HashMap<String, oxdock_parser::Value>,
-) -> Result<oxdock_parser::Value> {
+) -> DiagnosticResult<oxdock_parser::Value> {
     resolve_call_value(src, vars, 0)
 }
 
@@ -534,13 +529,13 @@ fn resolve_call_value(
     src: &str,
     vars: &HashMap<String, oxdock_parser::Value>,
     depth: usize,
-) -> Result<oxdock_parser::Value> {
+) -> DiagnosticResult<oxdock_parser::Value> {
     use oxdock_parser::template::{
         ScalarLit, TemplateArg, classify_template_arg, parse_scalar_literal, parse_string_literal,
         parse_var_path,
     };
     if depth > MAX_LITERAL_DEPTH {
-        bail!("placeholder call argument nests too deep (limit {MAX_LITERAL_DEPTH})");
+        return Err(expand_diag::call_arg_too_deep(MAX_LITERAL_DEPTH));
     }
     match classify_template_arg(src) {
         TemplateArg::Dollar(rest) => {
@@ -548,7 +543,7 @@ fn resolve_call_value(
                 // `$` refs split through the single template owner; the
                 // empty check below keeps the historical
                 // malformed-argument error.
-                bail!("invalid placeholder call argument: empty variable reference");
+                return Err(expand_diag::call_arg_empty_var());
             };
             return resolve_value_path(&parts, vars);
         }
@@ -577,9 +572,7 @@ fn resolve_call_value(
         TemplateArg::ConstRef { .. } | TemplateArg::KeyPath { .. } | TemplateArg::Var(_) => {}
         TemplateArg::Invalid(_) => {}
     }
-    bail!(
-        "invalid placeholder call argument '{src}': use $var.path, a string, int, float, or bool literal, or a {{key: value}} or [item] literal"
-    )
+    Err(expand_diag::call_arg_invalid(src))
 }
 
 /// Resolve a `{key: value}` map literal. Keys validate through the
@@ -588,7 +581,7 @@ fn resolve_call_map(
     inner: &str,
     vars: &HashMap<String, oxdock_parser::Value>,
     depth: usize,
-) -> Result<oxdock_parser::Value> {
+) -> DiagnosticResult<oxdock_parser::Value> {
     use oxdock_parser::template::{parse_map_key, split_map_entry, split_top_level};
     let mut entries = std::collections::BTreeMap::new();
     if inner.trim().is_empty() {
@@ -596,11 +589,11 @@ fn resolve_call_map(
     }
     for entry in split_top_level(inner, ',') {
         let Some((key_src, value_src)) = split_map_entry(&entry) else {
-            bail!("invalid map literal entry '{entry}': use key: value");
+            return Err(expand_diag::map_entry_invalid(&entry));
         };
         let key = parse_map_key(&key_src)?;
         if entries.contains_key(&key) {
-            bail!("duplicate key '{key}' in map literal");
+            return Err(expand_diag::map_duplicate_key(&key));
         }
         let value = resolve_call_value(&value_src, vars, depth + 1)?;
         entries.insert(key, value);
@@ -614,7 +607,7 @@ fn resolve_call_list(
     inner: &str,
     vars: &HashMap<String, oxdock_parser::Value>,
     depth: usize,
-) -> Result<oxdock_parser::Value> {
+) -> DiagnosticResult<oxdock_parser::Value> {
     let mut items = Vec::new();
     if inner.trim().is_empty() {
         return Ok(oxdock_parser::Value::list(items));
@@ -631,39 +624,36 @@ fn resolve_call_list(
 fn resolve_value_path(
     parts: &[String],
     vars: &HashMap<String, oxdock_parser::Value>,
-) -> Result<oxdock_parser::Value> {
+) -> DiagnosticResult<oxdock_parser::Value> {
     if parts.is_empty() || parts[0].is_empty() {
-        bail!("invalid placeholder call argument: empty variable reference");
+        return Err(expand_diag::call_arg_empty_var());
     }
     let root_key = parts[0].as_str();
     let mut current = vars
         .get(root_key)
-        .ok_or_else(|| anyhow!("undefined script variable: '${root_key}'"))?
+        .ok_or_else(|| expand_diag::undefined_script_var(root_key, None))?
         .clone();
     for segment in &parts[1..] {
         if segment.contains('(') || segment.contains(')') {
-            bail!("nested calls are not supported in placeholder arguments");
+            return Err(expand_diag::call_arg_nested_calls());
         }
         if let Some(map) = current.as_map() {
             current = map
                 .get(segment)
-                .ok_or_else(|| anyhow!("property '{segment}' not found on object '${root_key}'"))?
+                .ok_or_else(|| expand_diag::key_path_missing_property(root_key, segment))?
                 .clone();
         } else if let Some(list) = current.as_list() {
             let idx: usize = segment
                 .parse()
-                .map_err(|_| anyhow!("invalid array index '{segment}' on list '${root_key}'"))?;
+                .map_err(|_| expand_diag::key_path_bad_index(root_key, segment))?;
             current = list
                 .get(idx)
                 .ok_or_else(|| {
-                    anyhow!(
-                        "index {idx} out of bounds for list '${root_key}' (len: {})",
-                        list.len()
-                    )
+                    expand_diag::key_path_index_out_of_bounds(root_key, idx, list.len())
                 })?
                 .clone();
         } else {
-            bail!("cannot access property '{segment}' on primitive value of '${root_key}'")
+            return Err(expand_diag::key_path_on_primitive(root_key, segment));
         }
     }
     Ok(current)
@@ -676,29 +666,26 @@ fn resolve_value_path(
 fn resolve_key_path_strict(
     parts: &[String],
     vars: &HashMap<String, oxdock_parser::Value>,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     let root_key = parts[0].as_str();
     let mut current = vars
         .get(root_key)
-        .ok_or_else(|| anyhow!("undefined script variable: '${root_key}'"))?;
+        .ok_or_else(|| expand_diag::undefined_script_var(root_key, None))?;
 
     for segment in &parts[1..] {
         if let Some(map) = current.as_map() {
             current = map
                 .get(segment)
-                .ok_or_else(|| anyhow!("property '{segment}' not found on object '${root_key}'"))?;
+                .ok_or_else(|| expand_diag::key_path_missing_property(root_key, segment))?;
         } else if let Some(list) = current.as_list() {
             let idx: usize = segment
                 .parse()
-                .map_err(|_| anyhow!("invalid array index '{segment}' on list '${root_key}'"))?;
+                .map_err(|_| expand_diag::key_path_bad_index(root_key, segment))?;
             current = list.get(idx).ok_or_else(|| {
-                anyhow!(
-                    "index {idx} out of bounds for list '${root_key}' (len: {})",
-                    list.len()
-                )
+                expand_diag::key_path_index_out_of_bounds(root_key, idx, list.len())
             })?;
         } else {
-            bail!("cannot access property '{segment}' on primitive value of '${root_key}'")
+            return Err(expand_diag::key_path_on_primitive(root_key, segment));
         }
     }
 
@@ -716,7 +703,7 @@ fn resolve_key_path_strict(
 /// `f64` already produces the shortest round-trip decimal (Ryū since
 /// 1.36), so `ECHO` / `{{ }}` output stays clean (`3.14`, not
 /// `3.140000`) with no extra dependency.
-pub fn format_value_for_string(val: &oxdock_parser::Value) -> anyhow::Result<String> {
+pub fn format_value_for_string(val: &oxdock_parser::Value) -> DiagnosticResult<String> {
     if let Some(s) = val.as_str() {
         return Ok(s.to_string());
     }
@@ -730,19 +717,13 @@ pub fn format_value_for_string(val: &oxdock_parser::Value) -> anyhow::Result<Str
         return Ok(b.to_string());
     }
     if val.as_pipe_handle().is_some() {
-        anyhow::bail!(
-            "cannot render PIPE as STRING: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: STRING = ... instead."
-        );
+        return Err(expand_diag::render_pipe());
     }
     if val.as_semaphore().is_some() {
-        anyhow::bail!(
-            "cannot render SEMAPHORE as STRING: semaphores coordinate task access between steps, not text."
-        );
+        return Err(expand_diag::render_semaphore());
     }
     if val.as_permit().is_some() {
-        anyhow::bail!(
-            "cannot render PERMIT as STRING: permits grant scoped task access, not text."
-        );
+        return Err(expand_diag::render_permit());
     }
     if let Some(d) = val.as_duration() {
         return Ok(oxdock_parser::command::format_duration(&d));
@@ -754,7 +735,7 @@ pub fn format_value_for_string(val: &oxdock_parser::Value) -> anyhow::Result<Str
         let parts: Vec<String> = items
             .iter()
             .map(format_value_for_string)
-            .collect::<anyhow::Result<_>>()?;
+            .collect::<DiagnosticResult<_>>()?;
         return Ok(parts.join(" "));
     }
     if let Some(map) = val.as_map() {
@@ -850,6 +831,7 @@ pub fn expand_command_env(input: &str, ctx: &CommandContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{anyhow, bail};
     use std::collections::HashMap;
 
     #[test]

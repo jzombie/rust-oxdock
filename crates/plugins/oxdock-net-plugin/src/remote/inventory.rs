@@ -6,8 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail};
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_parser::StepKind;
+
+use crate::diagnostics as net_diag;
 
 /// One inventory entry: the tokenized transport command. `--remote-serve`
 /// is appended at spawn time, never stored here.
@@ -27,17 +29,16 @@ impl RemoteInventory {
     /// Build from parsed `(target, command)` pairs. Duplicate targets and
     /// commands tokenizing to zero argv bail; quoting was already validated
     /// at flag parse time.
-    pub fn build(pairs: Vec<(String, String)>) -> Result<Self> {
+    pub fn build(pairs: Vec<(String, String)>) -> DiagnosticResult<Self> {
         let mut targets = BTreeMap::new();
         for (target, command) in pairs {
             if targets.contains_key(&target) {
-                bail!("duplicate --remote target {target:?}");
+                return Err(net_diag::inventory_duplicate_target(&target));
             }
-            let argv = shell_words::split(&command).map_err(|err| {
-                anyhow::anyhow!("invalid --remote {target:?}: cannot tokenize command: {err}")
-            })?;
+            let argv = shell_words::split(&command)
+                .map_err(|err| net_diag::inventory_tokenize_failed(&target, &err))?;
             if argv.is_empty() {
-                bail!("invalid --remote {target:?}: command tokenizes to no executable");
+                return Err(net_diag::inventory_no_executable(&target));
             }
             targets.insert(target, RemoteTarget { argv });
         }
@@ -73,17 +74,10 @@ impl RemoteInventory {
     /// Fail fast before execution: every script target must be bound.
     /// Scripts without remote blocks always pass, so local-only runs stay
     /// hermetic and never consult the network.
-    pub fn validate_script(&self, steps: &[oxdock_parser::Step]) -> Result<()> {
+    pub fn validate_script(&self, steps: &[oxdock_parser::Step]) -> DiagnosticResult<()> {
         for target in Self::collect_targets(steps) {
             if !self.targets.contains_key(&target) {
-                bail!(
-                    "unknown remote target {target:?} (declared: [{}]; add --remote {target}=\"<command>\")",
-                    self.targets()
-                        .iter()
-                        .map(|name| format!("{name:?}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+                return Err(net_diag::inventory_unknown_target(&target, &self.targets()));
             }
         }
         Ok(())

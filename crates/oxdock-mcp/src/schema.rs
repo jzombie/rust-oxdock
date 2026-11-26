@@ -4,13 +4,15 @@
 //! display spellings. This module maps `TypeTag` to JSON Schema objects
 //! and rejects opaque host types before the reactor opens (fail fast).
 
-use anyhow::{Result, bail};
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_parser::{
     ANY_TYPE_NAME, BOOL_TYPE_NAME, DURATION_TYPE_NAME, FLOAT_TYPE_NAME, HANDLE_TYPE_NAME,
     INT_TYPE_NAME, LIST_TYPE_NAME, MAP_TYPE_NAME, PATH_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME,
     SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, TypeTag, VOID_TYPE_NAME,
 };
 use serde_json::{Map, Value};
+
+use crate::diagnostics as mcp_diag;
 
 /// JSON-compatible leaves. Anything else fails validation naming the type.
 fn leaf_type(tag: &TypeTag) -> Option<&'static str> {
@@ -29,7 +31,7 @@ fn leaf_type(tag: &TypeTag) -> Option<&'static str> {
 /// Emit the JSON Schema for one `TypeTag`. `Any`/ unconstrained renders
 /// `{}` (accepts anything). Opaque words bail naming the type so the
 /// caller fails fast before serving.
-pub fn schema_for_tag(tag: &TypeTag) -> Result<Value> {
+pub fn schema_for_tag(tag: &TypeTag) -> DiagnosticResult<Value> {
     match tag {
         TypeTag::String | TypeTag::Int | TypeTag::Float | TypeTag::Bool => {
             let mut map = Map::new();
@@ -110,12 +112,7 @@ pub fn schema_for_tag(tag: &TypeTag) -> Result<Value> {
         | TypeTag::Path
         | TypeTag::Semaphore
         | TypeTag::Permit
-        | TypeTag::Custom(_) => {
-            bail!(
-                "cannot expose MCP tool with opaque parameter type {}",
-                tag_name(tag)
-            )
-        }
+        | TypeTag::Custom(_) => Err(mcp_diag::schema_opaque_type(&tag_name(tag))),
     }
 }
 

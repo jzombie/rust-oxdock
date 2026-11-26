@@ -10,8 +10,10 @@
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Condvar, Mutex};
 
+use crate::diagnostics as pipe_diag;
 use crate::slot::{SharedInput, SharedOutput};
 use crate::spill::SpillBuffer;
+use oxdock_diagnostics::DiagnosticResult;
 
 /// One script pipe: shared backend plus its shared reader half.
 pub struct ScriptPipe {
@@ -397,31 +399,25 @@ pub fn script_backend(handle: &crate::slot::PipeHandle) -> Option<Arc<PipeInner>
 /// pipe-content assertions. Never waits and never creates: unbound
 /// handles bail (nothing was ever bound), and OS pairs bail (kernel
 /// bytes are invisible : drain the stream instead).
-pub fn peek(handle: &crate::slot::PipeHandle) -> anyhow::Result<Vec<u8>> {
+pub fn peek(handle: &crate::slot::PipeHandle) -> DiagnosticResult<Vec<u8>> {
     use crate::slot::Slot;
     let backend = {
         let guard = handle.cell().lock().expect("pipe handle lock poisoned");
         match &*guard {
             Slot::Script { backend } => Some(Arc::clone(backend)),
             Slot::Unbound => {
-                return Err(anyhow::anyhow!(
-                    "cannot peek unbound pipe: bind it to a command first"
-                ));
+                return Err(pipe_diag::peek_unbound());
             }
             #[cfg(not(miri))]
             Slot::Os { .. } => {
-                return Err(anyhow::anyhow!(
-                    "cannot peek OS-materialized pipe: drain it through a bound command instead"
-                ));
+                return Err(pipe_diag::peek_os_materialized());
             }
         }
     };
     let Some(inner) = backend else {
         unreachable!("unbound/os arms return above");
     };
-    inner
-        .peek_bytes()
-        .map_err(|e| anyhow::anyhow!("failed to peek pipe: {e}"))
+    inner.peek_bytes().map_err(|e| pipe_diag::peek_failed(&e))
 }
 
 /// Snapshot one handle for diagnostics. Unbound handles report kind

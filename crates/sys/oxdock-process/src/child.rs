@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::contract::BackgroundHandle;
+use crate::diagnostics as proc_diag;
+use oxdock_diagnostics::DiagnosticResult;
 
 /// Shared inner state for `ChildHandle`, enabling safe cloning.
 /// The OS PID is stored separately so `kill()` can signal
@@ -38,7 +40,7 @@ impl ChildHandle {
         child: Child,
         stdin_thread: Option<std::thread::JoinHandle<()>>,
         io_threads: Vec<std::thread::JoinHandle<()>>,
-    ) -> Result<Self> {
+    ) -> DiagnosticResult<Self> {
         // The stdin feeder is deliberately detached, never joined (see
         // below): it blocks reading the producer pipe, whose writers may
         // legitimately outlive a short-lived child (a session pump feeding
@@ -57,7 +59,7 @@ impl ChildHandle {
                 // before surfacing the failed spawn.
                 let mut child = child;
                 let _ = child.kill();
-                return Err(err);
+                return Err(proc_diag::from_anyhow(err));
             }
         };
         Ok(Self {
@@ -79,7 +81,10 @@ impl BackgroundHandle for ChildHandle {
     fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref mut child) = guard.child {
-            match child.try_wait()? {
+            match child
+                .try_wait()
+                .map_err(|e| anyhow::Error::new(proc_diag::wait_failed(&e)))?
+            {
                 Some(status) => {
                     // Same post-reap sweep as `wait`: an escapee that
                     // outlived the kill keeps the group (and the pump
@@ -125,7 +130,9 @@ impl BackgroundHandle for ChildHandle {
         };
 
         if let Some(mut child) = child_opt {
-            let status = child.wait()?;
+            let status = child
+                .wait()
+                .map_err(|e| anyhow::Error::new(proc_diag::wait_failed(&e)))?;
             // Re-acquire lock to store result and join IO threads.
             // Output pumps only: the stdin feeder is detached in `new`
             // since its producer may outlive the child.

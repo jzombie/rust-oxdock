@@ -1,7 +1,8 @@
+use crate::diagnostics as fs_diag;
 use crate::workspace_fs::GuardedPath;
 #[cfg(not(miri))]
 use anyhow::Context;
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 #[derive(Debug, Clone)]
 pub struct GitIdentity {
@@ -11,7 +12,7 @@ pub struct GitIdentity {
 
 #[cfg(miri)]
 pub fn ensure_git_identity(_repo: &GuardedPath) -> Result<GitIdentity> {
-    bail!("git identity helpers are not supported under Miri");
+    Err(anyhow::Error::new(fs_diag::git_identity_miri()))
 }
 
 #[cfg(not(miri))]
@@ -67,7 +68,10 @@ fn read_config(repo: &GuardedPath, key: &str) -> Result<Option<String>> {
 
     match output.status.code() {
         Some(1) => Ok(None),
-        _ => bail!("git config --get {key} exited with {}", output.status),
+        _ => Err(anyhow::Error::new(fs_diag::git_config_get_failed(
+            key,
+            output.status,
+        ))),
     }
 }
 
@@ -84,7 +88,9 @@ fn write_config(repo: &GuardedPath, key: &str, value: &str) -> Result<()> {
         .status()
         .with_context(|| format!("failed to set git config {key}"))?;
     if !status.success() {
-        bail!("git config {key} failed with {status}");
+        return Err(anyhow::Error::new(fs_diag::git_config_set_failed(
+            key, status,
+        )));
     }
     Ok(())
 }

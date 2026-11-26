@@ -1,0 +1,19 @@
+[package]
+name = "oxdock-diagnostics"
+description = "Unified keyed diagnostics for OxDock DSL, typing, and CLI: one constructor per user-facing error, stable keys, whole-sentence templates."
+categories = ["development-tools"]
+keywords = ["oxdock", "diagnostics", "errors"]
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+anyhow.workspace = true
+
+[lints]
+workspace = true

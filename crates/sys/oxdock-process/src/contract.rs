@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use oxdock_fs::{CargoScratch, GuardedPath, PolicyPath};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::ExitStatus;
 
 use std::sync::Arc;
+
+use crate::diagnostics as proc_diag;
 
 // Shared-IO handles and take-once OS pipe halves live in `oxdock-pipe`
 // (leaf crate, no cycle); re-exported here so every existing
@@ -234,7 +236,7 @@ pub trait ProcessManager: Clone + Send + 'static {
         argv: &[String],
         _options: CommandOptions,
     ) -> Result<CommandResult<Self::Handle>> {
-        bail!("run_argv not implemented for argv {argv:?}")
+        Err(anyhow::Error::new(proc_diag::run_argv_unimplemented(argv)))
     }
 
     /// Whether host stdin is an interactive terminal. The default

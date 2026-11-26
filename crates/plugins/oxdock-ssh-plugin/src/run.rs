@@ -12,7 +12,9 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result, bail};
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
+
+use crate::diagnostics as ssh_diag;
 use oxdock_core::{StepCtx, Value};
 use oxdock_fs::command_path;
 use oxdock_process::{
@@ -30,20 +32,22 @@ fn pump_fd_to_pipe(
     stream: &mut Box<dyn Read + Send>,
     writer: &SharedOutput,
     name: &str,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut buffer = [0u8; PUMP_CHUNK];
     loop {
         match stream.read(&mut buffer) {
-            Err(err) => bail!("SSH run child {name} read failed: {err}"),
+            Err(err) => {
+                return Err(ssh_diag::run_child_read_failed(name, &err));
+            }
             Ok(0) => break,
             Ok(count) => {
                 let mut guard = writer
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("SSH run output lock poisoned"))?;
+                    .map_err(|_| ssh_diag::run_output_lock_poisoned())?;
                 guard
                     .write_all(&buffer[..count])
-                    .context("SSH run output pipe write failed")?;
-                guard.flush().context("SSH run output pipe flush failed")?;
+                    .map_err(ssh_diag::run_output_write_failed)?;
+                guard.flush().map_err(ssh_diag::run_output_flush_failed)?;
             }
         }
     }
@@ -105,7 +109,7 @@ fn handle_run_event(
     event: RunEvent,
     in_done: &mut bool,
     outputs: &mut [(bool, DeferredClose<'_>)],
-    failed: &mut Option<anyhow::Error>,
+    failed: &mut Option<Diagnostic>,
     exit_code: &mut Option<i64>,
     in_backend: &Option<Arc<oxdock_pipe::PipeInner>>,
 ) {
@@ -157,19 +161,19 @@ pub fn pump_run_session<P: ProcessManager>(
     out_pipe: &Value,
     err_pipe: &Value,
     on_exit: Option<Arc<dyn Fn(u32) + Send + Sync>>,
-) -> Result<i64> {
+) -> DiagnosticResult<i64> {
     if argv.is_empty() {
-        bail!("SSH_RUN needs at least a program");
+        return Err(ssh_diag::run_needs_program());
     }
     let reader = cx
         .pipe_reader(in_pipe)
-        .context("SSH run cannot borrow the input pipe")?;
+        .map_err(ssh_diag::run_borrow_input_failed)?;
     let out_writer = cx
         .pipe_writer(out_pipe)
-        .context("SSH run cannot borrow the output pipe")?;
+        .map_err(ssh_diag::run_borrow_output_failed)?;
     let err_writer = cx
         .pipe_writer(err_pipe)
-        .context("SSH run cannot borrow the error pipe")?;
+        .map_err(ssh_diag::run_borrow_error_failed)?;
 
     cx.ensure_scratch_materialized()?;
     let staged = cx.env_snapshot();
@@ -189,7 +193,7 @@ pub fn pump_run_session<P: ProcessManager>(
     }
     let piped = builder
         .spawn_piped_with_stderr()
-        .context("SSH run spawn failed")?;
+        .map_err(ssh_diag::run_spawn_failed)?;
     let PipedChild {
         handle,
         stdin,
@@ -199,7 +203,7 @@ pub fn pump_run_session<P: ProcessManager>(
     let child_stdin: Box<dyn Write + Send> = Box::new(stdin);
     let child_stdout: Box<dyn Read + Send> = Box::new(stdout);
     let Some(stderr) = stderr else {
-        bail!("SSH run spawn lost stderr");
+        return Err(ssh_diag::run_spawn_lost_stderr());
     };
     let child_stderr: Box<dyn Read + Send> = Box::new(stderr);
 
@@ -218,7 +222,7 @@ pub fn pump_run_session<P: ProcessManager>(
     let cancel = Arc::new(AtomicBool::new(false));
     let in_backend = cx.pipe_backend(in_pipe);
     let (event_tx, event_rx) = std::sync::mpsc::channel::<RunEvent>();
-    let mut failed: Option<anyhow::Error> = None;
+    let mut failed: Option<Diagnostic> = None;
     let mut in_done = false;
     let mut exit_code: Option<i64> = None;
     let mut outputs = [
@@ -341,7 +345,7 @@ pub fn pump_run_session<P: ProcessManager>(
         Some(err) => Err(err),
         None => {
             if cancel.load(Ordering::SeqCst) {
-                anyhow::bail!("SSH run interrupted by cancellation");
+                return Err(ssh_diag::run_interrupted_by_cancellation());
             }
             Ok(exit_code.unwrap_or(-1))
         }

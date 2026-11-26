@@ -19,8 +19,9 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use oxdock_core::{FuncMeta, McpSession, StreamChunk, StreamHook, TeeStream, Value};
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::{GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs};
 use oxdock_process::DefaultProcessManager;
 use oxdock_process::unix_now;
@@ -43,6 +44,7 @@ use rmcp::{
 };
 use serde_json::Value as JsonValue;
 
+use crate::diagnostics as mcp_diag;
 use crate::tools::{HashMapDoc, McpTool, build_tool_table, map_json_args};
 
 /// Live session plus its tool table, swapped atomically on reload.
@@ -200,7 +202,7 @@ impl OxDockHandler {
         let mut inner = self
             .inner
             .lock()
-            .map_err(|_| anyhow::anyhow!("MCP session lock poisoned during reload"))?;
+            .map_err(|_| anyhow::Error::new(mcp_diag::session_lock_poisoned_reload()))?;
         inner.status.generation += 1;
         inner.status.script_sha256 = outcome.hash.clone();
         inner.status.loaded_at_unix = unix_now();
@@ -334,7 +336,8 @@ impl OxDockHandler {
 /// Build the lazy session filesystem plus its backing-dir hold. The hold
 /// must outlive the session, so it rides in `HandlerInner`.
 pub fn session_fs(root: &GuardedPath) -> Result<(Box<dyn WorkspaceFs>, Arc<LazyGuardedTempDir>)> {
-    let mut resolver = PathResolver::new_lazy(root.clone()).context("guard workspace root")?;
+    let mut resolver = PathResolver::new_lazy(root.clone())
+        .map_err(|err| anyhow::Error::new(mcp_diag::session_guard_workspace_root(&err)))?;
     resolver.set_workspace_root(root.clone());
     let hold = resolver.snapshot_handle();
     Ok((Box::new(resolver), hold))
@@ -346,7 +349,8 @@ pub fn session_fs(root: &GuardedPath) -> Result<(Box<dyn WorkspaceFs>, Arc<LazyG
 /// rooting the read at the path itself keeps reload working there.
 fn read_guarded(path: &GuardedPath) -> Result<String> {
     let anchor = path.root();
-    let resolver = PathResolver::new(anchor, anchor).context("guard script root")?;
+    let resolver = PathResolver::new(anchor, anchor)
+        .map_err(|err| anyhow::Error::new(mcp_diag::session_guard_script_root(&err)))?;
     resolver.read_to_string(path)
 }
 
@@ -477,7 +481,7 @@ impl ServerHandler for OxDockHandler {
         let output = tokio::task::spawn_blocking(move || {
             let mut guard = inner
                 .lock()
-                .map_err(|_| anyhow::anyhow!("MCP session lock poisoned during `{name}`"))?;
+                .map_err(|_| mcp_diag::session_lock_poisoned_call(&name))?;
             guard.session.set_stream_hook(Some(hook));
             let result = guard.session.call(&name, values);
             guard.session.set_stream_hook(None);
@@ -757,10 +761,10 @@ fn rmcp_tool_for(tool: &McpTool) -> Tool {
 }
 
 /// Reject an `EXPORT` of the synthesized host tool name.
-fn reject_reserved_metas(metas: &[FuncMeta]) -> Result<()> {
+fn reject_reserved_metas(metas: &[FuncMeta]) -> DiagnosticResult<()> {
     for meta in metas {
         if oxdock_parser::base_name(&meta.name) == STATUS_TOOL_NAME {
-            anyhow::bail!("{STATUS_TOOL_NAME} is reserved for the host status tool");
+            return Err(mcp_diag::export_status_name_reserved(STATUS_TOOL_NAME));
         }
     }
     Ok(())
@@ -838,7 +842,7 @@ impl OxDockHandler {
         let parsed =
             oxdock_core::parse_script_with_modules_and_exports(script_text, engine.module_table())?;
         if parsed.exports.funcs.is_empty() {
-            anyhow::bail!("no EXPORT entries: add `EXPORT [NAME, ...]` to expose MCP tools");
+            return Err(anyhow::Error::new(mcp_diag::export_no_entries()));
         }
         if parsed
             .exports
@@ -846,7 +850,9 @@ impl OxDockHandler {
             .iter()
             .any(|name| name == STATUS_TOOL_NAME)
         {
-            anyhow::bail!("{STATUS_TOOL_NAME} is reserved for the host status tool");
+            return Err(anyhow::Error::new(mcp_diag::export_status_name_reserved(
+                STATUS_TOOL_NAME,
+            )));
         }
         let (fs, hold) = session_fs(workspace_root)?;
         let session = McpSession::init(

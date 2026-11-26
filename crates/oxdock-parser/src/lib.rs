@@ -24,6 +24,7 @@ pub mod ast;
 pub mod command;
 pub mod commands;
 pub mod constants;
+pub mod diagnostics;
 pub mod error;
 pub mod literal;
 #[cfg(feature = "proc-macro-api")]
@@ -76,11 +77,18 @@ pub use tok::{GroupDelim, LexError, Tok, TokKind, lex_str};
 /// Centralizes AST lowering so unit tests, integration tests, and macro_input tests
 /// all exercise the same command set against the same grammar.
 pub mod test_lower_mock {
-    use crate::error::{ParseError, SpanContext};
+    use crate::diagnostics as dsl_diag;
+    use crate::error::{ParseError, ParseErrorKind, SpanContext};
     use crate::{Arg, ParseResult, StepKind, WorkspaceTarget};
 
-    fn validation(cmd: &str, msg: &str) -> ParseError {
-        ParseError::validation(cmd, msg.to_string(), &SpanContext::line_only(0))
+    fn invalid(command: &str, diagnostic: oxdock_diagnostics::Diagnostic) -> ParseError {
+        ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: command.to_string(),
+            },
+            diagnostic,
+            &SpanContext::line_only(0),
+        )
     }
 
     pub fn lower(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
@@ -90,7 +98,7 @@ pub mod test_lower_mock {
                 let mut it = args.into_iter();
                 let path = it
                     .next()
-                    .ok_or_else(|| validation("WRITE", "WRITE requires path"))?;
+                    .ok_or_else(|| invalid("WRITE", dsl_diag::write_requires_path()))?;
                 let remaining: Vec<_> = it.collect();
                 let contents = if remaining.is_empty() {
                     None
@@ -104,23 +112,26 @@ pub mod test_lower_mock {
                 };
                 Ok(StepKind::Write { path, contents })
             }
-            "ENV" => crate::commands::lower_env_assignment(args)
-                .map_err(|e| validation("ENV", &e.to_string())),
+            "ENV" => crate::commands::lower_env_assignment(args),
             "WORKSPACE" => {
                 let mut it = args.into_iter();
                 let target = it
                     .next()
-                    .ok_or_else(|| validation("WORKSPACE", "requires target"))?;
+                    .ok_or_else(|| invalid("WORKSPACE", dsl_diag::workspace_requires_target()))?;
                 let local = it.any(|a| a.as_str() == "--local");
                 match target.as_str() {
-                    "SNAPSHOT" | "LOCAL" | "SYSTEM" if local => {
-                        Err(validation("WORKSPACE", "--local requires CACHE"))
-                    }
+                    "SNAPSHOT" | "LOCAL" | "SYSTEM" if local => Err(invalid(
+                        "WORKSPACE",
+                        dsl_diag::workspace_local_needs_cache(),
+                    )),
                     "SNAPSHOT" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
                     "LOCAL" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
                     "CACHE" => Ok(StepKind::Workspace(WorkspaceTarget::Cache { local })),
                     "SYSTEM" => Ok(StepKind::Workspace(WorkspaceTarget::System)),
-                    _ => Err(validation("WORKSPACE", "unknown workspace target")),
+                    _ => Err(invalid(
+                        "WORKSPACE",
+                        dsl_diag::workspace_unknown_target(target.as_str()),
+                    )),
                 }
             }
             "INHERIT_ENV" => {
@@ -131,21 +142,21 @@ pub mod test_lower_mock {
                 let msg = args
                     .into_iter()
                     .next()
-                    .ok_or_else(|| validation("ECHO", "ECHO requires arg"))?;
+                    .ok_or_else(|| invalid("ECHO", dsl_diag::needs_value("ECHO")))?;
                 Ok(StepKind::Echo(msg))
             }
             "RUN" => {
                 let cmd = args
                     .into_iter()
                     .next()
-                    .ok_or_else(|| validation("RUN", "RUN requires arg"))?;
+                    .ok_or_else(|| invalid("RUN", dsl_diag::needs_value("RUN")))?;
                 Ok(StepKind::Run(cmd))
             }
             "WORKDIR" => {
                 let path = args
                     .into_iter()
                     .next()
-                    .ok_or_else(|| validation("WORKDIR", "requires path"))?;
+                    .ok_or_else(|| invalid("WORKDIR", dsl_diag::workdir_requires_path()))?;
                 Ok(StepKind::Workdir(path))
             }
             "COPY" => {
@@ -163,18 +174,15 @@ pub mod test_lower_mock {
                     }
                 }
                 if from_host && to_host {
-                    return Err(validation(
-                        "COPY",
-                        "COPY --from-host and --to-host are mutually exclusive",
-                    ));
+                    return Err(invalid("COPY", dsl_diag::copy_host_exclusion()));
                 }
                 let mut it = positional.into_iter();
                 let from = it
                     .next()
-                    .ok_or_else(|| validation("COPY", "COPY requires a source"))?;
+                    .ok_or_else(|| invalid("COPY", dsl_diag::copy_requires_source()))?;
                 let to = it
                     .next()
-                    .ok_or_else(|| validation("COPY", "COPY requires a destination"))?;
+                    .ok_or_else(|| invalid("COPY", dsl_diag::copy_requires_destination()))?;
                 Ok(StepKind::Copy {
                     from_workspace: None,
                     from_host,
@@ -190,10 +198,10 @@ pub mod test_lower_mock {
                 let mut it = positional.into_iter();
                 let src = it
                     .next()
-                    .ok_or_else(|| validation("ARCHIVE", "ARCHIVE requires a source"))?;
+                    .ok_or_else(|| invalid("ARCHIVE", dsl_diag::archive_requires_source()))?;
                 let dst = it
                     .next()
-                    .ok_or_else(|| validation("ARCHIVE", "ARCHIVE requires a destination"))?;
+                    .ok_or_else(|| invalid("ARCHIVE", dsl_diag::archive_requires_destination()))?;
                 Ok(StepKind::Archive { src, dst, raw })
             }
             "UNARCHIVE" => {
@@ -210,20 +218,21 @@ pub mod test_lower_mock {
                 let mut it = positional.into_iter();
                 let src = it
                     .next()
-                    .ok_or_else(|| validation("UNARCHIVE", "UNARCHIVE requires an archive"))?;
-                let dst = it
-                    .next()
-                    .ok_or_else(|| validation("UNARCHIVE", "UNARCHIVE requires a destination"))?;
+                    .ok_or_else(|| invalid("UNARCHIVE", dsl_diag::unarchive_requires_archive()))?;
+                let dst = it.next().ok_or_else(|| {
+                    invalid("UNARCHIVE", dsl_diag::unarchive_requires_destination())
+                })?;
                 Ok(StepKind::Unarchive {
                     src,
                     dst,
                     max_bytes,
                 })
             }
-            _ => Err(ParseError::unknown_command(
-                name,
-                format!("unknown command: {name}"),
-                None,
+            _ => Err(ParseError::from_diagnostic(
+                ParseErrorKind::UnknownCommand {
+                    name: name.to_string(),
+                },
+                dsl_diag::unknown_command(name, None),
                 &SpanContext::line_only(0),
             )),
         }

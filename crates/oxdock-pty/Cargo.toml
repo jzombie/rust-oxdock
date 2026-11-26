@@ -22,6 +22,7 @@ oxdock-process.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+oxdock-diagnostics.workspace = true
 portable-pty.workspace = true
 
 [lints]

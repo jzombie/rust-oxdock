@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use oxdock_diagnostics::Span;
+
 pub use crate::commands::{AssertTarget, BindRhs, StepKind};
 use crate::constants::{
     KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASSERT_CONTAINS,
@@ -9,8 +11,8 @@ use crate::constants::{
     KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
     KEYWORD_DEFAULT, KEYWORD_ECHO, KEYWORD_ELSE, KEYWORD_ENV, KEYWORD_EXIT, KEYWORD_EXPAND,
     KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT,
-    KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET,
-    KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ,
+    KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_INSTALL, KEYWORD_ISOLATED,
+    KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ,
     KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN,
     KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TIMEOUT,
     KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WHILE, KEYWORD_WITH_IO, KEYWORD_WORKDIR,
@@ -759,6 +761,34 @@ impl PartialEq for Step {
 
 impl Eq for Step {}
 
+impl Step {
+    /// Definition span for this step in the shared transport type.
+    /// Derived from the stamped `line`/`col` provenance (no new data,
+    /// so equality and rendering are untouched): line-only when the
+    /// column is unknown, fully unknown when the line is `0`.
+    pub fn span(&self) -> Span {
+        if self.line == 0 {
+            return Span::default();
+        }
+        if self.col == 0 {
+            return Span::line_only(self.line);
+        }
+        Span::line_col(self.line, self.col)
+    }
+
+    /// Symbol this step defines, with its definition span. Covers
+    /// `TYPE` aliases and `FUNC` definitions only: the go-to-definition
+    /// primitive future symbol tables build on. Returns `None` for
+    /// every other step.
+    pub fn defined_symbol(&self) -> Option<(&str, Span)> {
+        match &self.kind {
+            StepKind::TypeAlias { name, .. } => Some((name.as_str(), self.span())),
+            StepKind::FuncDef { name, .. } => Some((name.as_str(), self.span())),
+            _ => None,
+        }
+    }
+}
+
 impl Expr {
     /// Visit this expression and every descendant, depth first. `Block`
     /// steps recurse through [`StepKind::walk_step_exprs`](crate::commands::StepKind::walk_step_exprs),
@@ -1310,7 +1340,7 @@ impl fmt::Display for Expr {
                 write!(f, ")")
             }
             Expr::Inspect { name } => {
-                write!(f, "INSPECT(${})", name)
+                write!(f, "{KEYWORD_INSPECT}(${})", name)
             }
             Expr::List(items) => {
                 write!(f, "[")?;
@@ -1431,7 +1461,7 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
                 stack.push(format!("{}({})", name, args.join(", ")));
             }
             MathOp::Inspect { name } => {
-                stack.push(format!("INSPECT({VAR_SIGIL}{})", name));
+                stack.push(format!("{KEYWORD_INSPECT}({VAR_SIGIL}{})", name));
             }
             MathOp::Neg => {
                 let inner = stack.pop().unwrap_or_else(|| "<underflow>".to_string());
@@ -1650,6 +1680,91 @@ mod tests {
                 meta.name
             );
         }
+    }
+
+    /// Definition spans ride the shared transport type: `TYPE`/`FUNC`
+    /// steps expose their stamped line/col as a [`Span`], and
+    /// `defined_symbol` names the symbol. Everything else defines
+    /// nothing. Unknown positions stay unknown (`line == 0`).
+    #[test]
+    fn definition_spans_cover_type_and_func() {
+        let alias = Step {
+            guard: None,
+            kind: StepKind::TypeAlias {
+                name: "EMP".to_string(),
+                target: "MAP<n: STRING>".to_string(),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+            line: 3,
+            col: 5,
+        };
+        let (name, span) = alias.defined_symbol().expect("alias defines");
+        assert_eq!(name, "EMP");
+        assert_eq!(span.line, 3);
+        assert_eq!(span.col_start, Some(5));
+
+        let func = Step {
+            guard: None,
+            kind: StepKind::FuncDef {
+                name: "F".to_string(),
+                params: Vec::new(),
+                return_type: "VOID".to_string(),
+                is_async: false,
+                body: Vec::new(),
+                docs: None,
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+            line: 7,
+            col: 1,
+        };
+        let (name, span) = func.defined_symbol().expect("func defines");
+        assert_eq!(name, "F");
+        assert_eq!(span.line, 7);
+
+        let plain = Step {
+            guard: None,
+            kind: StepKind::Break,
+            scope_enter: 0,
+            scope_exit: 0,
+            line: 9,
+            col: 1,
+        };
+        assert!(plain.defined_symbol().is_none());
+
+        let unknown = Step {
+            guard: None,
+            kind: StepKind::Break,
+            scope_enter: 0,
+            scope_exit: 0,
+            line: 0,
+            col: 0,
+        };
+        assert_eq!(unknown.span().line, 0);
+    }
+
+    /// End to end: parsed `TYPE`/`FUNC` steps carry definition spans
+    /// from stamping, so future symbol tables read positions off the
+    /// AST instead of re-lexing.
+    #[test]
+    fn parsed_definitions_carry_spans() {
+        let steps = crate::parse_script(
+            indoc::indoc! {r#"
+                TYPE EMP = MAP<n: STRING>
+                FUNC F(): VOID {
+                RETURN
+                }
+            "#},
+            crate::commands::lower_command,
+        )
+        .expect("definitions parse");
+        let mut names: Vec<(&str, usize)> = steps
+            .iter()
+            .filter_map(|s| s.defined_symbol().map(|(n, span)| (n, span.line)))
+            .collect();
+        names.sort();
+        assert_eq!(names, vec![("EMP", 1), ("F", 2)]);
     }
 }
 

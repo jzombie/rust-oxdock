@@ -1,4 +1,5 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 use oxdock_fs::EntryKind;
 use oxdock_fs::env as oxdock_env;
 use oxdock_fs::to_forward_slashes;
@@ -8,21 +9,12 @@ use oxdock_process::{ProcessManager, format_value_for_string};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::diagnostics as args_diag;
 use super::state::ExecState;
 use super::steps::StepCtx;
 
 /// Single mismatch constructor for the coercion path: names the
 /// expected tag structurally and the word the value holds. All
-/// coercion arms report through here so message drift cannot hide
-/// a new admission.
-pub(crate) fn type_mismatch(ctx: &str, expected: &TypeTag, value: &Value) -> anyhow::Error {
-    anyhow::anyhow!(
-        "{ctx}: TypeMismatch: expected {}, got {}",
-        oxdock_parser::render_structural(expected),
-        value.type_name()
-    )
-}
-
 /// Single BOOL spelling for the whole runtime: trim, case-insensitive
 /// `true`/`false`, plus `1`/`0`, plus `yes`/`no`/`on`/`off`. Empty is
 /// `None`: an empty string is not a boolean, so declared-but-absent
@@ -65,26 +57,27 @@ pub(crate) fn check_host_return_value(
     ctx: &str,
     returns: &Option<TypeTag>,
     value: &Value,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let Some(slot) = returns else {
         return Ok(());
     };
     let filled = fill_record_defaults(slot, value);
     oxdock_parser::check_value_at(slot, &filled, ctx)
+        .map_err(|err| args_diag::eval_host_return_failed(&err))
 }
 
 /// Narrow a `STRING|PATH` word to display text: strings verbatim,
 /// paths lossy-rendered. The caller guarantees admission (macro
 /// `#[union]` extractor or an explicit check), so anything else is
 /// a bug, not a user error.
-pub(crate) fn string_or_path_text(value: &Value) -> Result<String> {
+pub(crate) fn string_or_path_text(value: &Value) -> DiagnosticResult<String> {
     if let Some(s) = value.as_str() {
         return Ok(s.to_string());
     }
     if let Some(p) = value.as_path() {
         return Ok(p.to_string_lossy().to_string());
     }
-    Err(type_mismatch(
+    Err(args_diag::coerce_type_mismatch(
         "string-or-path position",
         &oxdock_parser::union_tag!(String, Path),
         value,
@@ -166,7 +159,7 @@ fn fill_record(expected: &TypeTag, value: &Value) -> Option<Value> {
 /// run's name directory here (not at parse time, where host descriptors
 /// are not visible). Pipe targets validate against the live PipeRegistry
 /// via ExecState.
-pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
+pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> DiagnosticResult<Value> {
     // `ANY` accepts every word: the boundary already let it through,
     // so coercion is a passthrough, never a second opinion.
     if matches!(expected, TypeTag::Any) {
@@ -185,7 +178,7 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
     // through `check_value_at`; declarations match them now).
     if let Err(err) = oxdock_parser::check_value(expected, &value) {
         if matches!(expected, TypeTag::ListOf(_) | TypeTag::Record(_)) {
-            return Err(err);
+            return Err(args_diag::coerce_check_failed(&err));
         }
     } else {
         return Ok(value);
@@ -207,7 +200,6 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
     // Values of other shapes never cross-coerce; the mismatch below
     // reports both names through the tag.
     if let Some(s) = value.as_str() {
-        let name = expected.name();
         return match expected {
             // Strict integer slots: strings never parse here. The
             // explicit `INT()` converter owns string parsing, so a
@@ -215,19 +207,19 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
             // of silently re-parsing at every consumer.
             TypeTag::Bool => match parse_bool_str(s) {
                 Some(b) => Ok(Value::bool(b)),
-                None => Err(type_mismatch("coercion", expected, &value)),
+                None => Err(args_diag::coerce_type_mismatch(
+                    "coercion", expected, &value,
+                )),
             },
             TypeTag::Pipe => {
                 // Strict: plain strings never coerce to pipes, so a handle is
                 // always created explicitly via `LET $p: PIPE`. Anything else
                 // is a TypeMismatch.
-                Err(anyhow::anyhow!(
-                    "TypeMismatch: expected {name}, got STRING ({s:?}); declare LET $x: PIPE and pass $x"
-                ))
+                Err(args_diag::coerce_string_to_pipe(s))
             }
             TypeTag::Duration => oxdock_parser::command::parse_duration(s.trim())
                 .map(Value::duration)
-                .map_err(|_| type_mismatch("coercion", expected, &value)),
+                .map_err(|_| args_diag::coerce_type_mismatch("coercion", expected, &value)),
             TypeTag::Path => {
                 // Narrow exception: materializing the PATH payload. Guard checks
                 // still run through oxdock-fs at use time.
@@ -257,7 +249,9 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
             | TypeTag::ListOf(_)
             | TypeTag::Record(_)
             | TypeTag::MapOf(_)
-            | TypeTag::Union(..) => Err(type_mismatch("coercion", expected, &value)),
+            | TypeTag::Union(..) => Err(args_diag::coerce_type_mismatch(
+                "coercion", expected, &value,
+            )),
         };
     }
     coerce_scalar(&value, expected)
@@ -267,7 +261,7 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
 /// pipe-name words. Anything else is a `TypeMismatch`. Admissions are
 /// explicit `if`s; the fallthrough rejects closed, so a new tag is
 /// refused here until its coercion rule is written.
-fn coerce_scalar(value: &Value, expected: &TypeTag) -> Result<Value> {
+fn coerce_scalar(value: &Value, expected: &TypeTag) -> DiagnosticResult<Value> {
     if let Some(n) = value.as_i64() {
         if matches!(expected, TypeTag::String) {
             return Ok(Value::string(n.to_string()));
@@ -279,10 +273,12 @@ fn coerce_scalar(value: &Value, expected: &TypeTag) -> Result<Value> {
             match n {
                 1 => return Ok(Value::bool(true)),
                 0 => return Ok(Value::bool(false)),
-                _ => return Err(mismatch(expected, value)),
+                _ => {
+                    return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
+                }
             }
         }
-        return Err(mismatch(expected, value));
+        return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
     }
     if let Some(f) = value.as_f64() {
         if matches!(expected, TypeTag::String) {
@@ -291,42 +287,36 @@ fn coerce_scalar(value: &Value, expected: &TypeTag) -> Result<Value> {
         // Strict: floats never narrow to integers here. Whole floats
         // pass through the explicit `INT()` converter instead, so an
         // `INT` slot names the mismatch rather than truncating.
-        return Err(mismatch(expected, value));
+        return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
     }
     if let Some(b) = value.as_bool() {
         if matches!(expected, TypeTag::String) {
             return Ok(Value::string(b.to_string()));
         }
-        return Err(mismatch(expected, value));
+        return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
     }
     if let Some(d) = value.as_duration() {
         if matches!(expected, TypeTag::String) {
             return Ok(Value::string(oxdock_parser::command::format_duration(&d)));
         }
-        return Err(mismatch(expected, value));
+        return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
     }
     if let Some(p) = value.as_path() {
         if matches!(expected, TypeTag::String) {
             return Ok(Value::string(p.to_string_lossy().to_string()));
         }
-        return Err(mismatch(expected, value));
+        return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
     }
     if value.as_pipe_handle().is_some() {
         // Pipes are refused in string slots: they carry streams between
         // steps, not text, and silently rendering a handle hides a bug.
         // Capture the producing step's output with LET instead.
         if matches!(expected, TypeTag::String) {
-            anyhow::bail!(
-                "coercion: TypeMismatch: expected STRING, got PIPE: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: STRING = ... instead."
-            );
+            return Err(args_diag::coerce_pipe_to_string());
         }
-        return Err(mismatch(expected, value));
+        return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
     }
-    Err(mismatch(expected, value))
-}
-
-fn mismatch(expected: &TypeTag, value: &Value) -> anyhow::Error {
-    type_mismatch("coercion", expected, value)
+    Err(args_diag::coerce_type_mismatch("coercion", expected, value))
 }
 
 /// Resolve an [`Arg`] using an [`ExecState`] directly (no [`StepCtx`] needed).
@@ -338,19 +328,24 @@ fn mismatch(expected: &TypeTag, value: &Value) -> anyhow::Error {
 pub(crate) fn resolve_arg_state<P: ProcessManager>(
     arg: &Arg,
     state: &ExecState<P>,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     match arg {
-        Arg::String(s, _) => Ok(expand_string(s, &state.envs, state)?),
-        Arg::Expr(e) => bail!("Arg::Expr cannot be resolved without StepCtx: {:?}", e),
+        Arg::String(s, _) => {
+            Ok(expand_string(s, &state.envs, state).map_err(args_diag::eval_arg_expand_failed)?)
+        }
+        Arg::Expr(e) => Err(args_diag::eval_arg_expr_needs_step_ctx(e)),
         Arg::Parts(parts) => {
             let mut out = String::new();
             for part in parts {
                 match part {
                     ArgPart::Text(s, _) => {
-                        out.push_str(&expand_string(s, &state.envs, state)?);
+                        out.push_str(
+                            &expand_string(s, &state.envs, state)
+                                .map_err(args_diag::eval_arg_expand_failed)?,
+                        );
                     }
                     ArgPart::Expr(e) => {
-                        bail!("Arg::Expr cannot be resolved without StepCtx: {:?}", e)
+                        return Err(args_diag::eval_arg_expr_needs_step_ctx(e));
                     }
                 }
             }
@@ -359,13 +354,30 @@ pub(crate) fn resolve_arg_state<P: ProcessManager>(
     }
 }
 
+/// Lift a dispatch-layer `anyhow` failure into a `Diagnostic`: keyed
+/// diagnostics riding in the chain return with their key intact, so
+/// placeholder-unknown listings and handler errors render exactly as
+/// before; anything else renders verbatim through the shared
+/// fallback. Single owner for the anyhow-to-Diagnostic direction:
+/// every dispatch site in this file routes here instead of restating
+/// the downcast.
+fn lift_dispatch_error(err: anyhow::Error) -> Diagnostic {
+    match err.downcast::<Diagnostic>() {
+        Ok(diag) => diag,
+        Err(err) => args_diag::eval_dispatch_failed(&err),
+    }
+}
+
 /// Resolve an [`Arg`] : handles all variants.
-pub(crate) fn resolve_arg<P: ProcessManager>(arg: &Arg, cx: &mut StepCtx<'_, P>) -> Result<String> {
+pub(crate) fn resolve_arg<P: ProcessManager>(
+    arg: &Arg,
+    cx: &mut StepCtx<'_, P>,
+) -> DiagnosticResult<String> {
     match arg {
         Arg::String(s, _) => Ok(expand_string(s, &cx.state.envs, cx.state)?),
         Arg::Expr(e) => {
             let val = evaluate_expr(e, cx)?;
-            format_value_for_string(&val)
+            Ok(format_value_for_string(&val)?)
         }
         Arg::Parts(parts) => {
             let mut out = String::new();
@@ -389,7 +401,7 @@ pub(crate) fn resolve_arg<P: ProcessManager>(arg: &Arg, cx: &mut StepCtx<'_, P>)
 pub(crate) fn resolve_arg_opt<P: ProcessManager>(
     arg: &Option<Arg>,
     cx: &mut StepCtx<'_, P>,
-) -> Result<Option<String>> {
+) -> DiagnosticResult<Option<String>> {
     match arg {
         Some(a) => resolve_arg(a, cx).map(Some),
         None => Ok(None),
@@ -403,7 +415,7 @@ pub(crate) fn resolve_arg_opt<P: ProcessManager>(
 pub(crate) fn evaluate_assert_operand<P: ProcessManager>(
     arg: &Arg,
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     match arg {
         Arg::Expr(expr) => evaluate_expr(expr, cx),
         _ => Ok(Value::string(resolve_arg(arg, cx)?)),
@@ -414,7 +426,7 @@ pub(crate) fn evaluate_assert_operand<P: ProcessManager>(
 pub(crate) fn resolve_overrides<P: ProcessManager>(
     overrides: &[(String, Arg)],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Vec<(String, String)>> {
+) -> DiagnosticResult<Vec<(String, String)>> {
     overrides
         .iter()
         .map(|(k, v)| resolve_arg(v, cx).map(|val| (k.clone(), val)))
@@ -427,11 +439,12 @@ pub(crate) fn resolve_overrides<P: ProcessManager>(
 pub(crate) fn resolve_arg_as_int<P: ProcessManager>(
     arg: &Arg,
     cx: &mut StepCtx<'_, P>,
-) -> Result<i64> {
-    let resolved = resolve_arg(arg, cx)?;
+) -> DiagnosticResult<i64> {
+    let resolved = resolve_arg(arg, cx)
+        .map_err(|err| args_diag::eval_int_arg_resolve(&anyhow::Error::from(err)))?;
     oxdock_parser::command::strip_digit_separators(&resolved)
         .parse::<i64>()
-        .map_err(|_| anyhow::anyhow!("expected int, got {resolved:?}"))
+        .map_err(|_| args_diag::eval_expected_int(&resolved))
 }
 
 /// Resolve an [`Arg`] to a duration, enforcing the declared `duration`
@@ -439,7 +452,7 @@ pub(crate) fn resolve_arg_as_int<P: ProcessManager>(
 pub(crate) fn resolve_arg_as_duration<P: ProcessManager>(
     arg: &Arg,
     cx: &mut StepCtx<'_, P>,
-) -> Result<std::time::Duration> {
+) -> DiagnosticResult<std::time::Duration> {
     let resolved = resolve_arg(arg, cx)?;
     oxdock_parser::command::parse_duration(&resolved)
 }
@@ -453,16 +466,16 @@ pub(crate) fn resolve_arg_as_duration<P: ProcessManager>(
 pub(crate) fn load_var_binding<P: ProcessManager>(
     state: &ExecState<P>,
     name: &str,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     state
         .get_var(name)
-        .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}"))
+        .ok_or_else(|| args_diag::eval_undefined_var(name))
 }
 
 pub(crate) fn evaluate_expr<P: ProcessManager>(
     expr: &Expr,
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     match expr {
         Expr::Literal(v) => {
             if let Some(s) = v.as_str() {
@@ -471,8 +484,10 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             }
             Ok(v.clone())
         }
-        Expr::Var { name } => load_var_binding(cx.state, name),
-        Expr::ConstRef { alias, name } => super::import::resolve_const_ref(cx.state, alias, name),
+        Expr::Var { name } => Ok(load_var_binding(cx.state, name)?),
+        Expr::ConstRef { alias, name } => {
+            Ok(super::import::resolve_const_ref(cx.state, alias, name)?)
+        }
         Expr::Env(key) => match cx.state.get_env(key) {
             Some(v) => Ok(Value::string(v.to_string())),
             // Declared-but-absent reads empty, exactly like a host
@@ -482,7 +497,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         },
         Expr::KeyPath { base, keys } => {
             let base_value = load_var_binding(cx.state, base)?;
-            descend_value(base_value, keys)
+            Ok(descend_value(base_value, keys)?)
         }
         Expr::List(items) => {
             let mut result = Vec::new();
@@ -502,15 +517,17 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         // Inline block (`LET $a: STRING = { ... }`): run the steps in a
         // fresh scope and yield the boundary value, mirroring a zero-arg
         // function body (see `handlers::block_value`).
-        Expr::Block(body) => super::handlers::block_value(cx, body),
-        Expr::Call { name, args } => super::handlers::call_func_value(cx, name, args),
+        Expr::Block(body) => super::handlers::block_value(cx, body).map_err(lift_dispatch_error),
+        Expr::Call { name, args } => {
+            super::handlers::call_func_value(cx, name, args).map_err(lift_dispatch_error)
+        }
         // Variable inspection carries the binding name unevaluated (see
         // `Expr::Inspect`): no function-name matching happens here.
         // Gates through the single owner so reads fail exactly like
         // ordinary reads.
         Expr::Inspect { name } => {
             let _ = load_var_binding(cx.state, name)?;
-            evaluate_inspect_var(name, cx)
+            Ok(evaluate_inspect_var(name, cx)?)
         }
         // Bare `LET $p: PIPE`: mint a fresh unbound handle tagged with
         // the declaring task. Backends materialize lazily on first
@@ -520,16 +537,14 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         Expr::Arithmetic { op, left, right } => {
             let left_val = evaluate_expr(left, cx)?;
             let right_val = evaluate_expr(right, cx)?;
-            apply_arith(*op, left_val, right_val)
+            Ok(apply_arith(*op, left_val, right_val)?)
         }
         Expr::CompiledMath(ops) => evaluate_compiled_math(ops, cx),
-        Expr::UnsignedIntBoundary(n) => {
-            bail!("internal error: unstaged integer boundary {n}")
-        }
+        Expr::UnsignedIntBoundary(n) => Err(args_diag::eval_unstaged_int_boundary(*n)),
         Expr::Compare { op, left, right } => {
             let lv = evaluate_expr(left, cx)?;
             let rv = evaluate_expr(right, cx)?;
-            apply_compare(*op, &lv, &rv)
+            Ok(apply_compare(*op, &lv, &rv)?)
         }
         Expr::Logical { op, left, right } => {
             let left_val = evaluate_expr(left, cx)?;
@@ -556,10 +571,10 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
 }
 
 /// Check if a value is truthy. Only `BOOL` words are accepted; all other types produce a TypeError.
-pub(crate) fn is_truthy(val: &Value) -> Result<bool> {
+pub(crate) fn is_truthy(val: &Value) -> DiagnosticResult<bool> {
     match val.as_bool() {
         Some(b) => Ok(b),
-        None => bail!("Type Error: condition must be a Bool, found {:?}", val),
+        None => Err(args_diag::eval_condition_needs_bool(val)),
     }
 }
 
@@ -568,7 +583,10 @@ pub(crate) fn is_truthy(val: &Value) -> Result<bool> {
 /// `LOAD_JSON`/`LOAD_TOML`, this evaluates to a value without running
 /// script steps. The parser guarantees the argument is a `$variable`, so
 /// the snapshot can name what it describes.
-fn evaluate_inspect_var<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -> Result<Value> {
+fn evaluate_inspect_var<P: ProcessManager>(
+    var: &str,
+    cx: &mut StepCtx<'_, P>,
+) -> DiagnosticResult<Value> {
     super::handlers::inspect_var_map(cx, var).map(Value::map)
 }
 
@@ -577,19 +595,19 @@ fn evaluate_inspect_var<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -
 pub(crate) fn path_type_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     let path_val = args
         .first()
-        .ok_or_else(|| anyhow::anyhow!("PATH_TYPE requires a path argument"))?;
+        .ok_or_else(args_diag::eval_path_type_needs_arg)?;
     let path_str = match path_val.as_str() {
         Some(s) => s.to_string(),
-        None => bail!("PATH_TYPE path argument must evaluate to a string"),
+        None => return Err(args_diag::eval_path_type_needs_string()),
     };
     let target = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, &path_str)
-        .map_err(|e| anyhow::anyhow!("failed to resolve path '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::eval_path_resolve_failed(&path_str, &err))?;
     let kind = match cx.state.fs.entry_kind_no_follow(&target) {
         Ok(EntryKind::Symlink) => "symlink",
         Ok(EntryKind::File) => "file",
@@ -636,13 +654,11 @@ pub(crate) fn path_exists<P: ProcessManager>(cx: &StepCtx<'_, P>, path: &str) ->
 pub(crate) fn is_exec_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
-    let name_val = args
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("IS_EXEC requires a name argument"))?;
+) -> DiagnosticResult<Value> {
+    let name_val = args.first().ok_or_else(args_diag::eval_is_exec_needs_arg)?;
     let name = match name_val.as_str() {
         Some(s) => s.to_string(),
-        None => bail!("IS_EXEC name argument must evaluate to a string"),
+        None => return Err(args_diag::eval_is_exec_needs_string()),
     };
     if name.is_empty() {
         return Ok(Value::bool(false));
@@ -797,13 +813,13 @@ fn is_executable_candidate<P: ProcessManager>(
 pub(crate) fn path_writable_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     let path_val = args
         .first()
-        .ok_or_else(|| anyhow::anyhow!("PATH_WRITABLE requires a path argument"))?;
+        .ok_or_else(args_diag::eval_path_writable_needs_arg)?;
     let path_str = match path_val.as_str() {
         Some(s) => s.to_string(),
-        None => bail!("PATH_WRITABLE path argument must evaluate to a string"),
+        None => return Err(args_diag::eval_path_writable_needs_string()),
     };
     if path_str.is_empty() {
         return Ok(Value::bool(false));
@@ -812,7 +828,7 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, &path_str)
-        .map_err(|e| anyhow::anyhow!("failed to resolve path '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::eval_path_resolve_failed(&path_str, &err))?;
     let mut current = target;
     loop {
         match cx.state.fs.entry_kind_no_follow(&current) {
@@ -828,10 +844,11 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
                 };
                 if parent.as_path().as_os_str().is_empty() {
                     let cwd = cx.state.cwd.clone();
-                    let anchor =
-                        cx.state.fs.resolve_write(&cwd, ".").map_err(|e| {
-                            anyhow::anyhow!("failed to resolve working directory: {e}")
-                        })?;
+                    let anchor = cx
+                        .state
+                        .fs
+                        .resolve_write(&cwd, ".")
+                        .map_err(|err| args_diag::eval_workdir_resolve_failed(&err))?;
                     return Ok(Value::bool(probe_dir_writable(cx, &anchor)));
                 }
                 current = parent;
@@ -884,10 +901,8 @@ impl Drop for ProbeGuard {
 
 /// Pop one operand off the RPN stack with a structured error instead of a
 /// panic on malformed/truncated `CompiledMath` vectors.
-fn pop_stack(stack: &mut Vec<Value>) -> Result<Value> {
-    stack
-        .pop()
-        .ok_or_else(|| anyhow::anyhow!("compiled math stack underflow"))
+fn pop_stack(stack: &mut Vec<Value>) -> DiagnosticResult<Value> {
+    stack.pop().ok_or_else(args_diag::eval_math_stack_underflow)
 }
 
 fn as_f64_value(val: &Value) -> Option<f64> {
@@ -904,7 +919,7 @@ fn as_f64_value(val: &Value) -> Option<f64> {
 /// division, div-by-zero and overflow bail); any `Float` operand promotes
 /// (`Int as f64`) to `Float`; float div-by-zero bails; non-finite results
 /// bail rather than storing; anything else is a Type Error.
-fn apply_arith(op: ArithOp, left: Value, right: Value) -> Result<Value> {
+fn apply_arith(op: ArithOp, left: Value, right: Value) -> DiagnosticResult<Value> {
     if let (Some(a), Some(b)) = (left.as_i64(), right.as_i64()) {
         let v = match op {
             ArithOp::Add => a.checked_add(b),
@@ -912,16 +927,16 @@ fn apply_arith(op: ArithOp, left: Value, right: Value) -> Result<Value> {
             ArithOp::Mul => a.checked_mul(b),
             ArithOp::Div => a.checked_div(b),
         };
-        return v.map(Value::int).ok_or_else(|| {
-            anyhow::anyhow!("arithmetic error: integer overflow or division by zero")
-        });
+        return v
+            .map(Value::int)
+            .ok_or_else(args_diag::eval_arith_overflow_div_zero);
     }
     {
         let (Some(a), Some(b)) = (as_f64_value(&left), as_f64_value(&right)) else {
-            bail!("Type Error: arithmetic requires Int or Float, found {left:?} and {right:?}");
+            return Err(args_diag::eval_arith_needs_numeric(&left, &right));
         };
         if matches!(op, ArithOp::Div) && b == 0.0 {
-            bail!("arithmetic error: float division by zero");
+            return Err(args_diag::eval_float_div_zero());
         }
         let v = match op {
             ArithOp::Add => a + b,
@@ -932,25 +947,25 @@ fn apply_arith(op: ArithOp, left: Value, right: Value) -> Result<Value> {
         if v.is_finite() {
             Ok(Value::float(v))
         } else {
-            bail!("arithmetic error: non-finite float result")
+            Err(args_diag::eval_non_finite_result())
         }
     }
 }
 
-fn apply_neg(val: Value) -> Result<Value> {
+fn apply_neg(val: Value) -> DiagnosticResult<Value> {
     if let Some(n) = val.as_i64() {
         return n
             .checked_neg()
             .map(Value::int)
-            .ok_or_else(|| anyhow::anyhow!("arithmetic error: integer overflow"));
+            .ok_or_else(args_diag::eval_neg_overflow);
     }
     if let Some(f) = val.as_f64() {
         if f.is_finite() {
             return Ok(Value::float(-f));
         }
-        bail!("arithmetic error: non-finite float result");
+        return Err(args_diag::eval_non_finite_result());
     }
-    bail!("Type Error: unary '-' requires Int or Float, found {val:?}")
+    Err(args_diag::eval_neg_needs_numeric(&val))
 }
 
 /// Strict value equality for `SWITCH` matching: the `==` branch of
@@ -972,7 +987,7 @@ pub(crate) fn values_equal(left: &Value, right: &Value) -> bool {
 /// The LET reference documents this with examples. `==`/`!=` are otherwise
 /// strict: cross-type words compare unequal (`"true" == true` is false),
 /// matching `ASSERT_EQ` value equality; ordering on non-numerics bails.
-fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> Result<Value> {
+fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> DiagnosticResult<Value> {
     if let (Some(a), Some(b)) = (as_f64_value(left), as_f64_value(right)) {
         // Both numeric (finite floats; ints always qualify).
         if left.as_i64().is_some() && right.as_i64().is_some() {
@@ -1003,14 +1018,12 @@ fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> Result<Value> {
             let result = match op {
                 CompareOp::Eq => equal,
                 CompareOp::Ne => !equal,
-                _ => bail!("internal error: equality shape"),
+                _ => return Err(args_diag::eval_compare_equality_shape()),
             };
             Ok(Value::bool(result))
         }
         CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => {
-            bail!(
-                "Type Error: ordering comparison requires Int or Float, found {left:?} and {right:?}"
-            );
+            Err(args_diag::eval_ordering_needs_numeric(left, right))
         }
     }
 }
@@ -1023,7 +1036,7 @@ fn trim_ascii(s: &str) -> &str {
 /// through; `Float` only when integral and finite; `Bool` as 1/0;
 /// anything else bails. The explicit converter owns every admission:
 /// callers convert here, never at consumer slots.
-pub(crate) fn int_from_value(val: Value) -> Result<Value> {
+pub(crate) fn int_from_value(val: Value) -> DiagnosticResult<Value> {
     if val.as_i64().is_some() {
         return Ok(val);
     }
@@ -1031,7 +1044,7 @@ pub(crate) fn int_from_value(val: Value) -> Result<Value> {
         if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
             return Ok(Value::int(f as i64));
         }
-        bail!("INT() requires an integer value, found FLOAT ({f:?})");
+        return Err(args_diag::std_int_non_integer_float(f));
     }
     if let Some(b) = val.as_bool() {
         return Ok(Value::int(i64::from(b)));
@@ -1042,19 +1055,19 @@ pub(crate) fn int_from_value(val: Value) -> Result<Value> {
         return clean
             .parse::<i64>()
             .map(Value::int)
-            .map_err(|_| anyhow::anyhow!("INT() requires an integer string, found {s:?}"));
+            .map_err(|_| args_diag::std_int_bad_string(s));
     }
-    bail!("INT() requires an Int, Float, Bool, or String, found {val:?}")
+    Err(args_diag::std_int_bad_type(&val))
 }
 
 /// `FLOAT(x)`: parses `f64` (accepts int strings), bails on non-finite or
 /// non-numeric. Passes `Float`/`Int as f64` through.
-pub(crate) fn float_from_value(val: Value) -> Result<Value> {
+pub(crate) fn float_from_value(val: Value) -> DiagnosticResult<Value> {
     if let Some(f) = val.as_f64() {
         if f.is_finite() {
             return Ok(Value::float(f));
         }
-        bail!("FLOAT() requires a finite value, found FLOAT ({f:?})");
+        return Err(args_diag::std_float_non_finite_float(f));
     }
     if let Some(n) = val.as_i64() {
         return Ok(Value::float(n as f64));
@@ -1063,40 +1076,34 @@ pub(crate) fn float_from_value(val: Value) -> Result<Value> {
         let trimmed = trim_ascii(s);
         let parsed: f64 = trimmed
             .parse()
-            .map_err(|_| anyhow::anyhow!("FLOAT() requires a numeric string, found {s:?}"))?;
+            .map_err(|_| args_diag::std_float_bad_string(s))?;
         if parsed.is_finite() {
             return Ok(Value::float(parsed));
         }
-        bail!("FLOAT() requires a finite value, found {s:?}");
+        return Err(args_diag::std_float_non_finite_string(s));
     }
-    bail!("FLOAT() requires an Int, Float, or String, found {val:?}")
+    Err(args_diag::std_float_bad_type(&val))
 }
 
 /// Value-semantics core of `HAS_KEY()`: report whether a map holds a key
 /// so scripts can branch on optional fields without tripping the strict
 /// missing-key error.
-pub(crate) fn has_key_from_value(map: Value, key: &str) -> Result<Value> {
-    let entries = map.as_map().ok_or_else(|| {
-        anyhow::anyhow!(
-            "HAS_KEY expects a MAP as its first argument, got {}",
-            map.type_name()
-        )
-    })?;
+pub(crate) fn has_key_from_value(map: Value, key: &str) -> DiagnosticResult<Value> {
+    let entries = map
+        .as_map()
+        .ok_or_else(|| args_diag::std_has_key_needs_map(map.type_name()))?;
     Ok(Value::bool(entries.contains_key(key)))
 }
 
 /// Value-semantics core of `MAP_SET()`: insert one key into a map,
 /// failing on duplicates so two entries sharing a key fail the run
 /// instead of silently shadowing each other.
-pub(crate) fn map_set_from_value(map: Value, key: String, value: Value) -> Result<Value> {
-    let entries = map.as_map().ok_or_else(|| {
-        anyhow::anyhow!(
-            "MAP_SET expects a MAP as its first argument, got {}",
-            map.type_name()
-        )
-    })?;
+pub(crate) fn map_set_from_value(map: Value, key: String, value: Value) -> DiagnosticResult<Value> {
+    let entries = map
+        .as_map()
+        .ok_or_else(|| args_diag::std_map_set_needs_map(map.type_name()))?;
     if entries.contains_key(&key) {
-        bail!("MAP_SET duplicate key '{key}'");
+        return Err(args_diag::std_map_set_duplicate(&key));
     }
     let mut next = entries.clone();
     next.insert(key, value);
@@ -1109,26 +1116,18 @@ pub(crate) fn map_set_from_value(map: Value, key: String, value: Value) -> Resul
 /// against `fail_on_duplicate` only and treats anything else as
 /// overwrite, so all production traffic enters through the checked
 /// boundary.
-pub(crate) fn merge_maps_from_value(maps: Value, policy: String) -> Result<Value> {
-    let items = maps.as_list().ok_or_else(|| {
-        anyhow::anyhow!(
-            "MERGE_MAPS expects a LIST of MAPs, got {}",
-            maps.type_name()
-        )
-    })?;
+pub(crate) fn merge_maps_from_value(maps: Value, policy: String) -> DiagnosticResult<Value> {
+    let items = maps
+        .as_list()
+        .ok_or_else(|| args_diag::std_merge_maps_needs_list(maps.type_name()))?;
     let mut merged = std::collections::BTreeMap::new();
     for (index, item) in items.iter().enumerate() {
-        let entries = item.as_map().ok_or_else(|| {
-            anyhow::anyhow!(
-                "MERGE_MAPS element {index} is {}, not MAP",
-                item.type_name()
-            )
-        })?;
+        let entries = item
+            .as_map()
+            .ok_or_else(|| args_diag::std_merge_maps_needs_map(index, item.type_name()))?;
         for (key, value) in entries {
             if merged.contains_key(key) && policy == "fail_on_duplicate" {
-                bail!(
-                    "duplicate values key '{key}'; later files must not repeat it under fail_on_duplicate"
-                );
+                return Err(args_diag::std_merge_maps_duplicate(key));
             }
             merged.insert(key.clone(), value.clone());
         }
@@ -1141,7 +1140,7 @@ pub(crate) fn merge_maps_from_value(maps: Value, policy: String) -> Result<Value
 /// Returns the registered descriptor name, the same string arity and
 /// coercion errors print, so scripts branch on config shapes with the
 /// vocabulary the errors already teach.
-pub(crate) fn type_of_from_value(value: Value) -> Result<Value> {
+pub(crate) fn type_of_from_value(value: Value) -> DiagnosticResult<Value> {
     Ok(Value::string(value.type_name().to_string()))
 }
 
@@ -1151,7 +1150,7 @@ pub(crate) fn type_of_from_value(value: Value) -> Result<Value> {
 /// seed draws the same value on every run. Impure by design either
 /// way: unseeded calls differ, so this never rides the pure
 /// placeholder or RPN paths.
-pub(crate) fn rand_float_from_value(seed: Option<i64>) -> Result<Value> {
+pub(crate) fn rand_float_from_value(seed: Option<i64>) -> DiagnosticResult<Value> {
     use rand::{RngExt, SeedableRng};
     let draw = match seed {
         Some(n) => rand::rngs::StdRng::seed_from_u64(n as u64).random_range(0.0..1.0),
@@ -1163,11 +1162,11 @@ pub(crate) fn rand_float_from_value(seed: Option<i64>) -> Result<Value> {
 /// Value-semantics core of `BASE64_ENCODE()`: standard-alphabet
 /// base64 with padding. Rejects non-STRING input naming the type
 /// instead of rendering a silent empty.
-pub(crate) fn base64_encode_from_value(text: Value) -> Result<Value> {
+pub(crate) fn base64_encode_from_value(text: Value) -> DiagnosticResult<Value> {
     use base64::Engine as _;
-    let input = text.as_str().ok_or_else(|| {
-        anyhow::anyhow!("BASE64_ENCODE expects a STRING, got {}", text.type_name())
-    })?;
+    let input = text
+        .as_str()
+        .ok_or_else(|| args_diag::std_base64_encode_needs_string(text.type_name()))?;
     Ok(Value::string(
         base64::engine::general_purpose::STANDARD.encode(input.as_bytes()),
     ))
@@ -1177,25 +1176,25 @@ pub(crate) fn base64_encode_from_value(text: Value) -> Result<Value> {
 /// base64 back to UTF-8 text. Invalid alphabet characters and
 /// non-UTF-8 payloads fail naming the input instead of rendering a
 /// silent empty.
-pub(crate) fn base64_decode_from_value(text: Value) -> Result<Value> {
+pub(crate) fn base64_decode_from_value(text: Value) -> DiagnosticResult<Value> {
     use base64::Engine as _;
-    let input = text.as_str().ok_or_else(|| {
-        anyhow::anyhow!("BASE64_DECODE expects a STRING, got {}", text.type_name())
-    })?;
+    let input = text
+        .as_str()
+        .ok_or_else(|| args_diag::std_base64_decode_needs_string(text.type_name()))?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(input)
-        .map_err(|e| anyhow::anyhow!("BASE64_DECODE cannot decode {input:?}: {e}"))?;
-    let decoded = String::from_utf8(bytes)
-        .map_err(|_| anyhow::anyhow!("BASE64_DECODE decoded bytes are not UTF-8"))?;
+        .map_err(|err| args_diag::std_base64_decode_failed(input, &err))?;
+    let decoded = String::from_utf8(bytes).map_err(|_| args_diag::std_base64_decode_not_utf8())?;
     Ok(Value::string(decoded))
 }
 
 /// Value-semantics core of `TO_JSON()`: encode a script value as JSON
 /// with one trailing newline. Only template-safe shapes survive;
 /// anything else fails here instead of rendering as a silent empty.
-pub(crate) fn to_json_from_value(value: Value) -> Result<Value> {
+pub(crate) fn to_json_from_value(value: Value) -> DiagnosticResult<Value> {
     let json = value_to_json(&value)?;
-    let mut out = serde_json::to_string(&json).map_err(|e| anyhow::anyhow!("encode JSON: {e}"))?;
+    let mut out =
+        serde_json::to_string(&json).map_err(|err| args_diag::std_to_json_encode_failed(&err))?;
     out.push('\n');
     Ok(Value::string(out))
 }
@@ -1207,7 +1206,7 @@ pub(crate) fn to_json_from_value(value: Value) -> Result<Value> {
 /// Anything else fails naming the type instead of rendering
 /// a silent empty. Shared by `TO_JSON` and any host bridging values
 /// across a JSON boundary (sentinel payloads, wire frames).
-pub fn value_to_json(value: &Value) -> Result<serde_json::Value> {
+pub fn value_to_json(value: &Value) -> DiagnosticResult<serde_json::Value> {
     if let Some(id) = value.as_handle() {
         let mut map = serde_json::Map::new();
         map.insert(
@@ -1220,14 +1219,14 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value> {
         return map
             .iter()
             .map(|(key, item)| value_to_json(item).map(|v| (key.clone(), v)))
-            .collect::<Result<serde_json::Map<_, _>>>()
+            .collect::<DiagnosticResult<serde_json::Map<_, _>>>()
             .map(serde_json::Value::Object);
     }
     if let Some(list) = value.as_list() {
         return list
             .iter()
             .map(value_to_json)
-            .collect::<Result<Vec<_>>>()
+            .collect::<DiagnosticResult<Vec<_>>>()
             .map(serde_json::Value::Array);
     }
     if let Some(s) = value.as_str() {
@@ -1238,16 +1237,13 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value> {
     }
     if let Some(f) = value.as_f64() {
         let number = serde_json::Number::from_f64(f)
-            .ok_or_else(|| anyhow::anyhow!("TO_JSON cannot encode non-finite float {f}"))?;
+            .ok_or_else(|| args_diag::std_to_json_non_finite_float(f))?;
         return Ok(serde_json::Value::Number(number));
     }
     if let Some(b) = value.as_bool() {
         return Ok(serde_json::Value::Bool(b));
     }
-    bail!(
-        "TO_JSON cannot encode {} values; use STRING, INT, FLOAT, BOOL, LIST, or MAP",
-        value.type_name()
-    )
+    Err(args_diag::std_to_json_unencodable(value.type_name()))
 }
 
 /// Placeholder call arguments naming `CONST`s, classified once by
@@ -1257,21 +1253,19 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value> {
 fn resolve_const_call_arg<P: ProcessManager>(
     state: &ExecState<P>,
     src: &str,
-) -> Result<Option<Value>> {
-    use oxdock_parser::template::{
-        TemplateArg, bare_sigil_error, classify_template_arg, qualified_keypath_error,
-    };
+) -> DiagnosticResult<Option<Value>> {
+    use oxdock_parser::template::{TemplateArg, classify_template_arg};
     match classify_template_arg(src) {
         TemplateArg::DollarQualified { alias, name, keys } => {
             if keys.is_empty() {
                 super::import::resolve_const_ref(state, alias, name).map(Some)
             } else {
-                Err(anyhow::anyhow!(qualified_keypath_error()))
+                Err(args_diag::eval_const_arg_keypath())
             }
         }
         TemplateArg::Dollar(_) => Ok(None),
         TemplateArg::ConstRef { .. } | TemplateArg::KeyPath { .. } | TemplateArg::Var(_) => {
-            Err(anyhow::anyhow!(bare_sigil_error(src.trim())))
+            Err(args_diag::eval_const_arg_bare_sigil(src.trim()))
         }
         _ => Ok(None),
     }
@@ -1282,24 +1276,24 @@ fn resolve_const_call_arg<P: ProcessManager>(
 /// so all report the same hard errors on missing keys instead of
 /// rendering empty. Callers fetch the base through
 /// [`load_var_binding`], the single read owner.
-fn descend_value(current: Value, keys: &[String]) -> Result<Value> {
+fn descend_value(current: Value, keys: &[String]) -> DiagnosticResult<Value> {
     let mut current = current;
     for key in keys {
         if let Some(map) = current.as_map() {
             current = map
                 .get(key)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Key '{}' not found in map", key))?;
+                .ok_or_else(|| args_diag::eval_key_not_found(key))?;
         } else if let Some(list) = current.as_list() {
             let idx: usize = key
                 .parse()
-                .map_err(|_| anyhow::anyhow!("Invalid array index '{}'", key))?;
+                .map_err(|_| args_diag::eval_invalid_array_index(key))?;
             current = list
                 .get(idx)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Index {} out of bounds", idx))?;
+                .ok_or_else(|| args_diag::eval_index_out_of_bounds(idx))?;
         } else {
-            bail!("Cannot traverse into scalar value at key '{}'", key);
+            return Err(args_diag::eval_traverse_scalar(key));
         }
     }
     Ok(current)
@@ -1311,7 +1305,7 @@ fn descend_value(current: Value, keys: &[String]) -> Result<Value> {
 fn evaluate_compiled_math<P: ProcessManager>(
     ops: &[MathOp],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     let mut stack: Vec<Value> = Vec::with_capacity(8);
     for op in ops {
         match op {
@@ -1348,10 +1342,12 @@ fn evaluate_compiled_math<P: ProcessManager>(
                 // in `resolve_call_entry`/`gate_call`/`execute_call_entry`
                 // (`rpn_only`), shared with expression and statement
                 // calls. Stateful fns run only when opted into `rpn`.
-                let entry = super::handlers::resolve_call_entry(cx, name.as_str())?;
-                super::handlers::gate_call(cx, name.as_str(), &entry, args.len())?;
-                let val =
-                    super::handlers::execute_call_entry(cx, name.as_str(), entry, args, true)?;
+                let entry = super::handlers::resolve_call_entry(cx, name.as_str())
+                    .map_err(lift_dispatch_error)?;
+                super::handlers::gate_call(cx, name.as_str(), &entry, args.len())
+                    .map_err(lift_dispatch_error)?;
+                let val = super::handlers::execute_call_entry(cx, name.as_str(), entry, args, true)
+                    .map_err(lift_dispatch_error)?;
                 stack.push(val);
             }
             MathOp::Inspect { name } => {
@@ -1415,7 +1411,7 @@ fn evaluate_compiled_math<P: ProcessManager>(
         }
     }
     if stack.len() != 1 {
-        bail!("compiled math left {} values on the stack", stack.len());
+        return Err(args_diag::eval_math_stack_len(stack.len()));
     }
     pop_stack(&mut stack)
 }
@@ -1425,12 +1421,10 @@ fn evaluate_compiled_math<P: ProcessManager>(
 pub(crate) fn glob_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
-    let pattern_val = args
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("GLOB requires a pattern argument"))?;
+) -> DiagnosticResult<Value> {
+    let pattern_val = args.first().ok_or_else(args_diag::std_glob_needs_arg)?;
     let Some(raw_pattern) = pattern_val.as_str() else {
-        bail!("GLOB pattern argument must evaluate to a string");
+        return Err(args_diag::std_glob_needs_string());
     };
     let raw_pattern = raw_pattern.to_string();
 
@@ -1448,11 +1442,16 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
     // pending snapshot materializes here (a snapshot read), while local
     // roots resolve with zero I/O. The listing below then runs on concrete
     // paths in both cases.
-    let _ = cx.state.fs.resolve_read(&cx.state.cwd, ".")?;
+    let _ = cx
+        .state
+        .fs
+        .resolve_read(&cx.state.cwd, ".")
+        .map_err(|err| args_diag::std_glob_resolve_failed(&err))?;
     let root = cx.state.fs.root().clone();
     let root_path = root.as_path().to_path_buf();
     let mut entries: Vec<Value> = root
-        .glob_paths(&raw_pattern)?
+        .glob_paths(&raw_pattern)
+        .map_err(|err| args_diag::std_glob_list_failed(&err))?
         .into_iter()
         .filter_map(|p| {
             p.strip_prefix(&root_path)
@@ -1469,26 +1468,26 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
 pub(crate) fn load_toml_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     let path_val = args
         .first()
-        .ok_or_else(|| anyhow::anyhow!("LOAD_TOML requires a path argument"))?;
+        .ok_or_else(args_diag::std_load_toml_needs_arg)?;
     let Some(path_str) = path_val.as_str() else {
-        bail!("LOAD_TOML path argument must evaluate to a string");
+        return Err(args_diag::std_load_toml_needs_string());
     };
     let path_str = path_str.to_string();
     let target = cx
         .state
         .fs
         .resolve_read(&cx.state.cwd, &path_str)
-        .map_err(|e| anyhow::anyhow!("failed to resolve TOML path '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::std_load_toml_resolve_failed(&path_str, &err))?;
     let content = cx
         .state
         .fs
         .read_file(&target)
-        .map_err(|e| anyhow::anyhow!("failed to read TOML file '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::std_load_toml_read_failed(&path_str, &err))?;
     let content_str = std::str::from_utf8(&content)
-        .map_err(|e| anyhow::anyhow!("invalid UTF-8 in TOML file '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::std_load_toml_not_utf8(&path_str, &err))?;
     load_toml_value(content_str)
 }
 
@@ -1496,50 +1495,50 @@ pub(crate) fn load_toml_from_value<P: ProcessManager>(
 pub(crate) fn load_json_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     let path_val = args
         .first()
-        .ok_or_else(|| anyhow::anyhow!("LOAD_JSON requires a path argument"))?;
+        .ok_or_else(args_diag::std_load_json_needs_arg)?;
     let Some(path_str) = path_val.as_str() else {
-        bail!("LOAD_JSON path argument must evaluate to a string");
+        return Err(args_diag::std_load_json_needs_string());
     };
     let path_str = path_str.to_string();
     let target = cx
         .state
         .fs
         .resolve_read(&cx.state.cwd, &path_str)
-        .map_err(|e| anyhow::anyhow!("failed to resolve JSON path '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::std_load_json_resolve_failed(&path_str, &err))?;
     let content = cx
         .state
         .fs
         .read_file(&target)
-        .map_err(|e| anyhow::anyhow!("failed to read JSON file '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::std_load_json_read_failed(&path_str, &err))?;
     let content_str = std::str::from_utf8(&content)
-        .map_err(|e| anyhow::anyhow!("invalid UTF-8 in JSON file '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::std_load_json_not_utf8(&path_str, &err))?;
     load_json_value(content_str)
 }
 
 /// Parse TOML content into a DSL `Value`.
-pub fn load_toml_value(content: &str) -> Result<Value> {
+pub fn load_toml_value(content: &str) -> DiagnosticResult<Value> {
     let json_val: serde_json::Value =
-        toml::from_str(content).map_err(|e| anyhow::anyhow!("TOML parse error: {}", e))?;
+        toml::from_str(content).map_err(|err| args_diag::std_toml_parse_failed(&err))?;
     Ok(json_to_value(json_val))
 }
 
 /// Value-semantics core of `PARSE_TOML()`: parse TOML text already held
 /// in memory, using the same conversion as file loading.
-pub(crate) fn parse_toml_from_value(value: Value) -> Result<Value> {
+pub(crate) fn parse_toml_from_value(value: Value) -> DiagnosticResult<Value> {
     let Some(text) = value.as_str() else {
-        bail!("PARSE_TOML expects a STRING, got {}", value.type_name());
+        return Err(args_diag::std_parse_toml_needs_string(value.type_name()));
     };
     load_toml_value(text)
 }
 
 /// Parse JSON content into a DSL `Value`.
-pub fn load_json_value(content: &str) -> Result<Value> {
+pub fn load_json_value(content: &str) -> DiagnosticResult<Value> {
     let stripped = strip_json_comments(content);
     let json_val: serde_json::Value =
-        serde_json::from_str(&stripped).map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
+        serde_json::from_str(&stripped).map_err(|err| args_diag::std_json_parse_failed(&err))?;
     Ok(json_to_value(json_val))
 }
 
@@ -1615,9 +1614,9 @@ pub fn strip_json_comments(content: &str) -> String {
 
 /// Value-semantics core of `PARSE_JSON()`: parse JSON text already held
 /// in memory, using the same conversion as file loading.
-pub(crate) fn parse_json_from_value(value: Value) -> Result<Value> {
+pub(crate) fn parse_json_from_value(value: Value) -> DiagnosticResult<Value> {
     let Some(text) = value.as_str() else {
-        bail!("PARSE_JSON expects a STRING, got {}", value.type_name());
+        return Err(args_diag::std_parse_json_needs_string(value.type_name()));
     };
     load_json_value(text)
 }
@@ -1628,22 +1627,22 @@ pub(crate) fn parse_json_from_value(value: Value) -> Result<Value> {
 /// form and rejects anything else naming the shape. Shape errors
 /// (non-object, missing key, surplus keys, zero id) fail here;
 /// unknown ids fail later at task lookup.
-pub fn json_to_value_typed(tag: Option<&TypeTag>, v: serde_json::Value) -> Result<Value> {
+pub fn json_to_value_typed(tag: Option<&TypeTag>, v: serde_json::Value) -> DiagnosticResult<Value> {
     if !matches!(tag, Some(TypeTag::Handle)) {
         return Ok(json_to_value(v));
     }
     let map = match v {
         serde_json::Value::Object(map) => map,
-        other => bail!("HANDLE argument must be an object like {{\"task_id\": 7}}, got {other}"),
+        other => return Err(args_diag::json_handle_needs_object(&other)),
     };
     if map.len() != 1 || !map.contains_key("task_id") {
-        bail!("HANDLE argument must be exactly {{\"task_id\": N}} with no other keys");
+        return Err(args_diag::json_handle_exact_shape());
     }
     let id = match map["task_id"] {
         serde_json::Value::Number(ref n) => n.as_u64().filter(|id| *id >= 1),
         _ => None,
     }
-    .ok_or_else(|| anyhow::anyhow!("HANDLE argument `task_id` must be a positive integer"))?;
+    .ok_or_else(args_diag::json_handle_task_id_positive)?;
     Ok(Value::handle(id))
 }
 
@@ -1651,7 +1650,10 @@ pub fn json_to_value_typed(tag: Option<&TypeTag>, v: serde_json::Value) -> Resul
 /// non-`HANDLE` tags behave exactly like [`value_to_json`]; a
 /// `Some(TypeTag::Handle)` tag projects the id as `{"task_id": N}`
 /// and fails naming the type for anything that is not a handle.
-pub fn value_to_json_typed(tag: Option<&TypeTag>, value: &Value) -> Result<serde_json::Value> {
+pub fn value_to_json_typed(
+    tag: Option<&TypeTag>,
+    value: &Value,
+) -> DiagnosticResult<serde_json::Value> {
     if !matches!(tag, Some(TypeTag::Handle)) {
         return value_to_json(value);
     }
@@ -1664,10 +1666,9 @@ pub fn value_to_json_typed(tag: Option<&TypeTag>, value: &Value) -> Result<serde
             );
             Ok(serde_json::Value::Object(map))
         }
-        None => bail!(
-            "cannot encode {} as HANDLE; expected a task handle",
-            value.type_name()
-        ),
+        None => Err(args_diag::json_handle_encode_needs_handle(
+            value.type_name(),
+        )),
     }
 }
 
@@ -1782,10 +1783,9 @@ pub(crate) fn expand_string<P: ProcessManager>(
     input: &str,
     env: &std::collections::HashMap<String, String>,
     state: &ExecState<P>,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     use oxdock_parser::template::{
-        PlaceholderKey, TemplateSegment, TemplateSegments, bare_sigil_error,
-        classify_placeholder_key, qualified_keypath_error,
+        PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
     };
     let mut output = String::with_capacity(input.len());
     // One diagnostic for every unresolvable bare key: missing keys
@@ -1793,29 +1793,22 @@ pub(crate) fn expand_string<P: ProcessManager>(
     // a miss suggests the sigil form (or the env form when the host
     // bridges that name).
     let missing_key = |key: &str| {
-        let mut msg = format!("undefined script variable: '{key}'");
-        if env.contains_key(key) || state.get_env(key).is_some() {
-            msg.push_str(&format!(
-                "; did you mean 'env:{key}' (environment variable)?"
-            ));
-        } else {
-            msg.push_str(&format!("; did you mean '${key}'?"));
-        }
-        anyhow::anyhow!("{msg}")
+        let env_hint = env.contains_key(key) || state.get_env(key).is_some();
+        args_diag::eval_template_missing_key(key, env_hint)
     };
     for segment in TemplateSegments::new(input) {
         match segment {
             TemplateSegment::Text(text) => push_escaped_text(&mut output, text),
             TemplateSegment::Placeholder { key, .. } => match classify_placeholder_key(key) {
                 PlaceholderKey::Empty => {
-                    bail!("empty template placeholder");
+                    return Err(args_diag::eval_template_empty_placeholder());
                 }
                 PlaceholderKey::DollarQualified { alias, name, keys } => {
                     if keys.is_empty() {
                         let value = super::import::resolve_const_ref(state, alias, name)?;
                         output.push_str(&format_value_for_string(&value)?);
                     } else {
-                        return Err(anyhow::anyhow!(qualified_keypath_error()));
+                        return Err(args_diag::eval_template_keypath());
                     }
                 }
                 PlaceholderKey::Dollar(rest) => {
@@ -1824,7 +1817,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     // templates and code agree on every error. Bare
                     // $var never reads the environment; use {{ env:KEY }}.
                     let Some(parts) = oxdock_parser::template::parse_var_path(rest) else {
-                        bail!("invalid placeholder key: '${rest}'");
+                        return Err(args_diag::eval_template_invalid_key(rest));
                     };
                     let (base, segs) = parts.split_first().expect("split always yields one");
                     let base_value = load_var_binding(state, base)?;
@@ -1846,7 +1839,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     // step runs.
                     let env_key = env_key.trim();
                     if env_key.is_empty() {
-                        bail!("undefined environment variable: ''");
+                        return Err(args_diag::eval_template_empty_env());
                     }
                     let val = env
                         .get(env_key)
@@ -1865,7 +1858,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                 PlaceholderKey::ScriptEnv(env_key) => {
                     let env_key = env_key.trim();
                     if env_key.is_empty() {
-                        bail!("undefined environment variable: ''");
+                        return Err(args_diag::eval_template_empty_env());
                     }
                     if let Some(v) = env.get(env_key).map(String::as_str) {
                         output.push_str(v);
@@ -1876,7 +1869,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                 PlaceholderKey::ConstRef { .. }
                 | PlaceholderKey::KeyPath { .. }
                 | PlaceholderKey::Var(_) => {
-                    return Err(anyhow::anyhow!(bare_sigil_error(key.trim())));
+                    return Err(args_diag::eval_template_bare_sigil(key.trim()));
                 }
                 PlaceholderKey::Bare(key) => {
                     return Err(missing_key(key));
@@ -1920,9 +1913,9 @@ pub(crate) fn expand_string<P: ProcessManager>(
                                 module,
                                 call.name,
                             ) {
-                                bail!("{text}");
+                                return Err(args_diag::eval_template_placeholder_miss(&text));
                             }
-                            return Err(err);
+                            return Err(lift_dispatch_error(err));
                         }
                     };
                     output.push_str(&format_value_for_string(&result)?);
@@ -1948,7 +1941,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
 pub(crate) fn expand_dsl_vars<P: ProcessManager>(
     input: &str,
     state: &ExecState<P>,
-) -> anyhow::Result<String> {
+) -> DiagnosticResult<String> {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
@@ -2020,7 +2013,7 @@ fn text_pattern_cache() -> &'static std::sync::Mutex<std::collections::HashMap<S
 /// linear-time matching and no backtracking. Compiled successes cache
 /// by pattern text so repeated calls skip reconstruction; a poisoned
 /// cache degrades to recompiling instead of failing.
-pub(crate) fn text_compile_pattern(func: &str, pattern: &str) -> Result<regex::Regex> {
+pub(crate) fn text_compile_pattern(func: &str, pattern: &str) -> DiagnosticResult<regex::Regex> {
     if let Some(hit) = text_pattern_cache()
         .lock()
         .map(|guard| guard.get(pattern).cloned())
@@ -2031,7 +2024,7 @@ pub(crate) fn text_compile_pattern(func: &str, pattern: &str) -> Result<regex::R
     let re = regex::RegexBuilder::new(pattern)
         .size_limit(TEXT_REGEX_SIZE_LIMIT)
         .build()
-        .map_err(|e| anyhow::anyhow!("{func} invalid pattern {pattern:?}: {e}"))?;
+        .map_err(|err| args_diag::std_text_invalid_pattern(func, pattern, &err))?;
     if let Ok(mut guard) = text_pattern_cache().lock() {
         if guard.len() >= TEXT_PATTERN_CACHE_MAX {
             guard.clear();
@@ -2085,9 +2078,9 @@ pub(crate) fn text_replace_literal_str(
     from: &str,
     to: &str,
     func: &str,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     if from.is_empty() {
-        bail!("{func} needs a non-empty search string");
+        return Err(args_diag::std_text_needs_search(func));
     }
     Ok(s.replace(from, to))
 }
@@ -2099,7 +2092,7 @@ pub(crate) fn text_replace_regex_str(
     pattern: &str,
     replacement: &str,
     func: &str,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     let re = text_compile_pattern(func, pattern)?;
     Ok(re.replace_all(s, replacement).into_owned())
 }
@@ -2107,9 +2100,9 @@ pub(crate) fn text_replace_regex_str(
 /// Count non-overlapping literal occurrences, failing closed on an
 /// empty needle: `str` matching with an empty needle binds every
 /// character boundary, which is never the caller's intent.
-pub(crate) fn text_count_str(s: &str, needle: &str, func: &str) -> Result<i64> {
+pub(crate) fn text_count_str(s: &str, needle: &str, func: &str) -> DiagnosticResult<i64> {
     if needle.is_empty() {
-        bail!("{func} needs a non-empty needle");
+        return Err(args_diag::std_text_needs_needle(func));
     }
     Ok(s.match_indices(needle).count() as i64)
 }
@@ -2125,7 +2118,7 @@ pub(crate) fn text_grep_str(
     pattern: &str,
     invert: bool,
     func: &str,
-) -> Result<Vec<String>> {
+) -> DiagnosticResult<Vec<String>> {
     let re = text_compile_pattern(func, pattern)?;
     Ok(text_lines_str(s)
         .into_iter()
@@ -2136,7 +2129,7 @@ pub(crate) fn text_grep_str(
 /// Count lines matching a pattern: the `grep -c` shape over
 /// [`text_grep_str`], so one line counts once no matter how many times
 /// it hits.
-pub(crate) fn text_count_matches_str(s: &str, pattern: &str, func: &str) -> Result<i64> {
+pub(crate) fn text_count_matches_str(s: &str, pattern: &str, func: &str) -> DiagnosticResult<i64> {
     Ok(text_grep_str(s, pattern, false, func)?.len() as i64)
 }
 
@@ -2155,12 +2148,17 @@ pub(crate) fn text_invert_flag(options: &std::collections::BTreeMap<String, Valu
 /// like `sed -n 'A,Bp'`: a start past the last line binds an empty
 /// list, and an end past it stops at the last line. `from < 1` or
 /// `from > to` fails closed, since no line reading satisfies it.
-pub(crate) fn text_lines_range_str(s: &str, from: i64, to: i64, func: &str) -> Result<Vec<String>> {
+pub(crate) fn text_lines_range_str(
+    s: &str,
+    from: i64,
+    to: i64,
+    func: &str,
+) -> DiagnosticResult<Vec<String>> {
     if from < 1 {
-        bail!("{func} needs a 1-based start line, got {from}");
+        return Err(args_diag::std_text_needs_one_based_start(func, from));
     }
     if from > to {
-        bail!("{func} needs start <= end, got {from}..={to}");
+        return Err(args_diag::std_text_needs_ordered_range(func, from, to));
     }
     let lines = text_lines_str(s);
     let start = (from - 1) as usize;
@@ -2174,7 +2172,11 @@ pub(crate) fn text_lines_range_str(s: &str, from: i64, to: i64, func: &str) -> R
 /// Capture groups for the first match: index 0 is the full match,
 /// following indexes are groups in order. Non-participating groups
 /// bind empty so indexes stay stable. No match binds an empty list.
-pub(crate) fn text_extract_str(s: &str, pattern: &str, func: &str) -> Result<Vec<String>> {
+pub(crate) fn text_extract_str(
+    s: &str,
+    pattern: &str,
+    func: &str,
+) -> DiagnosticResult<Vec<String>> {
     let re = text_compile_pattern(func, pattern)?;
     let Some(caps) = re.captures(s) else {
         return Ok(Vec::new());
@@ -2210,14 +2212,16 @@ impl TextPump {
     /// Eager string application with the exact semantics the pump
     /// produces chunk by chunk, so string and pipe inputs agree.
     /// Shared by the stateful body and the template projection.
-    pub(crate) fn apply_str(&self, s: &str, func: &str) -> Result<String> {
+    pub(crate) fn apply_str(&self, s: &str, func: &str) -> DiagnosticResult<String> {
         match self {
             TextPump::Trim => Ok(text_trim_str(s)),
             TextPump::TrimPrefix(prefix) => Ok(text_trim_prefix_str(s, prefix)),
             TextPump::TrimSuffix(suffix) => Ok(text_trim_suffix_str(s, suffix)),
             TextPump::ToUpper => Ok(s.to_uppercase()),
             TextPump::ToLower => Ok(s.to_lowercase()),
-            TextPump::ReplaceLiteral { from, to } => text_replace_literal_str(s, from, to, func),
+            TextPump::ReplaceLiteral { from, to } => {
+                Ok(text_replace_literal_str(s, from, to, func)?)
+            }
         }
     }
 }
@@ -2226,19 +2230,11 @@ impl TextPump {
 /// expansion: strings apply eagerly through the shared pump semantics,
 /// pipes bail naming the step IO they need (placeholder evaluation
 /// has no step context to pump through).
-pub(crate) fn mirror_string(func: &str, value: &Value, pump: TextPump) -> Result<Value> {
+pub(crate) fn mirror_string(func: &str, value: &Value, pump: TextPump) -> DiagnosticResult<Value> {
     if let Some(s) = value.as_str() {
         return pump.apply_str(s, func).map(Value::string);
     }
-    Err(pipe_needs_step_io(func))
-}
-
-/// Refusal for pipe words reaching a template projection: one message
-/// for every mirror op, so the boundary cannot drift per function.
-pub(crate) fn pipe_needs_step_io(func: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "{func} on PIPE input needs step IO, unavailable to placeholder calls; pass a STRING there"
-    )
+    Err(args_diag::std_pipe_needs_step_io(func))
 }
 
 /// Mirror a `STRING|PIPE` input through a transform: strings apply
@@ -2251,12 +2247,12 @@ pub(crate) fn mirror_stream<P: ProcessManager>(
     func: &str,
     value: &Value,
     pump: TextPump,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     if let Some(s) = value.as_str() {
         return pump.apply_str(s, func).map(Value::string);
     }
     if value.as_pipe_handle().is_none() {
-        return Err(type_mismatch(
+        return Err(args_diag::coerce_type_mismatch(
             &format!("{func} text position"),
             &oxdock_parser::union_tag!(String, Pipe),
             value,
@@ -2265,21 +2261,21 @@ pub(crate) fn mirror_stream<P: ProcessManager>(
     if let TextPump::ReplaceLiteral { from, .. } = &pump
         && from.is_empty()
     {
-        bail!("{func} needs a non-empty search string");
+        return Err(args_diag::std_text_needs_search(func));
     }
     let reader = cx
         .pipe_reader(value)
-        .map_err(|e| anyhow::anyhow!("{func} cannot read PIPE input: {e:#}"))?;
+        .map_err(|err| args_diag::std_pipe_read_failed(func, &anyhow::Error::new(err)))?;
     let output = cx.new_pipe();
     let writer = cx
         .pipe_writer(&output)
-        .map_err(|e| anyhow::anyhow!("{func} cannot create PIPE output: {e:#}"))?;
+        .map_err(|err| args_diag::std_pipe_create_failed(func, &anyhow::Error::new(err)))?;
     let cancelled = cx.cancel_token();
     let thread_name = format!("oxdock-text-{func}-pump");
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || run_text_pump(reader, writer, pump, &cancelled))
-        .map_err(|e| anyhow::anyhow!("{func} cannot spawn pump thread: {e}"))?;
+        .map_err(|err| args_diag::std_pipe_spawn_failed(func, &err))?;
     Ok(output)
 }
 
@@ -2440,7 +2436,7 @@ impl TextPumpState {
         match self {
             Self::Case { upper, carry } => {
                 let text = std::str::from_utf8(carry)
-                    .map_err(|_| anyhow::anyhow!("text pump input is not valid UTF-8"))?;
+                    .map_err(|_| anyhow::Error::new(args_diag::std_pump_not_utf8()))?;
                 let mapped = if *upper {
                     text.to_uppercase()
                 } else {
@@ -2461,7 +2457,7 @@ impl TextPumpState {
                 // its own trailing run.
                 let _ = held;
                 let text = std::str::from_utf8(carry)
-                    .map_err(|_| anyhow::anyhow!("text pump input is not valid UTF-8"))?;
+                    .map_err(|_| anyhow::Error::new(args_diag::std_pump_not_utf8()))?;
                 let head = text.trim_end_matches(char::is_whitespace);
                 Self::write(writer, head.as_bytes())
             }
@@ -2498,13 +2494,13 @@ impl TextPumpState {
         }
         writer
             .lock()
-            .map_err(|_| anyhow::anyhow!("text pump writer lock poisoned"))?
+            .map_err(|_| anyhow::Error::new(args_diag::std_pump_writer_lock_poisoned()))?
             .write_all(bytes)
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::BrokenPipe {
                     anyhow::Error::new(PumpDownstreamClosed)
                 } else {
-                    anyhow::anyhow!("text pump write failed: {e}")
+                    anyhow::Error::new(args_diag::std_pump_write_failed(&e))
                 }
             })?;
         Ok(())
@@ -2515,7 +2511,7 @@ impl TextPumpState {
     fn drain_into(held: &SpillBuffer, writer: &SharedOutput) -> Result<()> {
         let bytes = held
             .drain_bytes()
-            .map_err(|e| anyhow::anyhow!("text pump spill drain failed: {e}"))?;
+            .map_err(|e| anyhow::Error::new(args_diag::std_pump_spill_drain_failed(&e)))?;
         Self::write(writer, &bytes)
     }
 
@@ -2537,7 +2533,7 @@ impl TextPumpState {
         staged.extend_from_slice(data);
         let (head, tail) = Self::head_tail(&staged);
         let text = std::str::from_utf8(head)
-            .map_err(|_| anyhow::anyhow!("text pump input is not valid UTF-8"))?;
+            .map_err(|_| anyhow::Error::new(args_diag::std_pump_not_utf8()))?;
         let mapped = if upper {
             text.to_uppercase()
         } else {
@@ -2559,7 +2555,7 @@ impl TextPumpState {
         staged.extend_from_slice(data);
         let (head, tail) = Self::head_tail(&staged);
         let mut text = std::str::from_utf8(head)
-            .map_err(|_| anyhow::anyhow!("text pump input is not valid UTF-8"))?;
+            .map_err(|_| anyhow::Error::new(args_diag::std_pump_not_utf8()))?;
         if !*leading {
             text = text.trim_start_matches(char::is_whitespace);
             if text.is_empty() {
@@ -2575,7 +2571,7 @@ impl TextPumpState {
             Self::write(writer, content.as_bytes())?;
         }
         held.push_bytes(ws.as_bytes())
-            .map_err(|e| anyhow::anyhow!("text pump spill failed: {e}"))?;
+            .map_err(|e| anyhow::Error::new(args_diag::std_pump_spill_failed(&e)))?;
         *carry = tail.to_vec();
         Ok(())
     }
@@ -2699,9 +2695,9 @@ pub(crate) fn read_pipe_eager<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     func: &str,
     value: &Value,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     if value.as_pipe_handle().is_none() {
-        return Err(type_mismatch(
+        return Err(args_diag::coerce_type_mismatch(
             &format!("{func} text position"),
             &oxdock_parser::union_tag!(String, Pipe),
             value,
@@ -2709,15 +2705,15 @@ pub(crate) fn read_pipe_eager<P: ProcessManager>(
     }
     let reader = cx
         .pipe_reader(value)
-        .map_err(|e| anyhow::anyhow!("{func} cannot read PIPE input: {e:#}"))?;
+        .map_err(|err| args_diag::std_pipe_read_failed(func, &anyhow::Error::new(err)))?;
     let spill = SpillBuffer::new();
     let mut carry = Vec::new();
     let mut chunk = [0u8; super::io::CHUNK_SIZE];
     loop {
         let n = reader.lock().map(|mut guard| guard.read(&mut chunk));
         let n = n
-            .map_err(|_| anyhow::anyhow!("{func} pipe reader lock poisoned"))?
-            .map_err(|e| anyhow::anyhow!("{func} cannot read PIPE input: {e}"))?;
+            .map_err(|_| args_diag::std_pipe_reader_lock_poisoned(func))?
+            .map_err(|err| args_diag::std_pipe_chunk_read_failed(func, &err))?;
         if n == 0 {
             break;
         }
@@ -2726,18 +2722,18 @@ pub(crate) fn read_pipe_eager<P: ProcessManager>(
         let hold = trailing_incomplete_len(&staged);
         let valid_len = staged.len() - hold;
         std::str::from_utf8(&staged[..valid_len])
-            .map_err(|_| anyhow::anyhow!("{func} PIPE input is not valid UTF-8"))?;
+            .map_err(|_| args_diag::std_pipe_input_not_utf8(func))?;
         spill
             .push_bytes(&staged[..valid_len])
-            .map_err(|e| anyhow::anyhow!("{func} PIPE input exceeds the spill backlog: {e}"))?;
+            .map_err(|err| args_diag::std_pipe_spill_failed(func, &err))?;
         carry = staged[valid_len..].to_vec();
     }
     spill
         .push_bytes(&carry)
-        .map_err(|e| anyhow::anyhow!("{func} PIPE input exceeds the spill backlog: {e}"))?;
+        .map_err(|err| args_diag::std_pipe_spill_failed(func, &err))?;
     spill
         .drain_string_strict()
-        .map_err(|_| anyhow::anyhow!("{func} PIPE input is not valid UTF-8"))
+        .map_err(|_| args_diag::std_pipe_input_not_utf8(func))
 }
 
 /// Completed pipe for eager pipe-out: mints a task-owned handle, writes
@@ -2747,21 +2743,21 @@ pub(crate) fn write_completed_pipe<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     func: &str,
     text: String,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     let pipe = cx.new_pipe();
     let writer = cx
         .pipe_writer(&pipe)
-        .map_err(|e| anyhow::anyhow!("{func} cannot create PIPE output: {e:#}"))?;
+        .map_err(|err| args_diag::std_pipe_create_failed(func, &anyhow::Error::new(err)))?;
     {
         let mut guard = writer
             .lock()
-            .map_err(|_| anyhow::anyhow!("{func} pipe writer lock poisoned"))?;
+            .map_err(|_| args_diag::std_pipe_writer_lock_poisoned(func))?;
         guard
             .write_all(text.as_bytes())
-            .map_err(|e| anyhow::anyhow!("{func} cannot write PIPE output: {e}"))?;
+            .map_err(|err| args_diag::std_pipe_write_failed(func, &err))?;
         guard
             .flush()
-            .map_err(|e| anyhow::anyhow!("{func} cannot write PIPE output: {e}"))?;
+            .map_err(|err| args_diag::std_pipe_write_failed(func, &err))?;
     }
     Ok(pipe)
 }
@@ -2774,6 +2770,19 @@ pub(crate) fn text_list_value(items: Vec<String>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lift_dispatch_error_keeps_keyed_diagnostics() {
+        let keyed = args_diag::eval_undefined_var("x");
+        let key = keyed.key().to_string();
+        let text = keyed.message().to_string();
+        let lifted = lift_dispatch_error(anyhow::Error::new(keyed));
+        assert_eq!(lifted.key(), key);
+        assert_eq!(lifted.message(), text);
+        let fallback = lift_dispatch_error(anyhow::anyhow!("boom"));
+        assert_eq!(fallback.key(), "dsl.eval.dispatch_failed");
+        assert_eq!(fallback.message(), "boom");
+    }
 
     #[test]
     fn pop_stack_underflow_returns_error() {

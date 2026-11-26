@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use oxdock_fs::{
     GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs, discover_workspace_root,
     env as oxdock_env, init_temp_gc,
@@ -25,68 +25,15 @@ use std::collections::BTreeMap;
 
 mod endpoints;
 pub use endpoints::EndpointFlags;
+mod errors;
+pub use errors::{
+    endpoint_duplicate_inner, endpoint_duplicate_outer, feature_required, offline_conflict, usage,
+};
 #[cfg(feature = "mcp")]
 mod mcp;
 
-// CLI usage bodies, one file per Cargo feature variant: statically
-// compiled assets cannot branch on Cargo features, so the script
-// renders both variants (version line included, through inherited
-// Cargo metadata) and Rust `#[cfg]` picks the live one.
-use oxdock_macros::oxdock_embed;
-oxdock_embed! {
-    name: UsageAssets,
-    script: {
-        INHERIT_ENV [CARGO_PKG_VERSION, CARGO_PKG_DESCRIPTION]
-        FUNC EMIT_BODY($is_net: BOOL): VOID {
-            LET $net_flags: STRING = """
-              --offline          open no sockets (endpoint flags require the `net` feature)
-            """
-
-            LET $tail: STRING = """
-            Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net).
-            """
-
-            IF $is_net {
-                $net_flags = """
-                  --listen <addr>    expose a logical service port ([host:]port, repeatable)
-                  -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)
-                  --offline          open no sockets (conflicts with --listen/-p)
-                  --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)
-                """
-                $tail = "Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces."
-            }
-
-            ECHO """
-            oxdock {{ env:CARGO_PKG_VERSION }} — {{ env:CARGO_PKG_DESCRIPTION }}
-
-            Usage: oxdock [OPTIONS] [--] [SCRIPT] [-- script-args...]
-              SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
-              --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
-              --shell            run the script, then drop into an interactive shell (requires a TTY)
-              --dry-run          print the transitive import closure (file:line CMD) instead of running
-              --mcp              serve EXPORTed FUNCs as MCP tools over stdio (requires the `mcp` feature)
-            {{ $net_flags }}
-              --help, -h         print this help and exit
-              --version, -V, -v   print the version and exit
-
-            With no script given, reads the script from stdin (must be piped unless `--shell`).
-            Everything after SCRIPT is a verbatim script arg (read via `STD::ARGV()`); one leading `--` there is a separator and dropped, so `--dry-run` after the script stays data.
-            {{ $tail }}
-            """
-        }
-
-        LET $p: PIPE
-        WITH_IO [stdout=$p] {
-            EMIT_BODY(true)
-        }
-        WITH_IO [stdin=$p] WRITE dist/usage-net.txt
-        WITH_IO [stdout=$p] {
-            EMIT_BODY(false)
-        }
-        WITH_IO [stdin=$p] WRITE dist/usage-lean.txt
-    },
-    out_dir: "usage-prebuilt",
-}
+// CLI usage bodies live in [`errors`]: `usage()` is user-facing CLI
+// text, so it is owned alongside the `cli.*` error templates.
 #[cfg(feature = "net")]
 pub use endpoints::build_registry;
 #[cfg(feature = "net")]
@@ -200,7 +147,90 @@ fn run_cli_steps(
 /// extra modules this is exactly `parse_script`, so base-build behavior
 /// never changes.
 fn parse_cli_script(script: &str) -> Result<Vec<Step>> {
-    parse_script_with_modules(script, cli_module_table())
+    parse_script_with_modules(script, cli_module_table()).map_err(|e| {
+        if let Some(unlinked) = unlinked_module_error(script) {
+            return unlinked;
+        }
+        e
+    })
+}
+
+/// Modules the CLI knows but this build did not link, with the Cargo
+/// feature that would link each. Empty in full-feature builds, so the
+/// scan below never fires there.
+fn unlinked_modules() -> Vec<(&'static str, &'static str)> {
+    let modules: &[(&'static str, &'static str)] = &[
+        #[cfg(not(feature = "net"))]
+        ("NET", "net"),
+        #[cfg(not(feature = "ssh"))]
+        ("SSH", "ssh"),
+    ];
+    modules.to_vec()
+}
+
+/// Known-but-unlinked module error when the script actually imports one.
+/// Matched on the lexed token stream, not raw text: comments lex as
+/// `Comment` and quoted paths as `Str`, so `// IMPORT [NET]` or
+/// `ECHO "IMPORT [NET]"` alongside an unrelated syntax error keeps its
+/// genuine parse error. Returns `None` on lex failure (broken below the
+/// token level: the genuine error rides through), in full-feature
+/// builds (nothing is unlinked), or when no unlinked module is
+/// imported (genuine parse error rides through unchanged).
+fn unlinked_module_error(script: &str) -> Option<anyhow::Error> {
+    let unlinked = unlinked_modules();
+    if unlinked.is_empty() {
+        return None;
+    }
+    let toks = oxdock_parser::lex_str(script).ok()?;
+    for (module, feature) in unlinked {
+        if imports_module(&toks, module) {
+            return Some(errors::module_unlinked(module, feature));
+        }
+    }
+    None
+}
+
+/// True when a token stream holds `IMPORT [...]` naming `module` as a
+/// bare word. Only `IMPORT` immediately followed by a bracket group
+/// counts (newlines/comments between are skipped); quoted file paths
+/// lex as `Str`, never `Word`, so they never match. Recurses into
+/// brace/paren groups for block-nested imports.
+fn imports_module(toks: &[oxdock_parser::Tok], module: &str) -> bool {
+    use oxdock_parser::{GroupDelim, TokKind};
+    let mut i = 0;
+    while i < toks.len() {
+        match &toks[i].kind {
+            TokKind::Word(w) if w == "IMPORT" => {
+                let mut j = i + 1;
+                while j < toks.len()
+                    && matches!(
+                        toks[j].kind,
+                        TokKind::Newline | TokKind::Comment(_) | TokKind::Semicolon
+                    )
+                {
+                    j += 1;
+                }
+                if let Some(next) = toks.get(j)
+                    && let TokKind::Group {
+                        delim: GroupDelim::Bracket,
+                        inner,
+                        ..
+                    } = &next.kind
+                    && inner
+                        .iter()
+                        .any(|t| matches!(&t.kind, TokKind::Word(w) if w == module))
+                {
+                    return true;
+                }
+            }
+            TokKind::Group { inner, .. } if imports_module(inner, module) => {
+                return true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Module table for CLI parsing: STD plus bundled host modules.
@@ -269,7 +299,7 @@ fn print_dry_run(
 
 pub fn run() -> Result<()> {
     init_temp_gc();
-    let workspace_root = discover_workspace_root().context("guard workspace root")?;
+    let workspace_root = discover_workspace_root().map_err(|e| errors::guard_workspace_root(&e))?;
 
     let mut args = std::env::args().skip(1);
     // `--help`/`-h` and `--version`/`-V` surface as text in the parse
@@ -296,13 +326,13 @@ pub fn run() -> Result<()> {
             || !matches!(opts.script, ScriptSource::Stdin)
             || !opts.script_args.is_empty()
         {
-            bail!("--remote-serve runs alone (no --script, --shell, --remote, or script args)");
+            return Err(errors::remote_serve_runs_alone());
         }
         return serve::serve();
     }
     #[cfg(not(feature = "net"))]
     if opts.remote_serve {
-        bail!("--remote-serve requires the `net` feature (rebuild with --features net)");
+        return Err(errors::feature_required("--remote-serve", "net"));
     }
     // MCP tool hosting owns stdio like the guest serve loop: no script
     // execution past init, no shell, no remote serve alongside it.
@@ -310,22 +340,26 @@ pub fn run() -> Result<()> {
         #[cfg(feature = "mcp")]
         {
             if opts.shell || opts.remote_serve || !opts.remotes.is_empty() {
-                bail!("--mcp runs alone (no --shell, --remote-serve, or --remote)");
+                return Err(errors::mcp_runs_alone(&[
+                    "--shell",
+                    "--remote-serve",
+                    "--remote",
+                ]));
             }
             if !opts.endpoints.listens.is_empty() || !opts.endpoints.publishes.is_empty() {
-                bail!("--mcp runs alone (no --listen/-p)");
+                return Err(errors::mcp_runs_alone(&["--listen/-p"]));
             }
             if opts.dry_run {
-                bail!("--mcp runs alone (no --dry-run)");
+                return Err(errors::mcp_runs_alone(&["--dry-run"]));
             }
             if !opts.script_args.is_empty() {
-                bail!("--mcp runs alone (no script args)");
+                return Err(errors::mcp_runs_alone(&["script args"]));
             }
             return mcp::serve_mcp(opts, workspace_root);
         }
         #[cfg(not(feature = "mcp"))]
         {
-            bail!("--mcp requires the `mcp` feature (rebuild with --features mcp)");
+            return Err(errors::feature_required("--mcp", "mcp"));
         }
     }
     execute(opts, workspace_root)
@@ -351,7 +385,7 @@ pub enum ScriptSource {
 /// about this argument, not a claim about imports.
 fn reject_url_script(text: &str) -> Result<()> {
     if text.contains("://") {
-        bail!("not a local path: {text:?} (pass a workspace path or `-` for stdin)");
+        return Err(errors::script_not_local(text));
     }
     Ok(())
 }
@@ -405,7 +439,7 @@ impl Options {
         // pre-script positionals skip them.
         let drain_tail =
             |parser: &mut lexopt::Parser, strip_leading: bool| -> Result<Vec<String>> {
-                let mut raw = parser.raw_args().map_err(|e| anyhow::anyhow!("{e}"))?;
+                let mut raw = parser.raw_args().map_err(|e| errors::arg_lex_error(&e))?;
                 let Some(first_os) = raw.next() else {
                     return Ok(Vec::new());
                 };
@@ -429,10 +463,10 @@ impl Options {
                     let path = value_string(
                         parser
                             .value()
-                            .map_err(|_| anyhow::anyhow!("--script requires a path"))?,
+                            .map_err(|_| errors::script_flag_needs_path())?,
                     )?;
                     if path.is_empty() {
-                        bail!("--script requires a path");
+                        return Err(errors::script_flag_needs_path());
                     }
                     if path == "-" {
                         script = Some(ScriptSource::Stdin);
@@ -441,7 +475,7 @@ impl Options {
                         script = Some(ScriptSource::Path(
                             workspace_root
                                 .join_script(&path)
-                                .with_context(|| format!("guard script path {path}"))?,
+                                .map_err(|e| errors::guard_script_path(&path, &e))?,
                         ));
                     }
                     // After the script, stop option parsing entirely:
@@ -459,7 +493,7 @@ impl Options {
                     let raw = value_string(
                         parser
                             .value()
-                            .map_err(|_| anyhow::anyhow!("--listen requires an address"))?,
+                            .map_err(|_| errors::listen_requires_address())?,
                     )?;
                     #[cfg(not(feature = "net"))]
                     {
@@ -467,9 +501,7 @@ impl Options {
                         // and covered in lean builds; the feature error below
                         // still wins regardless of the value.
                         let _ = endpoints::parse_listen_arg(&raw);
-                        bail!(
-                            "--listen/-p require the `net` feature (rebuild with --features net)"
-                        );
+                        return Err(errors::feature_required("--listen/-p", "net"));
                     }
                     #[cfg(feature = "net")]
                     endpoints.listens.push(endpoints::parse_listen_arg(&raw)?);
@@ -478,7 +510,7 @@ impl Options {
                     let raw = value_string(
                         parser
                             .value()
-                            .map_err(|_| anyhow::anyhow!("-p requires outer:inner"))?,
+                            .map_err(|_| errors::publish_requires_shape(""))?,
                     )?;
                     #[cfg(not(feature = "net"))]
                     {
@@ -486,9 +518,7 @@ impl Options {
                         // validation live in lean builds; the feature error
                         // below still wins.
                         let _ = endpoints::parse_publish_arg(&raw);
-                        bail!(
-                            "--listen/-p require the `net` feature (rebuild with --features net)"
-                        );
+                        return Err(errors::feature_required("--listen/-p", "net"));
                     }
                     #[cfg(feature = "net")]
                     endpoints
@@ -505,15 +535,17 @@ impl Options {
                     mcp = true;
                 }
                 Long("remote") => {
-                    let raw = value_string(parser.value().map_err(|_| {
-                        anyhow::anyhow!("--remote requires <target>=\"<command>\"")
-                    })?)?;
+                    let raw = value_string(
+                        parser
+                            .value()
+                            .map_err(|_| errors::remote_requires_value())?,
+                    )?;
                     #[cfg(not(feature = "net"))]
                     {
                         // Keep the pure validator live in lean builds; the
                         // feature error below still wins.
                         let _ = oxdock_net_plugin_stub_parse_remote(&raw);
-                        bail!("--remote requires the `net` feature (rebuild with --features net)");
+                        return Err(errors::feature_required("--remote", "net"));
                     }
                     #[cfg(feature = "net")]
                     remotes.push(oxdock_net_plugin::parse_remote_arg(&raw)?);
@@ -559,13 +591,13 @@ impl Options {
                     script = Some(ScriptSource::Path(
                         workspace_root
                             .join_script(&text)
-                            .with_context(|| format!("guard script path {text}"))?,
+                            .map_err(|e| errors::guard_script_path(&text, &e))?,
                     ));
                     script_args = drain_tail(&mut parser, true)?;
                     break;
                 }
-                Long(other) => bail!("unexpected flag: --{other}"),
-                Short(other) => bail!("unexpected flag: -{other}"),
+                Long(other) => return Err(errors::unexpected_flag(other, true)),
+                Short(other) => return Err(errors::unexpected_flag(&other.to_string(), false)),
             }
         }
 
@@ -587,30 +619,12 @@ impl Options {
 /// Option/positional text out of a lexopt value. Inputs arrive as
 /// `String`, so non-UTF8 is unreachable in practice; fail loudly anyway.
 fn value_string(value: std::ffi::OsString) -> Result<String> {
-    value
-        .into_string()
-        .map_err(|_| anyhow::anyhow!("argument must be UTF-8"))
+    value.into_string().map_err(|_| errors::arg_not_utf8())
 }
 
 /// Human-readable CLI version, printed for `--version`/`-V`/`-v`.
 pub fn version() -> String {
     format!("oxdock {}", env!("CARGO_PKG_VERSION"))
-}
-
-/// Human-readable CLI usage, printed for `--help`/`-h`. The full
-/// text, version line included, is rendered once at compile time by
-/// the `UsageAssets` script above. Feature selection stays in Rust
-/// `#[cfg]`: the DSL has no feature namespace, so each variant lives
-/// in its own asset file.
-pub fn usage() -> String {
-    #[cfg(feature = "net")]
-    let asset = "dist/usage-net.txt";
-    #[cfg(not(feature = "net"))]
-    let asset = "dist/usage-lean.txt";
-    let file = UsageAssets::get(asset).expect("usage must be embedded");
-    str::from_utf8(file.data.as_ref())
-        .expect("usage is UTF-8")
-        .to_string()
 }
 
 pub fn execute(opts: Options, workspace_root: GuardedPath) -> Result<()> {
@@ -653,7 +667,7 @@ impl ExecutionResult {
 
 pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result<ExecutionResult> {
     if opts.shell {
-        bail!("execute_with_result does not support --shell");
+        return Err(errors::shell_unsupported_in_result());
     }
 
     // Read + parse BEFORE any tempdir exists so LOCAL-only scripts never
@@ -807,7 +821,7 @@ fn oxdock_net_plugin_stub_parse_remote(raw: &str) -> Result<(String, String)> {
         Some((target, command)) if !target.trim().is_empty() && !command.trim().is_empty() => {
             Ok((target.trim().to_string(), command.to_string()))
         }
-        _ => bail!("invalid --remote {raw:?}: expected <target>=\"<command>\""),
+        _ => Err(errors::remote_requires_shape(raw)),
     }
 }
 
@@ -815,7 +829,7 @@ fn oxdock_net_plugin_stub_parse_remote(raw: &str) -> Result<(String, String)> {
 #[cfg(not(feature = "net"))]
 fn check_no_net_remotes(remotes: &[(String, String)]) -> Result<()> {
     if !remotes.is_empty() {
-        bail!("--remote requires the `net` feature (rebuild with --features net)");
+        return Err(errors::feature_required("--remote", "net"));
     }
     Ok(())
 }
@@ -826,7 +840,7 @@ fn check_no_net_remotes(remotes: &[(String, String)]) -> Result<()> {
 #[cfg(not(feature = "net"))]
 fn check_no_net_endpoints(flags: &EndpointFlags) -> Result<()> {
     if !flags.listens.is_empty() || !flags.publishes.is_empty() {
-        bail!("--listen/-p require the `net` feature (rebuild with --features net)");
+        return Err(errors::feature_required("--listen/-p", "net"));
     }
     Ok(())
 }
@@ -840,14 +854,14 @@ fn read_script(source: &ScriptSource) -> Result<String> {
             let resolver = PathResolver::new(path.root(), path.root())?;
             resolver
                 .read_to_string(path)
-                .with_context(|| format!("failed to read script at {}", path.display()))
+                .map_err(|e| errors::read_script_at(&path.display().to_string(), &e))
         }
         ScriptSource::Stdin => {
             let mut buf = String::new();
             io::stdin()
                 .lock()
                 .read_to_string(&mut buf)
-                .context("failed to read script from stdin")?;
+                .map_err(|e| errors::read_script_stdin(&anyhow::Error::from(e)))?;
             Ok(buf)
         }
     }
@@ -880,16 +894,14 @@ where
                 if opts.shell {
                     String::new()
                 } else {
-                    bail!(
-                        "no stdin detected; pass --script <file> or pipe a script into stdin (use --script - if explicit)"
-                    );
+                    return Err(errors::script_stdin_missing());
                 }
             } else {
                 let mut buf = String::new();
                 stdin
                     .lock()
                     .read_to_string(&mut buf)
-                    .context("failed to read script from stdin")?;
+                    .map_err(|e| errors::read_script_stdin(&anyhow::Error::from(e)))?;
                 buf
             }
         }
@@ -967,7 +979,7 @@ where
     // If requested, drop into an interactive shell after running the script.
     if opts.shell {
         if require_tty && !has_controlling_tty() {
-            bail!("--shell requires a tty (no controlling tty available)");
+            return Err(errors::shell_needs_tty());
         }
         // The shell needs a concrete directory: materialize here at shell
         // entry (not at startup) when the script left the snapshot pending,
@@ -978,14 +990,14 @@ where
                 if fs.is_snapshot_pending() {
                     snapshot
                         .materialize()
-                        .context("failed to create shell temp dir")?;
+                        .map_err(|e| errors::create_shell_temp_dir(&e))?;
                 }
                 final_cwd = fs.concretize_cwd(&final_cwd);
             }
             None => {
                 snapshot
                     .materialize()
-                    .context("failed to create shell temp dir")?;
+                    .map_err(|e| errors::create_shell_temp_dir(&e))?;
                 final_cwd = snapshot
                     .get()
                     .cloned()
@@ -1041,36 +1053,38 @@ fn maybe_reexec_shell_to_temp(opts: &Options) -> Result<()> {
         return Ok(());
     }
 
-    let self_path = std::env::current_exe().context("determine current executable")?;
-    let base_temp =
-        GuardedPath::new_root(std::env::temp_dir().as_path()).context("guard system temp dir")?;
+    let self_path = std::env::current_exe()
+        .map_err(|e| errors::determine_current_exe(&anyhow::Error::from(e)))?;
+    let base_temp = GuardedPath::new_root(std::env::temp_dir().as_path())
+        .map_err(|e| errors::guard_system_temp_dir(&e))?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
     let temp_file = base_temp
         .join(&format!("oxdock-shell-{ts}-{}.exe", std::process::id()))
-        .context("construct temp shell path")?;
+        .map_err(|e| errors::construct_temp_shell_path(&e))?;
 
     // Copy the current executable into the temporary location via a
     // resolver whose root is the temp directory. The source may live
     // outside the temp dir, so use `copy_file_from_external`.
     let temp_root_guard = temp_file
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("temp path unexpectedly missing parent"))?;
+        .ok_or_else(errors::shell_temp_missing_parent)?;
     let resolver_temp = PathResolver::new(temp_root_guard.as_path(), temp_root_guard.as_path())?;
     let dest = temp_file;
     #[allow(clippy::disallowed_types)]
     let source = oxdock_fs::UnguardedPath::external(self_path);
     resolver_temp
         .copy_file_from_unguarded(&source, &dest)
-        .with_context(|| format!("failed to copy shell runner to {}", dest.display()))?;
+        .map_err(|e| errors::copy_shell_runner(&dest.display().to_string(), &e))?;
 
     let mut cmd = CommandBuilder::new(dest.as_path());
     cmd.args(std::env::args_os().skip(1));
     cmd.env(oxdock_env::oxdock::SHELL_REEXEC, "1");
-    cmd.spawn()
-        .with_context(|| format!("failed to spawn shell from {}", dest.display()))?;
+    cmd.spawn().map_err(|e| {
+        errors::spawn_shell_from(&dest.display().to_string(), &anyhow::Error::from(e))
+    })?;
 
     // Exit immediately so the original binary can be rebuilt while the shell child stays running.
     std::process::exit(0);
@@ -1108,7 +1122,11 @@ fn shell_banner(cwd: &GuardedPath, workspace_root: &GuardedPath) -> String {
 }
 
 fn run_shell(cwd: &GuardedPath, workspace_root: &GuardedPath) -> Result<()> {
-    oxdock_process::spawn_interactive_shell(cwd, workspace_root, &shell_banner(cwd, workspace_root))
+    Ok(oxdock_process::spawn_interactive_shell(
+        cwd,
+        workspace_root,
+        &shell_banner(cwd, workspace_root),
+    )?)
 }
 
 // `command_path` now lives in `oxdock-fs` to centralize Path usage.
@@ -1116,6 +1134,7 @@ fn run_shell(cwd: &GuardedPath, workspace_root: &GuardedPath) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
     use indoc::indoc;
     use oxdock_fs::PathResolver;
     use std::cell::{Cell, RefCell};
@@ -2101,6 +2120,10 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("SSH"), "{err}");
+        let diag = err
+            .downcast_ref::<oxdock_diagnostics::Diagnostic>()
+            .expect("CLI errors stay typed");
+        assert_eq!(diag.key(), "cli.module_unlinked", "{diag}");
         Ok(())
     }
 
@@ -2123,10 +2146,12 @@ mod tests {
             let mut args = args.into_iter().map(str::to_string);
             let err = Options::parse(&mut args, workspace.as_guarded_path())
                 .expect_err("endpoint flag must fail without net");
-            assert!(
-                err.to_string().contains("require the `net` feature"),
-                "{err:?}"
-            );
+            assert!(err.to_string().contains("`net` feature"), "{err:?}");
+            // Typed path: stable key survives rewording.
+            let diag = err
+                .downcast_ref::<oxdock_diagnostics::Diagnostic>()
+                .expect("CLI errors stay typed");
+            assert_eq!(diag.key(), "cli.feature_required");
         }
         let mut args = vec!["--offline".to_string(), "-".to_string()].into_iter();
         let opts = Options::parse(&mut args, workspace.as_guarded_path()).expect("parse");
@@ -2168,7 +2193,55 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("NET"), "{err}");
+        // Known-but-unlinked: the failure names the module and the key.
+        let diag = err
+            .downcast_ref::<oxdock_diagnostics::Diagnostic>()
+            .expect("CLI errors stay typed");
+        assert_eq!(diag.key(), "cli.module_unlinked", "{diag}");
         Ok(())
+    }
+
+    /// Token matching never fires on comments or strings: `// IMPORT
+    /// [NET]` and `ECHO "IMPORT [NET]"` name no module, and neither do
+    /// other brackets (`WITH_IO` bindings) or quoted file paths.
+    #[test]
+    fn imports_module_ignores_comments_strings_and_other_brackets() {
+        use oxdock_parser::lex_str;
+        let toks = lex_str("IMPORT [STD, NET]\n").expect("lex");
+        assert!(super::imports_module(&toks, "NET"));
+        assert!(!super::imports_module(&toks, "SSH"));
+        let toks = lex_str("IF true {\nIMPORT [SSH]\n}\n").expect("lex");
+        assert!(super::imports_module(&toks, "SSH"));
+        let toks = lex_str("IMPORT [\"./a.oxdock\" AS LIB]\n").expect("lex");
+        assert!(!super::imports_module(&toks, "NET"));
+        // A module name inside the quoted path never counts either.
+        let toks = lex_str("IMPORT [\"./NET.oxdock\" AS LIB]\n").expect("lex");
+        assert!(!super::imports_module(&toks, "NET"));
+        let toks = lex_str("// IMPORT [NET]\nECHO hi\n").expect("lex");
+        assert!(!super::imports_module(&toks, "NET"));
+        let toks = lex_str("ECHO \"IMPORT [NET]\"\n").expect("lex");
+        assert!(!super::imports_module(&toks, "NET"));
+        let toks = lex_str("WITH_IO [stdout=$p] ECHO hi\n").expect("lex");
+        assert!(!super::imports_module(&toks, "NET"));
+    }
+
+    /// Lean builds map a genuine `IMPORT [NET]` failure to the typed
+    /// unlinked-module error, but comment/string lookalikes keep `None`
+    /// so the real parse error rides through.
+    #[cfg(not(feature = "net"))]
+    #[test]
+    fn unlinked_module_error_needs_a_real_import() {
+        let err =
+            super::unlinked_module_error("IMPORT [STD, NET]\n").expect("real import must map");
+        assert_eq!(
+            err.downcast_ref::<oxdock_diagnostics::Diagnostic>()
+                .expect("typed")
+                .key(),
+            "cli.module_unlinked"
+        );
+        assert!(super::unlinked_module_error("// IMPORT [NET]\nECHO hi\n").is_none());
+        assert!(super::unlinked_module_error("ECHO \"IMPORT [NET]\"\n").is_none());
+        assert!(super::unlinked_module_error("ECHO hi\n").is_none());
     }
 
     #[test]

@@ -648,7 +648,7 @@ mod tests {
             }
             _ => Err(oxdock_parser::ParseError::unknown_command(
                 name,
-                format!("unknown command: {name}"),
+                format!("unknown command {name:?}"),
                 None,
                 &oxdock_parser::SpanContext::line_only(0),
             )),

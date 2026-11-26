@@ -30,7 +30,9 @@ use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result, anyhow};
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
+
+use crate::diagnostics as net_diag;
 use oxdock_core::{StepCtx, Value};
 use oxdock_pipe::PipeInner;
 use oxdock_process::{
@@ -63,22 +65,22 @@ fn suppress_peer_gone(op: std::io::Result<()>) -> std::io::Result<()> {
 /// Completion of one pump worker, by direction index (0 is always the
 /// input worker). Delivered through [`guard_worker`], so a panicking
 /// worker reports instead of stranding the supervisor past scope end.
-struct NetDone<T>(usize, std::thread::Result<Result<T>>);
+struct NetDone<T>(usize, std::thread::Result<DiagnosticResult<T>>);
 
 /// Completion of one memory-pump worker. A single channel carries
 /// both directions (the input completion retrieves the lingered
 /// writer) so the supervisor parks on one blocking receive after
 /// servicing cancellation, with zero CPU and no second queue.
 enum MemoryDone {
-    InDone(std::thread::Result<Result<Option<SharedOutput>>>),
-    OutDone(std::thread::Result<Result<()>>),
+    InDone(std::thread::Result<DiagnosticResult<Option<SharedOutput>>>),
+    OutDone(std::thread::Result<DiagnosticResult<()>>),
 }
 
 /// Record the first worker error. Later errors lose: the first failure
 /// explains the teardown.
 fn note_failure<T>(
-    failed: &mut Option<anyhow::Error>,
-    outcome: std::thread::Result<Result<T>>,
+    failed: &mut Option<Diagnostic>,
+    outcome: std::thread::Result<DiagnosticResult<T>>,
     worker: &str,
     func: &str,
 ) {
@@ -91,7 +93,7 @@ fn note_failure<T>(
         }
         Err(_) => {
             if failed.is_none() {
-                *failed = Some(anyhow!("{func} {worker} panicked"));
+                *failed = Some(net_diag::pump_worker_panicked(func, worker));
             }
         }
     }
@@ -108,25 +110,25 @@ fn pump_in(
     mut stream: TcpStream,
     cancel: &AtomicBool,
     half_close: bool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut buf = [0u8; PUMP_CHUNK];
     loop {
         if cancel.load(Ordering::SeqCst) {
             return Ok(());
         }
         match read_pump_chunk(&reader, &mut buf)
-            .with_context(|| format!("{func} stdin pipe read failed"))?
+            .map_err(|err| net_diag::pump_stdin_pipe_read_failed(func, &err))?
         {
             0 => {
                 if half_close {
                     suppress_peer_gone(stream.shutdown(Shutdown::Write))
-                        .map_err(|err| anyhow!("{func} socket shutdown failed: {err}"))?;
+                        .map_err(|err| net_diag::pump_socket_shutdown_failed(func, &err))?;
                 }
                 return Ok(());
             }
             n => stream
                 .write_all(&buf[..n])
-                .with_context(|| format!("{func} socket write failed"))?,
+                .map_err(|err| net_diag::pump_socket_write_failed(func, &err))?,
         }
     }
 }
@@ -140,7 +142,7 @@ fn pump_out(
     out_inner: Option<Arc<PipeInner>>,
     mut stream: TcpStream,
     cancel: &AtomicBool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let result = pump_out_loop(func, &writer, &mut stream, cancel);
     if let Some(inner) = out_inner {
         inner.force_close();
@@ -153,7 +155,7 @@ fn pump_out_loop(
     writer: &SharedOutput,
     stream: &mut TcpStream,
     cancel: &AtomicBool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut buf = [0u8; PUMP_CHUNK];
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -164,16 +166,16 @@ fn pump_out_loop(
             Ok(n) => {
                 let mut guard = writer
                     .lock()
-                    .map_err(|_| anyhow!("{func} stdout lock poisoned"))?;
+                    .map_err(|_| net_diag::pump_stdout_lock_poisoned(func))?;
                 guard
                     .write_all(&buf[..n])
-                    .with_context(|| format!("{func} stdout pipe write failed"))?;
+                    .map_err(|err| net_diag::pump_stdout_pipe_write_failed(func, &err))?;
                 guard
                     .flush()
-                    .with_context(|| format!("{func} stdout pipe flush failed"))?;
+                    .map_err(|err| net_diag::pump_stdout_pipe_flush_failed(func, &err))?;
             }
             Err(err) => {
-                return Err(anyhow!("{func} socket read failed: {err}"));
+                return Err(net_diag::pump_socket_read_failed(func, &err));
             }
         }
     }
@@ -192,26 +194,26 @@ pub fn pump_stream<P: ProcessManager>(
     out_pipe: &Value,
     stream: TcpStream,
     half_close: bool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let reader = cx
         .pipe_reader(in_pipe)
-        .context("NET pump cannot borrow the input pipe")?;
+        .map_err(net_diag::pump_borrow_input_failed)?;
     let writer = cx
         .pipe_writer(out_pipe)
-        .context("NET pump cannot borrow the output pipe")?;
+        .map_err(net_diag::pump_borrow_output_failed)?;
     let in_backend = cx.pipe_backend(in_pipe);
     let out_inner = cx.pipe_backend(out_pipe);
     let sock_in = stream
         .try_clone()
-        .with_context(|| format!("{func} failed to clone socket"))?;
+        .map_err(|err| net_diag::pump_socket_clone_failed(func, &err))?;
     let sock_out = stream
         .try_clone()
-        .with_context(|| format!("{func} failed to clone socket"))?;
+        .map_err(|err| net_diag::pump_socket_clone_failed(func, &err))?;
     let hub: Arc<CancelHub> = cx.cancel_hub();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<NetDone<()>>();
     // Task-local cancellation shared with the detached workers.
     let cancel = Arc::new(AtomicBool::new(false));
-    let mut failed: Option<anyhow::Error> = None;
+    let mut failed: Option<Diagnostic> = None;
     let mut in_done = false;
     let mut out_done = false;
     {
@@ -281,7 +283,7 @@ pub fn pump_stream<P: ProcessManager>(
         Some(err) => Err(err),
         None => {
             if cancel.load(Ordering::SeqCst) {
-                anyhow::bail!("{func} interrupted by cancellation");
+                return Err(net_diag::pump_interrupted_by_cancellation(func));
             }
             Ok(())
         }
@@ -299,14 +301,14 @@ fn memory_pump_in(
     writer: SharedOutput,
     cancel: &AtomicBool,
     half_close: bool,
-) -> Result<Option<SharedOutput>> {
+) -> DiagnosticResult<Option<SharedOutput>> {
     let mut buf = [0u8; PUMP_CHUNK];
     loop {
         if cancel.load(Ordering::SeqCst) {
             return Ok(None);
         }
         match read_pump_chunk(&reader, &mut buf)
-            .with_context(|| format!("{func} stdin pipe read failed"))?
+            .map_err(|err| net_diag::pump_stdin_pipe_read_failed(func, &err))?
         {
             0 => {
                 if half_close {
@@ -317,13 +319,13 @@ fn memory_pump_in(
             n => {
                 let mut guard = writer
                     .lock()
-                    .map_err(|_| anyhow!("{func} memory pipe lock poisoned"))?;
+                    .map_err(|_| net_diag::pump_memory_pipe_lock_poisoned(func))?;
                 guard
                     .write_all(&buf[..n])
-                    .with_context(|| format!("{func} memory pipe write failed"))?;
+                    .map_err(|err| net_diag::pump_memory_pipe_write_failed(func, &err))?;
                 guard
                     .flush()
-                    .with_context(|| format!("{func} memory pipe flush failed"))?;
+                    .map_err(|err| net_diag::pump_memory_pipe_flush_failed(func, &err))?;
             }
         }
     }
@@ -340,7 +342,7 @@ fn memory_pump_out(
     out_inner: Option<Arc<PipeInner>>,
     incoming: SharedInput,
     cancel: &AtomicBool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut buf = [0u8; PUMP_CHUNK];
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -356,16 +358,16 @@ fn memory_pump_out(
             Ok(n) => {
                 let mut guard = writer
                     .lock()
-                    .map_err(|_| anyhow!("{func} stdout lock poisoned"))?;
+                    .map_err(|_| net_diag::pump_stdout_lock_poisoned(func))?;
                 guard
                     .write_all(&buf[..n])
-                    .with_context(|| format!("{func} stdout pipe write failed"))?;
+                    .map_err(|err| net_diag::pump_stdout_pipe_write_failed(func, &err))?;
                 guard
                     .flush()
-                    .with_context(|| format!("{func} stdout pipe flush failed"))?;
+                    .map_err(|err| net_diag::pump_stdout_pipe_flush_failed(func, &err))?;
             }
             Err(err) => {
-                return Err(anyhow!("{func} memory pipe read failed: {err}"));
+                return Err(net_diag::pump_memory_pipe_read_failed(func, &err));
             }
         }
     }
@@ -385,13 +387,13 @@ pub fn pump_memory<P: ProcessManager>(
     incoming: &Arc<PipeInner>,
     outgoing: &Arc<PipeInner>,
     half_close: bool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let reader = cx
         .pipe_reader(in_pipe)
-        .context("NET pump cannot borrow the input pipe")?;
+        .map_err(net_diag::pump_borrow_input_failed)?;
     let writer = cx
         .pipe_writer(out_pipe)
-        .context("NET pump cannot borrow the output pipe")?;
+        .map_err(net_diag::pump_borrow_output_failed)?;
     let in_backend = cx.pipe_backend(in_pipe);
     let out_inner = cx.pipe_backend(out_pipe);
     let peer_writer = outgoing.writer_handle();
@@ -400,7 +402,7 @@ pub fn pump_memory<P: ProcessManager>(
     let (event_tx, event_rx) = std::sync::mpsc::channel::<MemoryDone>();
     // Task-local cancellation shared with the detached workers.
     let cancel = Arc::new(AtomicBool::new(false));
-    let mut failed: Option<anyhow::Error> = None;
+    let mut failed: Option<Diagnostic> = None;
     let mut in_done = false;
     let mut out_done = false;
     // A lingered writer (half-close off) stays alive until both
@@ -476,7 +478,7 @@ pub fn pump_memory<P: ProcessManager>(
         Some(err) => Err(err),
         None => {
             if cancel.load(Ordering::SeqCst) {
-                anyhow::bail!("{func} interrupted by cancellation");
+                return Err(net_diag::pump_interrupted_by_cancellation(func));
             }
             Ok(())
         }

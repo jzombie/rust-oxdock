@@ -13,6 +13,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 oxdock-core = { workspace = true }
+oxdock-diagnostics.workspace = true
 oxdock-embed.workspace = true
 oxdock-fs.workspace = true
 oxdock-parser = { workspace = true, features = ["proc-macro-api"] }

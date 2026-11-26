@@ -17,7 +17,9 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
+
+use crate::diagnostics as build_diag;
 use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot};
 use oxdock_embed::{emit_embed_module, gather_assets, runtime_support_tokens};
 #[allow(clippy::disallowed_types)]
@@ -229,7 +231,7 @@ pub fn try_embed_assets(spec: &EmbedSpec) -> Result<Vec<String>> {
     let module_path = module_guarded_path(&out_dir, &module_file_name(&spec.name))?;
     let asset_root = out_dir.join(&spec.subdir_name())?;
     let assets = gather_assets(&resolver, &asset_root)
-        .map_err(|e| anyhow::anyhow!("failed to collect assets: {e}"))?;
+        .map_err(|e| anyhow::Error::new(build_diag::collect_assets_failed(&e)))?;
     let name_ident = syn::Ident::new(&spec.name, proc_macro2::Span::call_site());
     let module = emit_embed_module(&name_ident, &assets)?;
     resolver.write_file(&module_path, module.to_string().as_bytes())?;
@@ -266,14 +268,15 @@ fn init() {
 
 fn out_dir_root() -> Result<GuardedPath> {
     let out = std::env::var(oxdock_env::cargo::build::OUT_DIR)
-        .context("OUT_DIR missing (not running as a build script?)")?;
-    GuardedPath::new_root_from_str(&out).map_err(|e| anyhow::anyhow!("invalid OUT_DIR {out}: {e}"))
+        .map_err(|err| anyhow::Error::new(build_diag::out_dir_missing(&err)))?;
+    GuardedPath::new_root_from_str(&out)
+        .map_err(|e| anyhow::Error::new(build_diag::invalid_out_dir(&out, &e)))
 }
 
 fn module_guarded_path(out_dir: &GuardedPath, rel: &str) -> Result<GuardedPath> {
     out_dir
         .join(rel)
-        .map_err(|e| anyhow::anyhow!("generated module path rejected: {e}"))
+        .map_err(|e| anyhow::Error::new(build_diag::module_path_rejected(&e)))
 }
 
 impl EmbedSpec {
@@ -288,15 +291,16 @@ fn script_text(source: DslSource) -> Result<(String, Option<String>)> {
     match source {
         DslSource::Inline(text) => Ok((text.to_string(), None)),
         DslSource::File(rel) => {
-            let resolver = PathResolver::from_manifest_env()
-                .context("CARGO_MANIFEST_DIR missing for DSL resolution")?;
+            let resolver = PathResolver::from_manifest_env().map_err(|err| {
+                anyhow::Error::new(build_diag::manifest_dir_missing_for_dsl_resolution(&err))
+            })?;
             let guarded = resolver
                 .root()
                 .join(rel)
-                .map_err(|e| anyhow::anyhow!("DSL path {rel} escapes manifest dir: {e}"))?;
+                .map_err(|e| anyhow::Error::new(build_diag::dsl_path_escapes_manifest(rel, &e)))?;
             let text = resolver
                 .read_to_string(&guarded)
-                .with_context(|| format!("failed to read DSL script {rel}"))?;
+                .map_err(|err| anyhow::Error::new(build_diag::dsl_script_read_failed(rel, &err)))?;
             Ok((text, Some(rel.to_string())))
         }
     }
@@ -312,8 +316,8 @@ fn run_spec(
 
     // Directives are computed even on the skip path callers may inspect them,
     // but only the non-skip path returns them for emission.
-    let steps =
-        oxdock_core::parse_script(&text).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+    let steps = oxdock_core::parse_script(&text)
+        .map_err(|e| anyhow::Error::new(build_diag::script_parse_failed(&e)))?;
     let (changed, env_changed) = plan_input_directives(&steps);
 
     let mut directives: Vec<String> = Vec::new();
@@ -327,7 +331,7 @@ fn run_spec(
     // Emitting ANY rerun directive disables cargo's default invalidate-
     // everything, so watching build.rs is mandatory completeness.
     let manifest = std::env::var(oxdock_env::cargo::MANIFEST_DIR)
-        .context("CARGO_MANIFEST_DIR missing (not running as a build script?)")?;
+        .map_err(|err| anyhow::Error::new(build_diag::manifest_dir_missing_for_directives(&err)))?;
     push(
         &mut directives,
         &mut seen,
@@ -387,16 +391,17 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
     let debug = debug_enabled_from(std::env::var(oxdock_env::oxdock::EMBED_DEBUG).ok());
 
     // Parse first so LOCAL-only scripts never create a snapshot directory.
-    let steps =
-        oxdock_core::parse_script(script).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
-    let resolver = PathResolver::from_manifest_env().context("CARGO_MANIFEST_DIR missing")?;
-    let workspace_root =
-        oxdock_fs::discover_workspace_root().context("failed to discover workspace root")?;
+    let steps = oxdock_core::parse_script(script)
+        .map_err(|e| anyhow::Error::new(build_diag::script_parse_failed(&e)))?;
+    let resolver = PathResolver::from_manifest_env()
+        .map_err(|err| anyhow::Error::new(build_diag::manifest_dir_missing(&err)))?;
+    let workspace_root = oxdock_fs::discover_workspace_root()
+        .map_err(|err| anyhow::Error::new(build_diag::workspace_root_discover_failed(&err)))?;
 
     let output =
         run_steps_with_lazy_snapshot(&workspace_root, &steps, ExecIo::new()).map_err(|e| {
             // Alternate formatting keeps the full chain + filesystem snapshot.
-            anyhow::anyhow!("execution error: {e:#}")
+            anyhow::Error::new(build_diag::script_execution_failed(&e))
         })?;
     let final_cwd = output.final_cwd;
 
@@ -420,13 +425,15 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
         #[allow(clippy::disallowed_types)]
         let final_external = UnguardedPath::external(final_cwd.as_path().to_path_buf());
         let meta = resolver.metadata_unguarded(&final_external).map_err(|e| {
-            anyhow::anyhow!(
-                "final workdir missing after build: {} ({e})",
-                final_cwd.display()
-            )
+            anyhow::Error::new(build_diag::final_workdir_missing(
+                &final_cwd.display().to_string(),
+                &e,
+            ))
         })?;
         if !meta.is_dir() {
-            bail!("final workdir is not a directory: {}", final_cwd.display());
+            return Err(anyhow::Error::new(build_diag::final_workdir_not_dir(
+                &final_cwd.display().to_string(),
+            )));
         }
 
         stage_materialize(&resolver, &final_external, &target)?;
@@ -470,16 +477,18 @@ fn ensure_materialize_dir(resolver: &PathResolver, target: &GuardedPath) -> Resu
     if target.as_path().exists() {
         let kind = resolver.entry_kind(target)?;
         if kind != EntryKind::Dir {
-            bail!(
-                "OUT_DIR destination exists but is not a directory: {}",
-                target.display()
-            );
+            return Err(anyhow::Error::new(build_diag::out_dir_target_not_dir(
+                &target.display().to_string(),
+            )));
         }
         return Ok(());
     }
-    resolver
-        .create_dir_all(target)
-        .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", target.display()))
+    resolver.create_dir_all(target).map_err(|e| {
+        anyhow::Error::new(build_diag::out_dir_create_failed(
+            &target.display().to_string(),
+            &e,
+        ))
+    })
 }
 
 /// Typed placeholder used when IDE-skip predicates short-circuit the build:
@@ -613,7 +622,7 @@ pub fn stage_materialize(
 
     resolver
         .copy_dir_from_unguarded(final_external, &stage)
-        .map_err(|e| anyhow::anyhow!("failed to copy build output into staging: {e}"))?;
+        .map_err(|e| anyhow::Error::new(build_diag::stage_copy_failed(&e)))?;
     for marker in SANDBOX_MARKERS {
         let marker_path = stage.join(marker)?;
         if resolver.entry_kind(&marker_path).is_ok() {
@@ -734,7 +743,7 @@ mod fingerprint_tests {
             "ENV" => Ok(oxdock_parser::commands::lower_env_assignment(args)?),
             _ => Err(oxdock_parser::ParseError::unknown_command(
                 name,
-                format!("unknown command: {name}"),
+                format!("unknown command {name:?}"),
                 None,
                 &oxdock_parser::SpanContext::line_only(0),
             )),

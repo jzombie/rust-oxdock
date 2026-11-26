@@ -2,6 +2,7 @@ use super::AccessMode;
 use super::PathResolver;
 use super::guard_path;
 use crate::PathLike;
+use crate::diagnostics as fs_diag;
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -223,7 +224,7 @@ impl GuardedPath {
         // creates nothing, so there is nothing to pre-empt.
         #[cfg(not(miri))]
         if !parent.exists() {
-            anyhow::bail!("script not found: {text}");
+            return Err(anyhow::Error::new(fs_diag::script_not_found(text)));
         }
         Self::new(parent, raw)
     }
@@ -434,10 +435,7 @@ impl GuardedTempDir {
         match std::fs::create_dir(path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(anyhow::anyhow!(
-                    "scratch candidate collided (clock reuse?): {}",
-                    path.display()
-                ));
+                return Err(anyhow::Error::new(fs_diag::scratch_collided(path)));
             }
             Err(e) => return Err(e.into()),
         }
@@ -809,7 +807,7 @@ pub fn to_forward_slashes(s: &str) -> String {
 /// after the last slash binds. Empty input fails closed.
 pub fn path_base(path: &str) -> Result<String> {
     if path.is_empty() {
-        anyhow::bail!("PATH_BASE needs a non-empty path");
+        return Err(anyhow::Error::new(fs_diag::path_base_empty()));
     }
     let normalized = to_forward_slashes(path);
     let trimmed = normalized.trim_end_matches('/');
@@ -817,7 +815,7 @@ pub fn path_base(path: &str) -> Result<String> {
         if normalized.starts_with('/') {
             return Ok("/".to_string());
         }
-        anyhow::bail!("PATH_BASE needs a non-empty path");
+        return Err(anyhow::Error::new(fs_diag::path_base_empty()));
     }
     match trimmed.rfind('/') {
         Some(idx) => Ok(trimmed[idx + 1..].to_string()),
@@ -834,7 +832,7 @@ pub fn path_base(path: &str) -> Result<String> {
 /// relative shapes never mix.
 pub fn path_rel(base: &str, path: &str) -> Result<String> {
     if base.is_empty() || path.is_empty() {
-        anyhow::bail!("PATH_REL needs non-empty base and path");
+        return Err(anyhow::Error::new(fs_diag::path_rel_empty()));
     }
     let norm_base = to_forward_slashes(base);
     let norm_path = to_forward_slashes(path);
@@ -858,9 +856,7 @@ pub fn path_rel(base: &str, path: &str) -> Result<String> {
             // `..` never relativizes: it escapes the base lexically, so
             // fail closed naming both sides instead of emitting `../`.
             if seg == ".." {
-                anyhow::bail!(
-                    "PATH_REL base {base:?} is not a prefix of {path:?}: \"..\" segments never relativize"
-                );
+                return Err(anyhow::Error::new(fs_diag::path_rel_dotdot(base, path)));
             }
             segs.push(seg.to_string());
         }
@@ -869,14 +865,12 @@ pub fn path_rel(base: &str, path: &str) -> Result<String> {
     let (base_abs, base_segs) = split(&clean_base)?;
     let (path_abs, path_segs) = split(&clean_path)?;
     if base_abs != path_abs {
-        anyhow::bail!(
-            "PATH_REL base {base:?} is not a prefix of {path:?}: absolute and relative shapes never mix"
-        );
+        return Err(anyhow::Error::new(fs_diag::path_rel_mixed(base, path)));
     }
     if base_segs.len() > path_segs.len()
         || base_segs.iter().zip(path_segs.iter()).any(|(b, p)| b != p)
     {
-        anyhow::bail!("PATH_REL base {base:?} is not a prefix of {path:?}");
+        return Err(anyhow::Error::new(fs_diag::path_rel_not_prefix(base, path)));
     }
     let rest = &path_segs[base_segs.len()..];
     if rest.is_empty() {
@@ -951,7 +945,7 @@ fn write_temp_lock(guard: &GuardedPath) -> Result<File> {
 #[cfg_attr(miri, allow(dead_code))]
 #[cfg(miri)]
 fn write_temp_lock(_guard: &GuardedPath) -> Result<File> {
-    Err(anyhow::anyhow!("temp lock unused under Miri"))
+    Err(anyhow::Error::new(fs_diag::temp_lock_miri()))
 }
 
 /// Best-effort synchronous tree removal with Windows teardown retries:

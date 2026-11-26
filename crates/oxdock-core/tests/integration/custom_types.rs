@@ -288,7 +288,7 @@ fn aliased_import_exposes_types_only_qualified() {
         )
         .expect_err("bare use of an aliased import must fail");
     assert!(
-        err.to_string().contains("unknown type 'THING'"),
+        err.to_string().contains("unknown type `THING`"),
         "bare name stays unknown: {err}"
     );
 }
@@ -390,7 +390,7 @@ fn type_alias_collisions_with_host_type_and_schema_fail() {
         .expect_err("host type collision must fail");
     assert!(
         err.to_string()
-            .contains("collides with registered host type 'TAG'"),
+            .contains("collides with registered host type `TAG`"),
         "{err}"
     );
     let err = engine
@@ -398,7 +398,7 @@ fn type_alias_collisions_with_host_type_and_schema_fail() {
         .expect_err("schema collision must fail");
     assert!(
         err.to_string()
-            .contains("collides with registered record schema 'EMP'"),
+            .contains("collides with registered record schema `EMP`"),
         "{err}"
     );
 }
@@ -412,7 +412,7 @@ fn unregistered_custom_type_fails_at_coercion() {
         LET $x: NOPE = MAKE_TAG()
     "#};
     let err = run_with_tag_hosts(&root, script).expect_err("unknown custom type must fail");
-    assert!(err.to_string().contains("unknown type 'NOPE'"), "{err}");
+    assert!(err.to_string().contains("unknown type `NOPE`"), "{err}");
 }
 
 #[test]
@@ -520,7 +520,7 @@ fn custom_type_rejects_key_path_traversal() {
     )
     .expect_err("key path into opaque type must fail");
     assert!(
-        format!("{err:#}").contains("Cannot traverse into scalar"),
+        format!("{err:#}").contains("cannot traverse into scalar"),
         "{err:#}"
     );
 }

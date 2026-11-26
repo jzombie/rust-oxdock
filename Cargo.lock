@@ -115,9 +115,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.104"
+version = "1.0.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+checksum = "2cb931c189b85683d69a5cfad41d4d418671e1ac413dd209f3f2fc31e3cfd902"
 
 [[package]]
 name = "argon2"
@@ -343,9 +343,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.12.1"
+version = "1.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
 
 [[package]]
 name = "cache-manager"
@@ -1034,16 +1034,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "generic-array"
-version = "1.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "337d46834ee672ab3e48caca2cb0c78cc174fb12b3a68d0d88f99a0519a5e36e"
-dependencies = [
- "rustversion",
- "typenum",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1578,7 +1568,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oxdock"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1594,10 +1584,11 @@ dependencies = [
 
 [[package]]
 name = "oxdock-build"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-core",
+ "oxdock-diagnostics",
  "oxdock-embed",
  "oxdock-fs",
  "oxdock-parser",
@@ -1611,7 +1602,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-cli"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1621,6 +1612,7 @@ dependencies = [
  "muxio-rpc-service-endpoint",
  "muxio-sync-rpc-server",
  "oxdock-core",
+ "oxdock-diagnostics",
  "oxdock-fs",
  "oxdock-macros",
  "oxdock-markdown-plugin",
@@ -1640,7 +1632,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-core"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "base64",
@@ -1648,6 +1640,7 @@ dependencies = [
  "indoc",
  "lexopt",
  "line-ending",
+ "oxdock-diagnostics",
  "oxdock-fs",
  "oxdock-func-macro",
  "oxdock-parser",
@@ -1667,8 +1660,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxdock-diagnostics"
+version = "0.45.0-alpha"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "oxdock-doc-tests"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1682,7 +1682,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-embed"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fixture"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1706,13 +1706,14 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fs"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "cache-manager",
  "glob",
  "indoc",
  "libc",
+ "oxdock-diagnostics",
  "oxdock-sys-test-utils",
  "tempfile",
  "tracing",
@@ -1721,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-func-macro"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1731,7 +1732,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-logic-tests"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -1759,7 +1760,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-macros"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-build",
@@ -1776,11 +1777,12 @@ dependencies = [
 
 [[package]]
 name = "oxdock-markdown-plugin"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
  "oxdock-core",
+ "oxdock-diagnostics",
  "oxdock-func-macro",
  "oxdock-parser",
  "oxdock-process",
@@ -1790,11 +1792,12 @@ dependencies = [
 
 [[package]]
 name = "oxdock-mcp"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
  "oxdock-core",
+ "oxdock-diagnostics",
  "oxdock-fs",
  "oxdock-parser",
  "oxdock-process",
@@ -1810,7 +1813,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-net-plugin"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1821,6 +1824,7 @@ dependencies = [
  "muxio-rpc-service-caller",
  "muxio-sync-rpc-client",
  "oxdock-core",
+ "oxdock-diagnostics",
  "oxdock-fs",
  "oxdock-func-macro",
  "oxdock-parser",
@@ -1838,11 +1842,12 @@ dependencies = [
 
 [[package]]
 name = "oxdock-parser"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
  "line-ending",
+ "oxdock-diagnostics",
  "oxdock-func-macro",
  "oxdock-pipe",
  "proc-macro2",
@@ -1853,19 +1858,20 @@ dependencies = [
 
 [[package]]
 name = "oxdock-pipe"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
- "anyhow",
+ "oxdock-diagnostics",
  "oxdock-fs",
 ]
 
 [[package]]
 name = "oxdock-process"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
  "libc",
+ "oxdock-diagnostics",
  "oxdock-fs",
  "oxdock-parser",
  "oxdock-pipe",
@@ -1875,10 +1881,11 @@ dependencies = [
 
 [[package]]
 name = "oxdock-pty"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "libc",
+ "oxdock-diagnostics",
  "oxdock-process",
  "portable-pty",
  "signal-hook",
@@ -1887,7 +1894,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-remote-proto"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "muxio-rpc-service",
@@ -1899,7 +1906,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-render"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "base64",
@@ -1920,7 +1927,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-ssh-plugin"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1928,6 +1935,7 @@ dependencies = [
  "hex",
  "indoc",
  "oxdock-core",
+ "oxdock-diagnostics",
  "oxdock-fs",
  "oxdock-func-macro",
  "oxdock-net-plugin",
@@ -1945,14 +1953,15 @@ dependencies = [
 
 [[package]]
 name = "oxdock-sys-test-utils"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 
 [[package]]
 name = "oxdock-utils"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "flate2",
+ "oxdock-diagnostics",
  "sha2",
  "tar",
 ]
@@ -2308,9 +2317,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.13.1"
+version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+checksum = "9807af0e638c12e753aa1b4e601791bf2a8f71274023c8bbeec12fc149950857"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -2320,9 +2329,9 @@ dependencies = [
 
 [[package]]
 name = "regex-automata"
-version = "0.4.18"
+version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+checksum = "41d60ef07df457506a0a1a2073112eb4aae5733dbd2813c3da77d1b0fd441158"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -2331,9 +2340,9 @@ dependencies = [
 
 [[package]]
 name = "regex-syntax"
-version = "0.8.11"
+version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
 
 [[package]]
 name = "rfc6979"
@@ -2402,9 +2411,9 @@ dependencies = [
 
 [[package]]
 name = "russh"
-version = "0.65.2"
+version = "0.65.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78229f06e4d96d83bea5f5133ad3b6e4b5f0ce22d8e31c1ff7243ec8e18d5ba1"
+checksum = "569d8c45e20c123af2fc5ecb4803fde0a98572449ba4c24ed97741d7b02fedf7"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -2426,7 +2435,6 @@ dependencies = [
  "elliptic-curve",
  "enum_dispatch",
  "futures",
- "generic-array",
  "getrandom 0.4.3",
  "ghash",
  "hex-literal",
@@ -3581,7 +3589,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "oxdock-core",
  "oxdock-fs",

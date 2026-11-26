@@ -10,7 +10,7 @@ use super::AccessMode;
 use super::PathResolver;
 use crate::GuardedPath;
 #[cfg(not(miri))]
-use anyhow::bail;
+use crate::diagnostics as fs_diag;
 
 pub mod config;
 pub use config::{GitIdentity, ensure_git_identity};
@@ -114,7 +114,7 @@ impl PathResolver {
         #[cfg(not(miri))]
         {
             if source.root() != self.build_context.as_path() {
-                bail!("COPY_GIT source must resolve within build context");
+                return Err(anyhow::Error::new(fs_diag::git_copy_outside_build_context()));
             }
             let rel = source
                 .as_path()
@@ -208,12 +208,12 @@ impl PathResolver {
                 .with_context(|| format!("failed to run git ls-tree for {}:{}", rev, rel))?;
 
             if !ls.status.success() {
-                bail!("git ls-tree failed for {}:{}", rev, rel);
+                return Err(anyhow::Error::new(fs_diag::git_ls_tree_failed(rev, &rel)));
             }
 
             let out = ls.stdout;
             if out.is_empty() {
-                bail!("path {} not found in rev {}", rel, rev);
+                return Err(anyhow::Error::new(fs_diag::git_path_not_in_rev(&rel, rev)));
             }
 
             for chunk in out.split(|b| *b == 0) {
@@ -258,7 +258,9 @@ impl PathResolver {
                                 format!("failed to run git show for {}:{}", rev, path_str)
                             })?;
                             if !blob.status.success() {
-                                bail!("git show failed for {}:{}", rev, path_str);
+                                return Err(anyhow::Error::new(fs_diag::git_show_failed(
+                                    rev, &path_str,
+                                )));
                             }
 
                             // Git uses filemode `120000` to represent symbolic links.
@@ -307,7 +309,9 @@ impl PathResolver {
                             }
                         }
                         "commit" => {
-                            bail!("submodule entries are not supported: {}", path_str);
+                            return Err(anyhow::Error::new(fs_diag::git_submodule_unsupported(
+                                &path_str,
+                            )));
                         }
                         _ => {}
                     }

@@ -13,6 +13,7 @@
 //! hand.
 
 pub mod backend;
+pub mod diagnostics;
 pub mod slot;
 pub mod spill;
 

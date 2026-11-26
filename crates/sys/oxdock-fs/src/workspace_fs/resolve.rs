@@ -1,9 +1,10 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::path::{Path, PathBuf};
 
 use super::{AccessMode, CopySourceRoot, PathResolver, to_forward_slashes};
 use crate::GuardedPath;
+use crate::diagnostics as fs_diag;
 
 // Path resolution helpers (WORKDIR, READ/WRITE, COPY sources).
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -189,7 +190,7 @@ impl PathResolver {
         let workspace_root = self
             .workspace_root
             .as_ref()
-            .ok_or_else(|| anyhow!("no workspace root set for workspace-relative COPY"))?;
+            .ok_or_else(|| anyhow::Error::new(fs_diag::copy_no_workspace_root()))?;
         self.resolve_copy_source_from_root(workspace_root, from)
     }
 
@@ -208,9 +209,10 @@ impl PathResolver {
         match root {
             CopySourceRoot::Local => self.resolve_copy_source_from_workspace(from),
             CopySourceRoot::Snapshot => {
-                let concrete = self.shared.concrete.get().ok_or_else(|| {
-                    anyhow!("COPY from SNAPSHOT requires a materialized snapshot")
-                })?;
+                let concrete =
+                    self.shared.concrete.get().ok_or_else(|| {
+                        anyhow::Error::new(fs_diag::copy_snapshot_not_materialized())
+                    })?;
                 self.resolve_copy_source_from_root(concrete, from)
             }
             CopySourceRoot::Cache => {

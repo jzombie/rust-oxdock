@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+
+use crate::diagnostics as fs_diag;
 
 #[allow(clippy::disallowed_types)]
 use crate::UnguardedPath;
@@ -131,7 +133,7 @@ impl MockFs {
         };
         self.root
             .join(native.as_str())
-            .map_err(|e| anyhow::anyhow!(e.to_string()))
+            .map_err(|e| anyhow::Error::new(fs_diag::mock_join_failed(&e)))
     }
 
     fn relative_path(&self, path: &GuardedPath) -> String {
@@ -168,12 +170,12 @@ impl WorkspaceFs for MockFs {
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     fn metadata(&self, _path: &GuardedPath) -> Result<std::fs::Metadata> {
-        bail!("metadata not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_metadata_unsupported()))
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     fn metadata_unguarded(&self, _path: &crate::UnguardedPath) -> Result<std::fs::Metadata> {
-        bail!("metadata not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_metadata_unsupported()))
     }
 
     /// Lengths straight from in-memory state: files report their byte
@@ -189,7 +191,7 @@ impl WorkspaceFs for MockFs {
         } else if rel.is_empty() || state.dirs.contains(&rel) {
             Ok(None)
         } else {
-            Err(anyhow::anyhow!("missing file {}", path.display()))
+            Err(anyhow::Error::new(fs_diag::missing_file(path)))
         }
     }
 
@@ -275,31 +277,31 @@ impl WorkspaceFs for MockFs {
             .files
             .get(&rel)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("missing file {}", path.display()))
+            .ok_or_else(|| anyhow::Error::new(fs_diag::missing_file(path)))
     }
 
     #[allow(clippy::disallowed_types)]
     fn read_file_unguarded(&self, _path: &UnguardedPath) -> Result<Vec<u8>> {
-        bail!("unguarded operations not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_unguarded_unsupported()))
     }
 
     fn read_to_string(&self, path: &GuardedPath) -> Result<String> {
         let bytes = self.read_file(path)?;
-        String::from_utf8(bytes).map_err(|e| anyhow::anyhow!(e))
+        String::from_utf8(bytes).map_err(|e| anyhow::Error::new(fs_diag::mock_read_not_utf8(&e)))
     }
 
     #[allow(clippy::disallowed_types)]
     fn read_to_string_unguarded(&self, _path: &UnguardedPath) -> Result<String> {
-        bail!("unguarded operations not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_unguarded_unsupported()))
     }
 
     fn read_dir_entries(&self, _path: &GuardedPath) -> Result<Vec<crate::DirEntry>> {
-        bail!("read_dir unsupported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_read_dir_unsupported()))
     }
 
     #[allow(clippy::disallowed_types)]
     fn read_dir_entries_unguarded(&self, _path: &UnguardedPath) -> Result<Vec<crate::DirEntry>> {
-        bail!("unguarded operations not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_unguarded_unsupported()))
     }
 
     fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
@@ -314,7 +316,7 @@ impl WorkspaceFs for MockFs {
 
     #[allow(clippy::disallowed_types)]
     fn write_file_unguarded(&self, _path: &UnguardedPath, _contents: &[u8]) -> Result<()> {
-        bail!("unguarded operations not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_unguarded_unsupported()))
     }
 
     fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
@@ -330,7 +332,7 @@ impl WorkspaceFs for MockFs {
 
     #[allow(clippy::disallowed_types)]
     fn append_file_unguarded(&self, _path: &UnguardedPath, _contents: &[u8]) -> Result<()> {
-        bail!("unguarded operations not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_unguarded_unsupported()))
     }
 
     fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
@@ -398,7 +400,7 @@ impl WorkspaceFs for MockFs {
 
     #[allow(clippy::disallowed_types)]
     fn create_dir_all_unguarded(&self, _path: &UnguardedPath) -> Result<()> {
-        bail!("unguarded operations not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_unguarded_unsupported()))
     }
 
     fn ensure_parent_dir(&self, path: &GuardedPath) -> Result<()> {
@@ -414,20 +416,20 @@ impl WorkspaceFs for MockFs {
         if state.files.remove(&rel).is_some() {
             Ok(())
         } else {
-            bail!("REMOVE {}: no such file", path.display())
+            Err(anyhow::Error::new(fs_diag::mock_remove_no_file(path)))
         }
     }
 
     #[allow(clippy::disallowed_types)]
     fn remove_file_unguarded(&self, _path: &UnguardedPath) -> Result<()> {
-        bail!("unguarded operations not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_unguarded_unsupported()))
     }
 
     fn remove_dir_all(&self, path: &GuardedPath) -> Result<()> {
         let rel = self.relative_path(path);
         let mut state = self.state.lock().expect("mock state poisoned");
         if !state.dirs.contains(&rel) && !state.files.contains_key(&rel) {
-            bail!("REMOVE {}: no such directory", path.display())
+            return Err(anyhow::Error::new(fs_diag::mock_remove_no_dir(path)));
         }
         let prefix = if rel.is_empty() {
             String::new()
@@ -447,7 +449,7 @@ impl WorkspaceFs for MockFs {
         let rel = self.relative_path(path);
         let mut state = self.state.lock().expect("mock state poisoned");
         if !state.dirs.contains(&rel) {
-            bail!("REMOVE {}: no such directory", path.display())
+            return Err(anyhow::Error::new(fs_diag::mock_remove_no_dir(path)));
         }
         let prefix = if rel.is_empty() {
             String::new()
@@ -457,7 +459,7 @@ impl WorkspaceFs for MockFs {
         let has_children = state.files.keys().any(|p| p.starts_with(&prefix))
             || state.dirs.iter().any(|d| d.starts_with(&prefix));
         if has_children {
-            bail!("REMOVE {}: directory not empty", path.display())
+            return Err(anyhow::Error::new(fs_diag::mock_remove_not_empty(path)));
         }
         state.dirs.remove(&rel);
         Ok(())
@@ -471,20 +473,20 @@ impl WorkspaceFs for MockFs {
 
     #[allow(clippy::disallowed_types)]
     fn remove_dir_all_unguarded(&self, _path: &UnguardedPath) -> Result<()> {
-        bail!("unguarded operations not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_unguarded_unsupported()))
     }
 
     fn copy_file(&self, _src: &GuardedPath, _dst: &GuardedPath) -> Result<u64> {
-        bail!("copy unsupported")
+        Err(anyhow::Error::new(fs_diag::mock_copy_unsupported()))
     }
 
     #[allow(clippy::disallowed_types)]
     fn copy_file_unguarded(&self, _src: &UnguardedPath, _dst: &UnguardedPath) -> Result<u64> {
-        bail!("unguarded operations not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_unguarded_unsupported()))
     }
 
     fn copy_dir_recursive(&self, _src: &GuardedPath, _dst: &GuardedPath) -> Result<()> {
-        bail!("copy unsupported")
+        Err(anyhow::Error::new(fs_diag::mock_copy_unsupported()))
     }
 
     #[allow(clippy::disallowed_types)]
@@ -493,7 +495,7 @@ impl WorkspaceFs for MockFs {
         _src: &crate::UnguardedPath,
         _dst: &GuardedPath,
     ) -> Result<()> {
-        bail!("copy unsupported")
+        Err(anyhow::Error::new(fs_diag::mock_copy_unsupported()))
     }
 
     #[allow(clippy::disallowed_types)]
@@ -502,16 +504,16 @@ impl WorkspaceFs for MockFs {
         _src: &crate::UnguardedPath,
         _dst: &GuardedPath,
     ) -> Result<u64> {
-        bail!("copy unsupported")
+        Err(anyhow::Error::new(fs_diag::mock_copy_unsupported()))
     }
 
     #[allow(clippy::disallowed_types)]
     fn copy_file_to_unguarded(&self, _src: &GuardedPath, _dst: &UnguardedPath) -> Result<u64> {
-        bail!("unguarded operations not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_unguarded_unsupported()))
     }
 
     fn symlink(&self, _src: &GuardedPath, _dst: &GuardedPath) -> Result<()> {
-        bail!("symlink unsupported")
+        Err(anyhow::Error::new(fs_diag::mock_symlink_unsupported()))
     }
 
     fn install_file_atomic(&self, src: &GuardedPath, dst: &GuardedPath, _mode: u32) -> Result<()> {
@@ -523,16 +525,16 @@ impl WorkspaceFs for MockFs {
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     fn open_file_unguarded(&self, _path: &crate::UnguardedPath) -> Result<std::fs::File> {
-        bail!("open unsupported")
+        Err(anyhow::Error::new(fs_diag::mock_open_unsupported()))
     }
 
     fn set_permissions_mode_unix(&self, _path: &GuardedPath, _mode: u32) -> Result<()> {
-        bail!("perms unsupported")
+        Err(anyhow::Error::new(fs_diag::mock_perms_unsupported()))
     }
 
     #[allow(clippy::disallowed_types)]
     fn set_permissions_mode_unix_unguarded(&self, _path: &UnguardedPath, _mode: u32) -> Result<()> {
-        bail!("unguarded operations not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_unguarded_unsupported()))
     }
 
     fn entry_kind(&self, path: &GuardedPath) -> Result<EntryKind> {
@@ -543,7 +545,7 @@ impl WorkspaceFs for MockFs {
         } else if state.files.contains_key(&rel) {
             Ok(EntryKind::File)
         } else {
-            bail!("missing path {}", path.display())
+            Err(anyhow::Error::new(fs_diag::mock_missing_path(path)))
         }
     }
 
@@ -555,7 +557,7 @@ impl WorkspaceFs for MockFs {
 
     #[allow(clippy::disallowed_types)]
     fn entry_kind_unguarded(&self, _path: &UnguardedPath) -> Result<EntryKind> {
-        bail!("unguarded operations not supported in mock fs");
+        Err(anyhow::Error::new(fs_diag::mock_unguarded_unsupported()))
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -649,7 +651,7 @@ impl WorkspaceFs for MockFs {
         _to: &GuardedPath,
         _include_dirty: bool,
     ) -> Result<()> {
-        bail!("git copy unsupported")
+        Err(anyhow::Error::new(fs_diag::mock_git_copy_unsupported()))
     }
 
     fn clone_box(&self) -> Box<dyn WorkspaceFs> {

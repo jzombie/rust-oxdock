@@ -17,6 +17,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 // Same disk-spill story: the guarded-filesystem surface is only
 // referenced from `DiskSpill`, which does not exist under Miri.
+use oxdock_diagnostics::DiagnosticResult;
 #[cfg_attr(miri, allow(unused_imports))]
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, SpillFile};
 
@@ -184,10 +185,11 @@ impl SpillBuffer {
 
     /// Drain and require valid UTF-8 (no silent lossy conversion), so
     /// captured stdout can enter `Value::String`.
-    pub fn drain_string_strict(&self) -> anyhow::Result<String> {
-        let bytes = self.drain_bytes()?;
-        String::from_utf8(bytes)
-            .map_err(|e| anyhow::anyhow!("captured stdout is not valid UTF-8: {e}"))
+    pub fn drain_string_strict(&self) -> DiagnosticResult<String> {
+        let bytes = self
+            .drain_bytes()
+            .map_err(|e| crate::diagnostics::spill_drain_failed(&e))?;
+        String::from_utf8(bytes).map_err(|e| crate::diagnostics::captured_stdout_invalid_utf8(&e))
     }
 
     /// Bytes currently held (memory plus unread spill-file backlog).

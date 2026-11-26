@@ -21,9 +21,57 @@ fn truly_unknown_command_reports_kind_with_span() {
     assert!(err.col_start().is_some() && err.col_end().is_some());
     assert!(err.source_line().is_some());
     let text = err_text(&err);
-    assert!(text.contains("unknown command: FROBNICATE"), "got: {text}");
+    assert!(
+        text.contains("unknown command \"FROBNICATE\""),
+        "got: {text}"
+    );
     assert!(text.contains("--> line 1"), "got: {text}");
     assert!(text.contains('^'), "got: {text}");
+}
+
+#[test]
+fn stable_keys_survive_the_token_round_trip() {
+    // Migrated diagnostics keep their keyed payload through the
+    // token-stream round trip (`lower_err` carries, `token_error`
+    // reattaches); Display text is unchanged.
+    for (script, key) in [
+        ("WRITE\n", "dsl.validation.missing_argument"),
+        ("FROBNICATE hi\n", "dsl.unknown_command.unknown"),
+        ("EXPORT NOPE\n", "dsl.validation.export_unknown_func"),
+        (
+            "EXPORT [\n# comment\nFOO\n]\n",
+            "dsl.spelling.bracket_list_comment",
+        ),
+    ] {
+        let err = parse_script(script, lower_command).expect_err("must fail");
+        assert_eq!(err.key(), Some(key), "script: {script:?} got: {err}");
+    }
+    // Malformed known command keeps its key and the structural hint.
+    let err =
+        parse_script("WITH_IO [stdout=discard] ECHO hi\n", lower_command).expect_err("must fail");
+    assert_eq!(
+        err.key(),
+        Some("dsl.invalid_syntax.malformed"),
+        "got: {err}"
+    );
+    assert!(err.hint().is_some(), "structural hint must survive: {err}");
+    // Direct `check_arg` failures keep their keys too: the TIMEOUT
+    // duration lookahead and the FAIL code check preserve the
+    // diagnostic instead of rewrapping from the message string.
+    for (script, key) in [
+        (
+            "TIMEOUT \"banana\" { ECHO hi }\n",
+            "dsl.validation.invalid_timeout_duration",
+        ),
+        ("FAIL banana \"msg\"\n", "dsl.validation.expected_int"),
+    ] {
+        let err = parse_script(script, lower_command).expect_err("must fail");
+        assert_eq!(err.key(), Some(key), "script: {script:?} got: {err}");
+    }
+    // Case-hinted unknown command keeps its hint.
+    let err = parse_script("Write hi\n", lower_command).expect_err("must fail");
+    assert_eq!(err.key(), Some("dsl.unknown_command.unknown"), "got: {err}");
+    assert!(err.hint().is_some(), "case hint must survive: {err}");
 }
 
 #[test]
@@ -41,10 +89,7 @@ fn malformed_with_io_is_invalid_syntax_never_unknown() {
         err.kind()
     );
     let text = err_text(&err);
-    assert!(
-        text.contains("invalid syntax for command WITH_IO"),
-        "got: {text}"
-    );
+    assert!(text.starts_with("WITH_IO"), "got: {text}");
     assert!(!text.contains("unknown command"), "got: {text}");
     assert!(text.contains("--> line 1"), "got: {text}");
 }
@@ -203,12 +248,12 @@ fn documented_outputs_match_byte_for_byte() {
             indoc! {"
                 FROBNICATE hi
             "},
-            indoc! {"
-                unknown command: FROBNICATE
+            indoc! {r#"
+                unknown command "FROBNICATE"
                   --> line 1, col 1-13
                   1 | FROBNICATE hi
                     | ^^^^^^^^^^^^^
-            "},
+            "#},
         ),
         (
             indoc! {"
@@ -237,7 +282,7 @@ fn documented_outputs_match_byte_for_byte() {
                 WITH_IO [stdout=discard] ECHO hi
             "},
             indoc! {"
-                invalid syntax for command WITH_IO: WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`: invalid binding `stdout=discard`; bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`); `tty` is a bare flag for RUN steps, with `rows = <int>` / `cols = <int>` geometry (e.g. `[tty, rows=40, cols=100]`); got `[stdout=discard] ECHO hi`.
+                WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`: invalid binding `stdout=discard`; bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`); `tty` is a bare flag for RUN steps, with `rows = <int>` / `cols = <int>` geometry (e.g. `[tty, rows=40, cols=100]`); got `[stdout=discard] ECHO hi`
                   --> line 1, col 1-32
                   1 | WITH_IO [stdout=discard] ECHO hi
                     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -303,7 +348,7 @@ fn block_error_inside_if_reports_inner_failure() {
     );
     let text = err_text(&err);
     assert!(
-        !text.contains("invalid syntax for command IF"),
+        !text.contains("IF needs a condition"),
         "inner span must not blame IF syntax: {text}"
     );
     assert!(
@@ -342,7 +387,7 @@ fn block_error_inside_while_reports_inner_failure() {
     );
     let text = err_text(&err);
     assert!(
-        !text.contains("invalid syntax for command WHILE"),
+        !text.contains("WHILE needs a Bool"),
         "inner span must not blame WHILE syntax: {text}"
     );
     assert!(
@@ -612,10 +657,7 @@ fn missing_block_opener_keeps_head_span() {
     );
     assert_eq!(err.line(), 1);
     let text = err_text(&err);
-    assert!(
-        text.contains("invalid syntax for command IF"),
-        "got: {text}"
-    );
+    assert!(text.starts_with("IF"), "got: {text}");
 }
 
 #[test]
@@ -815,7 +857,7 @@ fn single_line_keyword_errors_keep_head_span() {
         (
             "FOR foo\n",
             indoc! {"
-                invalid syntax for command FOR: FOR loops need `FOR $item: TYPE IN <expr> { ... }` (or `FOR $key: STRING, $value: TYPE IN <expr> { ... }`); got `foo`.
+                FOR loops need `FOR $item: TYPE IN <expr> { ... }` (or `FOR $key: STRING, $value: TYPE IN <expr> { ... }`); got `foo`
                   --> line 1, col 1-7
                   1 | FOR foo
                     | ^^^^^^^
@@ -824,7 +866,7 @@ fn single_line_keyword_errors_keep_head_span() {
         (
             "WHILE\n",
             indoc! {"
-                invalid syntax for command WHILE: WHILE needs a Bool condition and a block, e.g. `WHILE !$done { ... }`; got nothing.
+                WHILE needs a Bool condition and a block, e.g. `WHILE !$done { ... }`; got nothing
                   --> line 1, col 1-5
                   1 | WHILE
                     | ^^^^^
@@ -833,7 +875,7 @@ fn single_line_keyword_errors_keep_head_span() {
         (
             "ELSE\n",
             indoc! {"
-                invalid syntax for command ELSE: ELSE must directly follow an `IF ... { ... }` block, e.g. `IF true { ECHO yes } ELSE { ECHO no }`; got nothing.
+                ELSE must directly follow an `IF ... { ... }` block, e.g. `IF true { ECHO yes } ELSE { ECHO no }`; got nothing
                   --> line 1, col 1-4
                   1 | ELSE
                     | ^^^^

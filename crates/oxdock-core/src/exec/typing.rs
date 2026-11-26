@@ -16,13 +16,14 @@ pub use oxdock_parser::{
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Result, bail};
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_parser::{
     ANY_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, Step, StepKind, canonicalize_spelling,
     intern_rendered, lookup_rendered, parse_spelling, render_structural,
 };
 use oxdock_process::ProcessManager;
 
+use super::diagnostics as typing_diag;
 use super::state::ExecState;
 
 /// Check an options map against its declared keys: unknown keys fail
@@ -39,14 +40,11 @@ pub fn check_options(
     map: &std::collections::BTreeMap<String, Value>,
     options: &[crate::ParamOption],
     func: &str,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     for key in map.keys() {
         if !options.iter().any(|known| known.name == key) {
             let known: Vec<&str> = options.iter().map(|known| known.name).collect();
-            bail!(
-                "{func}() unknown option '{key}' (expected: {})",
-                known.join(", ")
-            );
+            return Err(typing_diag::check_unknown_option(func, key, &known));
         }
     }
     for (key, value) in map.iter() {
@@ -54,7 +52,8 @@ pub fn check_options(
             .iter()
             .find(|known| known.name == *key)
             .expect("unknown keys rejected above");
-        crate::check_value_at(&option.value, value, &format!("{func}() option '{key}'"))?;
+        crate::check_value_at(&option.value, value, &format!("{func}() option '{key}'"))
+            .map_err(|err| typing_diag::check_option_value(&err))?;
     }
     Ok(())
 }
@@ -160,7 +159,7 @@ impl<P: ProcessManager> ExecState<P> {
     /// Single choke for every `LET`/`FUNC` declaration. Signature is
     /// stable: alias cycles and shared depth accounting thread
     /// internally, so all call sites gain generics with zero edits.
-    pub fn resolve_tag(&self, name: &str) -> Result<TypeTag> {
+    pub fn resolve_tag(&self, name: &str) -> DiagnosticResult<TypeTag> {
         let canonical = canonicalize_spelling(name);
         if canonical.contains('<') || canonical.contains('|') {
             return self.resolve_spelling_text(&canonical, &mut Vec::new(), 0);
@@ -177,24 +176,18 @@ impl<P: ProcessManager> ExecState<P> {
         name: &str,
         resolving: &mut Vec<String>,
         depth: usize,
-    ) -> Result<TypeTag> {
+    ) -> DiagnosticResult<TypeTag> {
         if depth > MAX_GENERIC_DEPTH {
-            bail!("type spelling exceeds maximum generic depth of {MAX_GENERIC_DEPTH}: '{name}'");
+            return Err(typing_diag::typing_max_depth(MAX_GENERIC_DEPTH, name));
         }
         if name == MAP_TYPE_NAME {
-            bail!(
-                "bare {MAP_TYPE_NAME} is not a declaration type: write a shape ({MAP_TYPE_NAME}<name: TYPE, ...>) or {MAP_TYPE_NAME}<{ANY_TYPE_NAME}> for maps with unknown keys"
-            );
+            return Err(typing_diag::typing_bare_map());
         }
         if name == LIST_TYPE_NAME {
-            bail!(
-                "bare {LIST_TYPE_NAME} is not a declaration type: write a shape ({LIST_TYPE_NAME}<TYPE>) or {LIST_TYPE_NAME}<{ANY_TYPE_NAME}> for lists with unknown elements"
-            );
+            return Err(typing_diag::typing_bare_list());
         }
         if name == HANDLE_TYPE_NAME {
-            bail!(
-                "bare {HANDLE_TYPE_NAME} is not a declaration type: write {HANDLE_TYPE_NAME}<T> for a known payload or {HANDLE_TYPE_NAME}<{ANY_TYPE_NAME}> for an unknown one"
-            );
+            return Err(typing_diag::typing_bare_handle());
         }
         if let Some(tag) = TypeTag::builtin(name) {
             return Ok(tag);
@@ -210,7 +203,7 @@ impl<P: ProcessManager> ExecState<P> {
         if let Some(target) = self.type_aliases.get(name) {
             if resolving.iter().any(|s| s.as_str() == name) {
                 resolving.push(name.to_string());
-                bail!("type alias cycle: {}", resolving.join(" -> "));
+                return Err(typing_diag::alias_cycle(resolving));
             }
             resolving.push(name.to_string());
             let target = target.clone();
@@ -218,12 +211,12 @@ impl<P: ProcessManager> ExecState<P> {
             resolving.pop();
             return result;
         }
-        bail!(
-            "unknown type '{name}'; known types: {} and schemas: {} and aliases: {}",
-            self.type_names().join(", "),
-            self.schema_names().join(", "),
-            self.alias_names().join(", "),
-        )
+        Err(typing_diag::typing_unknown(
+            name,
+            &self.type_names(),
+            &self.schema_names(),
+            &self.alias_names(),
+        ))
     }
 
     /// Resolve one canonical spelling that may carry `<...>` args:
@@ -236,13 +229,12 @@ impl<P: ProcessManager> ExecState<P> {
         canonical: &str,
         resolving: &mut Vec<String>,
         depth: usize,
-    ) -> Result<TypeTag> {
+    ) -> DiagnosticResult<TypeTag> {
         let key = format!("{}\x1f{:016x}", canonical, self.type_env_digest);
         if let Some(hit) = lookup_rendered(&key) {
             return Ok(hit);
         }
-        let spelled = parse_spelling(canonical)
-            .map_err(|err| anyhow::anyhow!("invalid type spelling: {err}"))?;
+        let spelled = parse_spelling(canonical)?;
         let tag = self.build_rendered(&spelled, resolving, depth)?;
         Ok(intern_rendered(key, tag))
     }
@@ -296,11 +288,12 @@ impl<P: ProcessManager> ExecState<P> {
         spelled: &Spelled,
         resolving: &mut Vec<String>,
         depth: usize,
-    ) -> Result<TypeTag> {
+    ) -> DiagnosticResult<TypeTag> {
         if depth > MAX_GENERIC_DEPTH {
-            bail!(
-                "type spelling exceeds maximum generic depth of {MAX_GENERIC_DEPTH}: '{spelled:?}'"
-            );
+            return Err(typing_diag::typing_max_depth_spelled(
+                MAX_GENERIC_DEPTH,
+                spelled,
+            ));
         }
         match spelled {
             Spelled::Named(name) => self.resolve_named(name, resolving, depth),
@@ -310,7 +303,7 @@ impl<P: ProcessManager> ExecState<P> {
                 for member in members {
                     resolved.push(self.build_rendered(member, resolving, depth)?);
                 }
-                finish_union(resolved)
+                Ok(finish_union(resolved)?)
             }
         }
     }
@@ -329,10 +322,10 @@ impl<P: ProcessManager> ExecState<P> {
         args: &[SpelledField],
         resolving: &mut Vec<String>,
         depth: usize,
-    ) -> Result<TypeTag> {
+    ) -> DiagnosticResult<TypeTag> {
         if name != LIST_TYPE_NAME && name != MAP_TYPE_NAME && name != HANDLE_TYPE_NAME {
             self.resolve_named(name, resolving, depth)?;
-            bail!("'{name}' takes no type arguments");
+            return Err(typing_diag::typing_no_args(name));
         }
         if name == HANDLE_TYPE_NAME {
             let [
@@ -343,7 +336,7 @@ impl<P: ProcessManager> ExecState<P> {
                 },
             ] = args
             else {
-                bail!("{HANDLE_TYPE_NAME} takes exactly one bare type argument");
+                return Err(typing_diag::typing_handle_arity());
             };
             let payload = self.build_rendered(payload, resolving, depth + 1)?;
             return Ok(TypeTag::HandleOf(std::sync::Arc::new(payload)));
@@ -357,7 +350,7 @@ impl<P: ProcessManager> ExecState<P> {
                 },
             ] = args
             else {
-                bail!("{LIST_TYPE_NAME} takes exactly one bare type argument");
+                return Err(typing_diag::typing_list_arity());
             };
             let element = self.build_rendered(element, resolving, depth + 1)?;
             return Ok(TypeTag::ListOf(std::sync::Arc::new(element)));
@@ -380,9 +373,7 @@ impl<P: ProcessManager> ExecState<P> {
         let mut fields = Vec::with_capacity(args.len());
         for arg in args {
             let Some(field_name) = arg.name.as_ref() else {
-                bail!(
-                    "{MAP_TYPE_NAME} fields require 'name: TYPE'; '{name}' takes no bare arguments"
-                );
+                return Err(typing_diag::typing_map_bare(name));
             };
             let ty = self.build_rendered(&arg.ty, resolving, depth + 1)?;
             let default = match &arg.default {
@@ -390,9 +381,9 @@ impl<P: ProcessManager> ExecState<P> {
                 Some(lit) => {
                     let value = lit.to_value();
                     check_value(&ty, &value).map_err(|_| {
-                        anyhow::anyhow!(
-                            "default for field '{field_name}' does not match {}",
-                            oxdock_parser::render_structural(&ty)
+                        typing_diag::typing_default_mismatch(
+                            field_name,
+                            &oxdock_parser::render_structural(&ty),
                         )
                     })?;
                     Some(value)
@@ -410,29 +401,22 @@ impl<P: ProcessManager> ExecState<P> {
         // Alias uniqueness: one spelling maps to one field. Canonical
         // names and aliases share one namespace, so a clash fails here
         // naming both sides instead of shadowing at parse time.
+        // Owner: typing. Single constructors, stable keys, no ad hoc
+        // strings at call sites.
         {
             use std::collections::HashMap;
             let mut seen: HashMap<&str, &str> = HashMap::new();
             for field in &fields {
                 if let Some(prev) = seen.insert(field.name.as_str(), field.name.as_str()) {
                     let _ = prev;
-                    bail!("duplicate field '{}' in MAP spelling", field.name);
+                    return Err(typing_diag::map_duplicate_field(&field.name));
                 }
                 if let Some(alias) = field.alias.as_ref() {
                     if alias == &field.name {
-                        bail!(
-                            "alias '{}' duplicates its own field '{}'",
-                            alias,
-                            field.name
-                        );
+                        return Err(typing_diag::alias_self(&field.name, alias));
                     }
                     if let Some(owner) = seen.insert(alias.as_str(), field.name.as_str()) {
-                        bail!(
-                            "alias '{}' for field '{}' clashes with '{}'",
-                            alias,
-                            field.name,
-                            owner
-                        );
+                        return Err(typing_diag::alias_clash(alias, &field.name, owner));
                     }
                 }
             }
@@ -447,7 +431,7 @@ impl<P: ProcessManager> ExecState<P> {
 /// order-free, so all spellings behave identically. The tag owns
 /// everything through `Arc`: shared on clone, freed with the last
 /// owner, never leaked.
-fn finish_union(members: Vec<TypeTag>) -> Result<TypeTag> {
+fn finish_union(members: Vec<TypeTag>) -> DiagnosticResult<TypeTag> {
     let mut flat: Vec<TypeTag> = Vec::with_capacity(members.len());
     for member in members {
         // Nested unions splice flat: members never nest, so every
@@ -459,7 +443,7 @@ fn finish_union(members: Vec<TypeTag>) -> Result<TypeTag> {
         }
     }
     if flat.is_empty() {
-        bail!("empty union: no member shapes to admit");
+        return Err(typing_diag::typing_empty_union());
     }
     // `ANY` absorbs the set: admitting everything is `ANY`.
     if flat.iter().any(|member| matches!(member, TypeTag::Any)) {
@@ -492,7 +476,7 @@ fn finish_union(members: Vec<TypeTag>) -> Result<TypeTag> {
 pub fn collect_type_aliases<P: ProcessManager>(
     steps: &[Step],
     exec: &ExecState<P>,
-) -> Result<HashMap<String, String>> {
+) -> DiagnosticResult<HashMap<String, String>> {
     let mut func_names = HashSet::new();
     for step in steps {
         if let StepKind::FuncDef { name, .. } = &step.kind {
@@ -505,19 +489,19 @@ pub fn collect_type_aliases<P: ProcessManager>(
             continue;
         };
         if aliases.contains_key(name) {
-            bail!("type alias '{name}' is already defined");
+            return Err(typing_diag::alias_already_defined(name));
         }
         if TypeTag::builtin(name).is_some() {
-            bail!("type alias '{name}' collides with a builtin type");
+            return Err(typing_diag::alias_builtin_collision(name));
         }
         if exec.types.contains_key(name) {
-            bail!("type alias '{name}' collides with registered host type '{name}'");
+            return Err(typing_diag::alias_host_collision(name));
         }
         if exec.record_schemas.contains_key(name) {
-            bail!("type alias '{name}' collides with registered record schema '{name}'");
+            return Err(typing_diag::alias_schema_collision(name));
         }
         if func_names.contains(name) {
-            bail!("type alias '{name}' collides with function '{name}'");
+            return Err(typing_diag::alias_func_collision(name));
         }
         aliases.insert(name.clone(), canonicalize_spelling(target));
     }
@@ -538,21 +522,19 @@ impl<P: ProcessManager> ExecState<P> {
     /// deeper. One recursion serves all declaration sites, so the
     /// rule cannot drift between LET, params, returns, schemas, and
     /// aliases: resolve first, then validate here.
-    fn check_tag_known(&self, what: &str, tag: &TypeTag, top_void: bool) -> Result<()> {
+    fn check_tag_known(&self, what: &str, tag: &TypeTag, top_void: bool) -> DiagnosticResult<()> {
         match tag {
             TypeTag::Custom(descriptor) => {
                 if !self.types.contains_key(descriptor.name) {
-                    bail!(
-                        "{what} declares unregistered type '{}'; known types: {}",
+                    return Err(typing_diag::typing_unregistered(
+                        what,
                         descriptor.name,
-                        self.type_names().join(", ")
-                    );
+                        &self.type_names(),
+                    ));
                 }
             }
             TypeTag::Void if !top_void => {
-                bail!(
-                    "{what} declares VOID outside a return annotation: VOID is only a return type (or HANDLE<VOID> payload)"
-                );
+                return Err(typing_diag::typing_void_position(what));
             }
             TypeTag::Void => {}
             TypeTag::ListOf(element) => self.check_tag_known(what, element, false)?,
@@ -597,14 +579,14 @@ impl<P: ProcessManager> ExecState<P> {
     /// return: LET bindings, parameters, schemas, aliases at use.
     /// Single choke so the VOID position rule cannot drift between
     /// the static checker and runtime definition paths.
-    pub fn check_declaration_tag(&self, what: &str, tag: &TypeTag) -> Result<()> {
+    pub fn check_declaration_tag(&self, what: &str, tag: &TypeTag) -> DiagnosticResult<()> {
         self.check_tag_known(what, tag, false)
     }
 
     /// Return-position gate: bare VOID is legal here (and only
     /// here, besides HANDLE payloads). Same single recursion as
     /// every other declaration site.
-    pub fn check_return_tag(&self, what: &str, tag: &TypeTag) -> Result<()> {
+    pub fn check_return_tag(&self, what: &str, tag: &TypeTag) -> DiagnosticResult<()> {
         self.check_tag_known(what, tag, true)
     }
 
@@ -617,7 +599,7 @@ impl<P: ProcessManager> ExecState<P> {
     /// closed `allowed` set without a type is rejected too: the set
     /// only means something alongside the `STRING` check that enforces
     /// it, so hand-built entries cannot render a set they never check.
-    pub fn validate_function_type_tags(&self) -> Result<()> {
+    pub fn validate_function_type_tags(&self) -> DiagnosticResult<()> {
         for meta in self.functions.all_metas() {
             if let Some(params) = meta.params.as_deref() {
                 for (position, param) in params.iter().enumerate() {
@@ -626,11 +608,10 @@ impl<P: ProcessManager> ExecState<P> {
                         Self::check_tag_known(self, &what, expected, false)?;
                     }
                     if param.param_type.is_none() && param.allowed.is_some() {
-                        anyhow::bail!(
-                            "param '{}' of '{}' declares values without a type",
-                            param.name,
-                            meta.name,
-                        );
+                        return Err(typing_diag::func_param_values_without_type(
+                            &param.name,
+                            &meta.name,
+                        ));
                     }
                     if param.optional {
                         // Omission fills an empty MAP, so only trailing
@@ -638,11 +619,10 @@ impl<P: ProcessManager> ExecState<P> {
                         // value the caller never chose.
                         let trails = params[position..].iter().all(|later| later.optional);
                         if !trails {
-                            anyhow::bail!(
-                                "param '{}' of '{}' is optional before a required param",
-                                param.name,
-                                meta.name,
-                            );
+                            return Err(typing_diag::func_optional_before_required(
+                                &param.name,
+                                &meta.name,
+                            ));
                         }
                         // Omission fills an empty MAP, so the param type
                         // must admit one: checked semantically (empty MAP
@@ -654,11 +634,10 @@ impl<P: ProcessManager> ExecState<P> {
                                 .is_ok()
                         });
                         if !fills {
-                            anyhow::bail!(
-                                "param '{}' of '{}' is optional without a MAP type",
-                                param.name,
-                                meta.name,
-                            );
+                            return Err(typing_diag::func_optional_without_map(
+                                &param.name,
+                                &meta.name,
+                            ));
                         }
                     }
                 }

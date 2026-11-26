@@ -2,18 +2,26 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::to_forward_slashes;
 use oxdock_fs::{GuardedPath, WorkspaceSelection};
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::value::HandleValue;
 use oxdock_parser::{
-    Field, GuardExpr, KEYWORD_INSPECT, MODULE_SEPARATOR, SCRIPT_MODULE_NAME, STD_MODULE_NAME,
-    SemaphoreState, Step, TypeTag, Value, base_name, guards_overlap, qualify, render_structural,
-    split_qualified,
+    Field, GuardExpr, KEYWORD_CONST, KEYWORD_EXPORT, KEYWORD_FROM, KEYWORD_FUNC, KEYWORD_IMPORT,
+    KEYWORD_INSPECT, KEYWORD_LET, KEYWORD_TYPE, MODULE_SEPARATOR, SCRIPT_MODULE_NAME,
+    STD_MODULE_NAME, SemaphoreState, Step, TypeTag, Value, base_name, guards_overlap, qualify,
+    render_structural, split_qualified,
 };
 use oxdock_pipe::PipeHandle;
 use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
 
+use super::diagnostics as std_diag;
+use super::function_names::{
+    FUNC_BOOL, FUNC_BOOL_OR, FUNC_PARSE_ARGS, FUNC_PARSE_FLAGS, FUNC_PARSE_POSITIONALS,
+    FUNC_TEXT_COUNT, FUNC_TEXT_COUNT_MATCHES, FUNC_TEXT_EXTRACT, FUNC_TEXT_GREP,
+    FUNC_TEXT_LINES_RANGE, FUNC_TEXT_MATCH, FUNC_TEXT_REPLACE, FUNC_TEXT_REPLACE_REGEX,
+};
 use super::io::StreamHandle;
 use super::state::ExecState;
 use super::steps::StepCtx;
@@ -275,7 +283,7 @@ pub(super) fn missing_import_hint<'a>(
                 // invalid escapes inside the quoted suggestion.
                 let path = to_forward_slashes(file);
                 format!(
-                    "file \"{file}\" exports `{base}`: add `[FUNC {base} FROM \"{path}\"]` to an IMPORT"
+                    "file \"{file}\" exports `{base}`: add `[{KEYWORD_FUNC} {base} {KEYWORD_FROM} \"{path}\"]` to an {KEYWORD_IMPORT}"
                 )
             }
         };
@@ -329,10 +337,10 @@ pub(super) fn missing_const_hint<S: ModuleGraphView>(
         .iter()
         .find_map(|file| match view.binding(file, name) {
             BindingPresence::Const => Some(format!(
-                "module holds `{name}` as CONST but does not export it: add `EXPORT CONST ${name}`"
+                "module holds `{name}` as {KEYWORD_CONST} but does not export it: add `{KEYWORD_EXPORT} {KEYWORD_CONST} ${name}`"
             )),
             BindingPresence::Let => Some(format!(
-                "`{name}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+                "`{name}` is a {KEYWORD_LET} binding and cannot be exported: only {KEYWORD_CONST} bindings cross the module boundary"
             )),
             BindingPresence::Absent => None,
         })
@@ -465,7 +473,7 @@ pub(super) enum BrokenDetail {
 impl std::fmt::Display for ForwardError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ForwardError::Unknown { original } => write!(f, "unknown CONST `{original}`"),
+            ForwardError::Unknown { original } => write!(f, "unknown {KEYWORD_CONST} `{original}`"),
             ForwardError::Broken {
                 original,
                 hop,
@@ -474,10 +482,10 @@ impl std::fmt::Display for ForwardError {
                 let base = base_name(hop);
                 let detail = match detail {
                     BrokenDetail::UnexportedConst => format!(
-                        "module holds `{base}` as CONST but does not export it: add `EXPORT CONST ${base}`"
+                        "module holds `{base}` as {KEYWORD_CONST} but does not export it: add `{KEYWORD_EXPORT} {KEYWORD_CONST} ${base}`"
                     ),
                     BrokenDetail::Let => format!(
-                        "`{base}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+                        "`{base}` is a {KEYWORD_LET} binding and cannot be exported: only {KEYWORD_CONST} bindings cross the module boundary"
                     ),
                     BrokenDetail::Absent => {
                         let (forward, _) = split_qualified(hop).unwrap_or(("", base));
@@ -486,21 +494,25 @@ impl std::fmt::Display for ForwardError {
                 };
                 write!(
                     f,
-                    "unknown CONST `{original}`: re-export `{hop}` does not resolve: {detail}"
+                    "unknown {KEYWORD_CONST} `{original}`: re-export `{hop}` does not resolve: {detail}"
                 )
             }
             ForwardError::Split { original, hops } => write!(
                 f,
-                "ambiguous CONST `{original}`: re-exported from {}; export exactly one source",
+                "ambiguous {KEYWORD_CONST} `{original}`: re-exported from {}; export exactly one source",
                 hops.join(" and ")
             ),
             ForwardError::Cycle { chain } => {
-                write!(f, "CONST re-export cycle detected: {}", chain.join(" -> "))
+                write!(
+                    f,
+                    "{KEYWORD_CONST} re-export cycle detected: {}",
+                    chain.join(" -> ")
+                )
             }
             ForwardError::HopAmbiguous { alias, base, files } => write!(
                 f,
                 "{}",
-                ambiguous_alias_message(alias, base, files).replacen("function", "CONST", 1)
+                ambiguous_alias_message(alias, base, files).replacen("function", KEYWORD_CONST, 1)
             ),
         }
     }
@@ -917,6 +929,19 @@ impl<P: ProcessManager> Clone for HostRegistration<P> {
 }
 
 impl<P: ProcessManager> HostRegistration<P> {
+    /// Registry name this entry answers to. The lock test in `tests.rs`
+    /// (`function_names_match_registry`) asserts every
+    /// `function_names::FUNC_*` constant against this, so a rename of
+    /// the Rust function (which moves the macro-derived name) fails
+    /// loudly instead of leaving diagnostics text behind.
+    pub fn name(&self) -> &str {
+        match self {
+            HostRegistration::Stateful { name, .. } => name,
+            HostRegistration::Pure { name, .. } => name,
+            HostRegistration::Both { name, .. } => name,
+        }
+    }
+
     /// Introspectable metadata for this entry, for documentation tooling
     /// that reads modules without registering them.
     pub fn meta(&self) -> &FuncMeta {
@@ -960,7 +985,7 @@ pub(super) struct FuncDefData {
 /// defaults). Handles, pipes, custom types, unions, and the
 /// remaining words have no zero: omitting those fails at definition,
 /// so the caller passes explicitly.
-pub fn optional_zero_value(tag: &TypeTag) -> Result<Value> {
+pub fn optional_zero_value(tag: &TypeTag) -> DiagnosticResult<Value> {
     match tag {
         TypeTag::Bool => Ok(Value::bool(false)),
         TypeTag::String | TypeTag::Any => Ok(Value::string(String::new())),
@@ -975,10 +1000,9 @@ pub fn optional_zero_value(tag: &TypeTag) -> Result<Value> {
         {
             Ok(Value::map(BTreeMap::new()))
         }
-        other => anyhow::bail!(
-            "no zero value for {}; omit the `?` or pass the argument explicitly",
-            oxdock_parser::render_structural(other)
-        ),
+        other => Err(std_diag::func_zero_value_missing(
+            &oxdock_parser::render_structural(other),
+        )),
     }
 }
 
@@ -991,18 +1015,18 @@ pub fn resolve_script_params<P: ProcessManager>(
     state: &ExecState<P>,
     func_name: &str,
     params: &[(String, String, bool)],
-) -> Result<Vec<(String, TypeTag, bool)>> {
+) -> DiagnosticResult<Vec<(String, TypeTag, bool)>> {
     let mut resolved = Vec::with_capacity(params.len());
     for (pname, ptype, optional) in params {
         let clean = pname.trim_start_matches('$').to_string();
         let tag = state
             .resolve_tag(ptype)
-            .map_err(|err| anyhow::anyhow!("function `{func_name}`: {err:#}"))?;
+            .map_err(|err| std_diag::func_param_type(func_name, err))?;
         state.check_declaration_tag(&format!("function `{func_name}` param `${clean}`"), &tag)?;
         if *optional {
-            optional_zero_value(&tag).map(|_| ()).map_err(|err| {
-                anyhow::anyhow!("function `{func_name}` optional param `${clean}`: {err:#}")
-            })?;
+            optional_zero_value(&tag)
+                .map(|_| ())
+                .map_err(|err| std_diag::func_optional_param(func_name, &clean, err))?;
         }
         resolved.push((clean, tag, *optional));
     }
@@ -1011,12 +1035,15 @@ pub fn resolve_script_params<P: ProcessManager>(
 
 /// Validate already-resolved script param tags: the zero-value gate
 /// for registry insertion paths that never see spellings.
-pub fn check_script_param_tags(func_name: &str, params: &[(String, TypeTag, bool)]) -> Result<()> {
+pub fn check_script_param_tags(
+    func_name: &str,
+    params: &[(String, TypeTag, bool)],
+) -> DiagnosticResult<()> {
     for (pname, tag, optional) in params {
         if *optional {
-            optional_zero_value(tag).map(|_| ()).map_err(|err| {
-                anyhow::anyhow!("function `{func_name}` optional param `${pname}`: {err:#}")
-            })?;
+            optional_zero_value(tag)
+                .map(|_| ())
+                .map_err(|err| std_diag::func_optional_param(func_name, pname, err))?;
         }
     }
     Ok(())
@@ -1113,10 +1140,7 @@ pub fn placeholder_resolver(table: Arc<PureTable>) -> oxdock_process::Placeholde
                     .flat_map(|(m, entries)| entries.keys().map(move |f| format!("{m}::{f}")))
                     .collect();
                 known.sort();
-                anyhow::anyhow!(
-                    "unknown placeholder function '{module}::{func}'; known functions: {}",
-                    known.join(", ")
-                )
+                anyhow::Error::new(std_diag::func_placeholder_unknown(module, func, &known))
             })?;
         callee(args)
     })
@@ -1143,17 +1167,17 @@ pub(super) fn describe_placeholder_miss(
             format!("{qualified}(...)")
         };
         return Some(format!(
-            "placeholder function '{qualified}' is a script function and cannot run in {{{{ }}}}; bind the result first with LET $v = {call} then interpolate {{{{ $v }}}}"
+            "placeholder function '{qualified}' is a script function and cannot run in {{{{ }}}}; bind the result first with {KEYWORD_LET} $v = {call} then interpolate {{{{ $v }}}}"
         ));
     }
     if is_stateful {
         return Some(format!(
-            "placeholder function '{qualified}' is stateful and cannot run in {{{{ }}}}; capture it first with LET then interpolate {{{{ $v }}}}"
+            "placeholder function '{qualified}' is stateful and cannot run in {{{{ }}}}; capture it first with {KEYWORD_LET} then interpolate {{{{ $v }}}}"
         ));
     }
     if alias_known {
         return Some(format!(
-            "placeholder function '{qualified}': no function '{name}' under file alias '{module}'; check the file's EXPORT list and the IMPORT harvest, or bind a known function first with LET then interpolate {{{{ $v }}}}"
+            "placeholder function '{qualified}': no function '{name}' under file alias '{module}'; check the file's {KEYWORD_EXPORT} list and the {KEYWORD_IMPORT} harvest, or bind a known function first with {KEYWORD_LET} then interpolate {{{{ $v }}}}"
         ));
     }
     None
@@ -1593,7 +1617,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         body: &[Step],
         module: Option<&str>,
         def_jail: Option<(WorkspaceSelection, GuardedPath)>,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         let qualified = qualify(SCRIPT_MODULE_NAME, name);
         let shadowable = matches!(
             self.entries.get(&qualified).map(|entry| &entry.body),
@@ -1608,14 +1632,14 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 && !matches!(entry.body, FuncBody::Script(_))
         });
         if reserved && !shadowable {
-            anyhow::bail!("cannot shadow reserved function `{name}`");
+            return Err(std_diag::func_shadow_reserved(name));
         }
         if self
             .scopes
             .last()
             .is_some_and(|frame| frame.defined.contains(&qualified))
         {
-            anyhow::bail!("duplicate function `{name}` in same scope");
+            return Err(std_diag::func_duplicate_in_scope(name));
         }
         check_script_param_tags(name, params)?;
         let old = self.entries.insert(
@@ -1640,7 +1664,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                                     optional: *optional,
                                 })
                             })
-                            .collect::<Result<_>>()?,
+                            .collect::<DiagnosticResult<_>>()?,
                     ),
                     returns: Some(return_type.clone()),
                     rpn: false,
@@ -1683,7 +1707,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         is_async: bool,
         body: &[Step],
         defining: &str,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         // The importer alias selects the defining file at dispatch;
         // the key itself names the defining file so units never share
         // entries.
@@ -1700,7 +1724,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 && !matches!(entry.body, FuncBody::Script(_))
         });
         if reserved && !shadowable {
-            anyhow::bail!("cannot shadow reserved function `{name}`");
+            return Err(std_diag::func_shadow_reserved(name));
         }
         // File entries live in the global frame (index 0, never
         // popped): eviction on scope exit would strand the module
@@ -1711,7 +1735,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             .get(frame_idx)
             .is_some_and(|frame| frame.defined.contains(&qualified))
         {
-            anyhow::bail!("duplicate function `{name}` in same scope");
+            return Err(std_diag::func_duplicate_in_scope(name));
         }
         check_script_param_tags(name, params)?;
         let old = self.entries.insert(
@@ -1734,7 +1758,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                                     optional: *optional,
                                 })
                             })
-                            .collect::<Result<_>>()?,
+                            .collect::<DiagnosticResult<_>>()?,
                     ),
                     returns: Some(return_type.clone()),
                     rpn: false,
@@ -1815,16 +1839,15 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         &self,
         unit_targets: &AliasTargets,
         name: &str,
-    ) -> Result<Option<String>> {
+    ) -> DiagnosticResult<Option<String>> {
         match classify_alias_call(unit_targets, name, &|key| self.entries.contains_key(key)) {
             AliasResolution::Global | AliasResolution::Unknown | AliasResolution::Any { .. } => {
                 Ok(None)
             }
             AliasResolution::Canonical(key) => Ok(Some(key)),
-            AliasResolution::Ambiguous { alias, base, files } => Err(anyhow::anyhow!(
-                "{}",
-                ambiguous_alias_message(&alias, &base, &files)
-            )),
+            AliasResolution::Ambiguous { alias, base, files } => {
+                Err(std_diag::func_ambiguous_alias(&alias, &base, &files))
+            }
         }
     }
 
@@ -1905,7 +1928,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         &self,
         func_exports: &[String],
         unit_targets: &AliasTargets,
-    ) -> anyhow::Result<Vec<FuncMeta>> {
+    ) -> DiagnosticResult<Vec<FuncMeta>> {
         let mut out = Vec::with_capacity(func_exports.len());
         for name in func_exports {
             // Bare names are script FUNCs; qualified names resolve
@@ -1926,9 +1949,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 out.push(meta);
                 continue;
             }
-            anyhow::bail!(
-                "EXPORT `{name}` matches no defined script function or known host function"
-            );
+            return Err(std_diag::func_export_unknown(name));
         }
         Ok(out)
     }
@@ -2010,7 +2031,7 @@ fn int(
     #[union(Int, Float, String, Bool)]
     val: Value,
 ) -> Result<Value> {
-    super::args::int_from_value(val)
+    Ok(super::args::int_from_value(val)?)
 }
 
 /// Convert a value to FLOAT.
@@ -2033,7 +2054,7 @@ fn float(
     #[union(Float, Int, String)]
     val: Value,
 ) -> Result<Value> {
-    super::args::float_from_value(val)
+    Ok(super::args::float_from_value(val)?)
 }
 
 /// Format a byte count canonically (`500B`, `10KB`, `2MB`, `1GB`,
@@ -2059,8 +2080,8 @@ fn format_byte_count(
     bytes: i64,
 ) -> Result<Value> {
     if bytes < 0 {
-        return Err(anyhow::anyhow!(
-            "FORMAT_BYTE_COUNT needs a non-negative byte count, got {bytes}"
+        return Err(anyhow::Error::new(
+            std_diag::std_format_byte_count_negative(bytes),
         ));
     }
     Ok(Value::string(oxdock_parser::command::format_byte_count(
@@ -2120,9 +2141,9 @@ fn parse_byte_count(
 ) -> Result<Value> {
     if let Some(n) = text.as_i64() {
         if n < 0 {
-            return Err(anyhow::anyhow!(
-                "PARSE_BYTE_COUNT needs a non-negative byte count, got {n}"
-            ));
+            return Err(anyhow::Error::new(std_diag::std_parse_byte_count_negative(
+                n,
+            )));
         }
         return Ok(Value::int(n));
     }
@@ -2130,18 +2151,18 @@ fn parse_byte_count(
         if f.is_finite() && f.fract() == 0.0 && f >= 0.0 && f <= i64::MAX as f64 {
             return Ok(Value::int(f as i64));
         }
-        return Err(anyhow::anyhow!(
-            "PARSE_BYTE_COUNT needs an integral byte count, got {f:?}"
-        ));
+        return Err(anyhow::Error::new(std_diag::std_parse_byte_count_integral(
+            f,
+        )));
     }
     let Some(s) = text.as_str() else {
-        return Err(anyhow::anyhow!(
-            "PARSE_BYTE_COUNT needs a token or number, found {text:?}"
-        ));
+        return Err(anyhow::Error::new(std_diag::std_parse_byte_count_shape(
+            &text,
+        )));
     };
     let n = oxdock_parser::command::parse_byte_count(s)?;
     let n = i64::try_from(n)
-        .map_err(|_| anyhow::anyhow!("PARSE_BYTE_COUNT out of INT range: {s:?}"))?;
+        .map_err(|_| anyhow::Error::new(std_diag::std_parse_byte_count_range(s)))?;
     Ok(Value::int(n))
 }
 
@@ -2168,9 +2189,9 @@ fn format_duration(
     millis: i64,
 ) -> Result<Value> {
     if millis < 0 {
-        return Err(anyhow::anyhow!(
-            "FORMAT_DURATION needs non-negative milliseconds, got {millis}"
-        ));
+        return Err(anyhow::Error::new(std_diag::std_format_duration_negative(
+            millis,
+        )));
     }
     Ok(Value::string(oxdock_parser::command::format_duration(
         &std::time::Duration::from_millis(millis as u64),
@@ -2206,7 +2227,7 @@ fn parse_duration(
 ) -> Result<Value> {
     let duration = oxdock_parser::command::parse_duration(&text)?;
     let millis = i64::try_from(duration.as_millis())
-        .map_err(|_| anyhow::anyhow!("PARSE_DURATION out of INT range: {text:?}"))?;
+        .map_err(|_| anyhow::Error::new(std_diag::std_parse_duration_range(&text)))?;
     Ok(Value::int(millis))
 }
 
@@ -2234,7 +2255,7 @@ fn glob<P: ProcessManager>(
     pattern: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&pattern)?;
-    super::args::glob_from_value(&[Value::string(text)], cx)
+    Ok(super::args::glob_from_value(&[Value::string(text)], cx)?)
 }
 
 /// Load and parse a TOML file.
@@ -2258,7 +2279,10 @@ fn load_toml<P: ProcessManager>(
     path: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&path)?;
-    super::args::load_toml_from_value(&[Value::string(text)], cx)
+    Ok(super::args::load_toml_from_value(
+        &[Value::string(text)],
+        cx,
+    )?)
 }
 
 /// Load and parse a JSON file.
@@ -2285,7 +2309,10 @@ fn load_json<P: ProcessManager>(
     path: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&path)?;
-    super::args::load_json_from_value(&[Value::string(text)], cx)
+    Ok(super::args::load_json_from_value(
+        &[Value::string(text)],
+        cx,
+    )?)
 }
 
 /// Hash a workspace file or directory with SHA-256.
@@ -2371,7 +2398,7 @@ fn parse_toml(
     /// TOML text already held in memory.
     text: String,
 ) -> Result<Value> {
-    super::args::parse_toml_from_value(Value::string(text))
+    Ok(super::args::parse_toml_from_value(Value::string(text))?)
 }
 
 /// Parse JSON text already held in memory.
@@ -2402,7 +2429,7 @@ fn parse_json(
     /// JSON text already held in memory.
     text: String,
 ) -> Result<Value> {
-    super::args::parse_json_from_value(Value::string(text))
+    Ok(super::args::parse_json_from_value(Value::string(text))?)
 }
 
 /// Describe a filesystem entry.
@@ -2429,7 +2456,10 @@ fn path_type<P: ProcessManager>(
     path: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&path)?;
-    super::args::path_type_from_value(&[Value::string(text)], cx)
+    Ok(super::args::path_type_from_value(
+        &[Value::string(text)],
+        cx,
+    )?)
 }
 
 /// Report whether an ordinary file can be created at a path.
@@ -2461,7 +2491,10 @@ fn path_writable<P: ProcessManager>(
     path: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&path)?;
-    super::args::path_writable_from_value(&[Value::string(text)], cx)
+    Ok(super::args::path_writable_from_value(
+        &[Value::string(text)],
+        cx,
+    )?)
 }
 
 /// Report whether a name resolves to an executable file (#100).
@@ -2498,7 +2531,7 @@ fn is_exec<P: ProcessManager>(
     name: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&name)?;
-    super::args::is_exec_from_value(&[Value::string(text)], cx)
+    Ok(super::args::is_exec_from_value(&[Value::string(text)], cx)?)
 }
 
 /// Report whether a workspace path names an ordinary file.
@@ -2613,7 +2646,7 @@ fn has_key(
     /// Key to look up.
     key: String,
 ) -> Result<Value> {
-    super::args::has_key_from_value(Value::map(map), &key)
+    Ok(super::args::has_key_from_value(Value::map(map), &key)?)
 }
 
 /// Read one map entry with a default for missing keys.
@@ -2671,7 +2704,11 @@ fn map_set(
     /// Value to store.
     value: Value,
 ) -> Result<Value> {
-    super::args::map_set_from_value(Value::map(map), key, value)
+    Ok(super::args::map_set_from_value(
+        Value::map(map),
+        key,
+        value,
+    )?)
 }
 
 /// Draw a random FLOAT uniformly from [0, 1), optionally seeded.
@@ -2721,7 +2758,7 @@ fn rand<P: ProcessManager>(
     let seed = options
         .get("seed")
         .map(|value| value.as_i64().expect("check_options verified INT"));
-    super::args::rand_float_from_value(seed)
+    Ok(super::args::rand_float_from_value(seed)?)
 }
 
 /// Encode a STRING as standard base64.
@@ -2743,7 +2780,7 @@ fn base64_encode(
     /// Text to encode.
     text: String,
 ) -> Result<Value> {
-    super::args::base64_encode_from_value(Value::string(text))
+    Ok(super::args::base64_encode_from_value(Value::string(text))?)
 }
 
 /// Decode standard base64 to a STRING.
@@ -2766,7 +2803,7 @@ fn base64_decode(
     /// Base64 text to decode.
     text: String,
 ) -> Result<Value> {
-    super::args::base64_decode_from_value(Value::string(text))
+    Ok(super::args::base64_decode_from_value(Value::string(text))?)
 }
 
 /// Encode a script value as JSON with one trailing newline.
@@ -2789,7 +2826,7 @@ fn to_json(
     #[union(String, Int, Float, Bool, List, Map)]
     value: Value,
 ) -> Result<Value> {
-    super::args::to_json_from_value(value)
+    Ok(super::args::to_json_from_value(value)?)
 }
 
 /// Name the word a value holds, for data-driven branching.
@@ -2812,7 +2849,7 @@ fn type_of(
     /// Value whose word to name.
     value: Value,
 ) -> Result<Value> {
-    super::args::type_of_from_value(value)
+    Ok(super::args::type_of_from_value(value)?)
 }
 
 /// Merge a LIST of MAPs in order under one duplicate policy.
@@ -2844,10 +2881,10 @@ fn merge_maps(
     #[values("fail_on_duplicate", "overwrite")]
     policy: String,
 ) -> Result<Value> {
-    super::args::merge_maps_from_value(
+    Ok(super::args::merge_maps_from_value(
         Value::list(maps.into_iter().map(Value::map).collect()),
         policy,
-    )
+    )?)
 }
 
 /// Report the running engine version.
@@ -2947,11 +2984,14 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
     fn registration() -> HostRegistration<P> {
         let func: NativeFn<P> = Arc::new(|cx: &mut StepCtx<P>, values: Vec<Value>| {
             if values.len() != 1 {
-                anyhow::bail!("PARSE_ARGS() expects 1 argument, got {}", values.len());
+                return Err(anyhow::Error::new(std_diag::std_parse_args_arity(
+                    values.len(),
+                )));
             }
             let mut iter = values.into_iter();
             let args_val = iter.next().expect("arity checked above");
-            let args = string_list_arg(&args_val, "PARSE_ARGS() argument `$args`")?;
+            let args =
+                string_list_arg(&args_val, &format!("{FUNC_PARSE_ARGS}() argument `$args`"))?;
             let specs = resolve_flags_specs(cx)?;
             let (raw, positionals) = tokenize_raw_args(args)?;
             let coerced = coerce_flags(&specs, &raw)?;
@@ -2963,9 +3003,9 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
             Ok(Value::map(out))
         });
         HostRegistration::Stateful {
-            name: "PARSE_ARGS".to_string(),
+            name: FUNC_PARSE_ARGS.to_string(),
             meta: FuncMeta {
-                name: "PARSE_ARGS".to_string(),
+                name: FUNC_PARSE_ARGS.to_string(),
                 module: String::new(),
                 kind: FuncKind::HostPure,
                 params: Some(vec![FuncParam {
@@ -3155,7 +3195,7 @@ enum CliType {
 /// ever `BOOL true` (bare) or `STRING` (equals form); anything else is
 /// a caller bug. Bare flags for non-`BOOL` targets fail naming the
 /// flag instead of smuggling `true` into the slot.
-fn coerce_cli_flag(target: CliType, flag: &str, raw: Value) -> Result<Value> {
+fn coerce_cli_flag(target: CliType, flag: &str, raw: Value) -> DiagnosticResult<Value> {
     match target {
         CliType::Bool => {
             if let Some(b) = raw.as_bool() {
@@ -3164,35 +3204,31 @@ fn coerce_cli_flag(target: CliType, flag: &str, raw: Value) -> Result<Value> {
             if let Some(s) = raw.as_str() {
                 match super::args::parse_bool_str(s) {
                     Some(b) => return Ok(Value::bool(b)),
-                    None => anyhow::bail!(
-                        "PARSE_ARGS flag --{flag} expects BOOL (true/false, 1/0, yes/no, on/off), got {s:?}"
-                    ),
+                    None => {
+                        return Err(std_diag::std_parse_args_bool_flag(flag, s));
+                    }
                 }
             }
-            anyhow::bail!(
-                "PARSE_ARGS flag --{flag} expects BOOL, got {}",
-                raw.type_name()
-            )
+            Err(std_diag::std_parse_args_bool_type(flag, raw.type_name()))
         }
         CliType::String => {
             if let Some(s) = raw.as_str() {
                 return Ok(Value::string(s.to_string()));
             }
-            anyhow::bail!("PARSE_ARGS flag --{flag} needs a value: use --{flag}=<value>");
+            Err(std_diag::std_parse_args_needs_value(flag))
         }
         CliType::Int => {
             if raw.as_bool().is_some() {
-                anyhow::bail!("PARSE_ARGS flag --{flag} needs a value: use --{flag}=<value>");
+                return Err(std_diag::std_parse_args_needs_value(flag));
             }
-            super::args::int_from_value(raw)
-                .map_err(|_| anyhow::anyhow!("PARSE_ARGS flag --{flag} expects INT"))
+            super::args::int_from_value(raw).map_err(|_| std_diag::std_parse_args_expects_int(flag))
         }
         CliType::Float => {
             if raw.as_bool().is_some() {
-                anyhow::bail!("PARSE_ARGS flag --{flag} needs a value: use --{flag}=<value>");
+                return Err(std_diag::std_parse_args_needs_value(flag));
             }
             super::args::float_from_value(raw)
-                .map_err(|_| anyhow::anyhow!("PARSE_ARGS flag --{flag} expects FLOAT"))
+                .map_err(|_| std_diag::std_parse_args_expects_float(flag))
         }
     }
 }
@@ -3213,8 +3249,9 @@ type CliSpecs = BTreeMap<String, CliSpec>;
 
 /// Checked `LIST<STRING>` extraction for the CLI trio. Single owner
 /// so all three functions admit exactly the same argv shape.
-fn string_list_arg(val: &Value, what: &str) -> Result<Vec<String>> {
-    crate::check_value_at(&TypeTag::ListOf(Arc::new(TypeTag::String)), val, what)?;
+fn string_list_arg(val: &Value, what: &str) -> DiagnosticResult<Vec<String>> {
+    crate::check_value_at(&TypeTag::ListOf(Arc::new(TypeTag::String)), val, what)
+        .map_err(|err| std_diag::std_parse_args_arg_shape(&err))?;
     Ok(val
         .as_list()
         .expect("check_value_at enforces LIST")
@@ -3230,15 +3267,15 @@ fn string_list_arg(val: &Value, what: &str) -> Result<Vec<String>> {
 /// Shared argv tokenizer. Single owner so flags versus positionals
 /// split identically for all three entry points. Raw values are only
 /// `BOOL true` (bare) or `STRING` (equals form).
-fn tokenize_raw_args(args: Vec<String>) -> Result<(BTreeMap<String, Value>, Vec<Value>)> {
+fn tokenize_raw_args(args: Vec<String>) -> DiagnosticResult<(BTreeMap<String, Value>, Vec<Value>)> {
     use lexopt::Arg::{Long, Short, Value as ArgValue};
     let mut parser = lexopt::Parser::from_args(args);
     let mut flags: BTreeMap<String, Value> = BTreeMap::new();
     let mut positionals: Vec<Value> = Vec::new();
-    let utf8 = |value: std::ffi::OsString| -> Result<String> {
+    let utf8 = |value: std::ffi::OsString| -> DiagnosticResult<String> {
         value
             .into_string()
-            .map_err(|_| anyhow::anyhow!("PARSE_ARGS: argument must be UTF-8"))
+            .map_err(|_| std_diag::std_parse_args_not_utf8())
     };
     loop {
         match parser.next() {
@@ -3264,7 +3301,7 @@ fn tokenize_raw_args(args: Vec<String>) -> Result<(BTreeMap<String, Value>, Vec<
                     .unwrap_or(option.as_str());
                 flags.insert(key.to_string(), Value::string(utf8(value)?));
             }
-            Err(err) => anyhow::bail!("PARSE_ARGS: {err}"),
+            Err(err) => return Err(std_diag::std_parse_args_lex_error(&err)),
         }
     }
     Ok((flags, positionals))
@@ -3280,7 +3317,7 @@ fn tokenize_raw_args(args: Vec<String>) -> Result<(BTreeMap<String, Value>, Vec<
 fn coerce_flags(
     specs: &CliSpecs,
     raw: &BTreeMap<String, Value>,
-) -> Result<BTreeMap<String, Value>> {
+) -> DiagnosticResult<BTreeMap<String, Value>> {
     // Alias reverse map: alias spelling to canonical key. Validated
     // unique at type resolution, so a duplicate insert is unreachable.
     let mut alias_to_canonical: BTreeMap<&str, &str> = BTreeMap::new();
@@ -3292,17 +3329,15 @@ fn coerce_flags(
     let mut coerced: BTreeMap<String, Value> = BTreeMap::new();
     for (flag, spec) in specs.iter() {
         if flag.is_empty() {
-            anyhow::bail!("PARSE_ARGS schema flag names must be non-empty");
+            return Err(std_diag::std_parse_args_schema_flag_empty());
         }
         let canonical_raw = raw.get(flag);
         let alias_raw = spec.alias.as_ref().and_then(|alias| raw.get(alias));
-        // Display name names both spellings when an alias exists.
-        let display = match spec.alias.as_ref() {
-            Some(alias) => format!("--{flag}/--{alias}"),
-            None => format!("--{flag}"),
-        };
         if canonical_raw.is_some() && alias_raw.is_some() {
-            anyhow::bail!("PARSE_ARGS duplicate flag {display}");
+            return Err(std_diag::std_parse_args_duplicate_flag(
+                flag,
+                spec.alias.as_deref(),
+            ));
         }
         if let Some(raw_val) = canonical_raw.or(alias_raw) {
             coerced.insert(
@@ -3312,12 +3347,15 @@ fn coerce_flags(
         } else if let Some(d) = spec.default.as_ref() {
             coerced.insert(flag.clone(), d.clone());
         } else if spec.required {
-            anyhow::bail!("PARSE_ARGS missing required flag {display}");
+            return Err(std_diag::std_parse_args_missing_flag(
+                flag,
+                spec.alias.as_deref(),
+            ));
         }
     }
     for flag in raw.keys() {
         if !specs.contains_key(flag) && !alias_to_canonical.contains_key(flag.as_str()) {
-            anyhow::bail!("PARSE_ARGS unknown flag --{flag}");
+            return Err(std_diag::std_parse_args_unknown_flag(flag));
         }
     }
     Ok(coerced)
@@ -3329,14 +3367,14 @@ fn coerce_flags(
 /// carried for command-line acceptance. Single owner so both pair and
 /// flags only entry points admit exactly the same set. Non-record
 /// types and non-scalar fields fail naming the flag.
-fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<CliSpecs> {
+fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> DiagnosticResult<CliSpecs> {
     let name = "FLAGS";
     let tag = cx
         .state
         .resolve_tag(name)
-        .map_err(|err| anyhow::anyhow!("PARSE_ARGS schema type {name:?}: {err:#}"))?;
+        .map_err(|err| std_diag::std_parse_args_schema_type(name, &anyhow::Error::new(err)))?;
     let TypeTag::Record(fields) = tag else {
-        anyhow::bail!("PARSE_ARGS schema type {name:?} must be a MAP shape with scalar fields");
+        return Err(std_diag::std_parse_args_schema_shape(name));
     };
     let mut specs = BTreeMap::new();
     for field in fields.iter() {
@@ -3345,11 +3383,12 @@ fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<CliSpec
             TypeTag::Bool => CliType::Bool,
             TypeTag::Int => CliType::Int,
             TypeTag::Float => CliType::Float,
-            _ => anyhow::bail!(
-                "PARSE_ARGS schema for --{}: type must be one of STRING, BOOL, INT, or FLOAT, got {}",
-                field.name,
-                field.ty.name(),
-            ),
+            _ => {
+                return Err(std_diag::std_parse_args_schema_field_type(
+                    &field.name,
+                    field.ty.name(),
+                ));
+            }
         };
         specs.insert(
             field.name.clone(),
@@ -3377,26 +3416,29 @@ impl<P: ProcessManager> OxDockFn<P> for ParseFlags {
     fn registration() -> HostRegistration<P> {
         let func: NativeFn<P> = Arc::new(|cx: &mut StepCtx<P>, values: Vec<Value>| {
             if values.len() != 1 {
-                anyhow::bail!("PARSE_FLAGS() expects 1 argument, got {}", values.len());
+                return Err(anyhow::Error::new(std_diag::std_parse_flags_arity(
+                    values.len(),
+                )));
             }
             let mut iter = values.into_iter();
             let args_val = iter.next().expect("arity checked above");
-            let args = string_list_arg(&args_val, "PARSE_FLAGS() argument `$args`")?;
+            let args = string_list_arg(&args_val, "{FUNC_PARSE_FLAGS}() argument `$args`")?;
             let specs = resolve_flags_specs(cx)?;
             let (raw, positionals) = tokenize_raw_args(args)?;
             if !positionals.is_empty() {
-                let shown: Vec<String> = positionals.iter().map(|pos| pos.to_string()).collect();
-                anyhow::bail!(
-                    "PARSE_FLAGS() does not accept positional arguments; found {}",
-                    shown.join(", ")
-                );
+                return Err(anyhow::Error::new(std_diag::std_parse_flags_positional(
+                    &positionals
+                        .iter()
+                        .map(|pos| pos.to_string())
+                        .collect::<Vec<_>>(),
+                )));
             }
             Ok(Value::map(coerce_flags(&specs, &raw)?))
         });
         HostRegistration::Stateful {
-            name: "PARSE_FLAGS".to_string(),
+            name: FUNC_PARSE_FLAGS.to_string(),
             meta: FuncMeta {
-                name: "PARSE_FLAGS".to_string(),
+                name: FUNC_PARSE_FLAGS.to_string(),
                 module: String::new(),
                 kind: FuncKind::HostPure,
                 params: Some(vec![FuncParam {
@@ -3439,21 +3481,23 @@ impl<P: ProcessManager> OxDockFn<P> for ParsePositionals {
     fn registration() -> HostRegistration<P> {
         let func: NativeFn<P> = Arc::new(|_: &mut StepCtx<P>, values: Vec<Value>| {
             if values.len() != 1 {
-                anyhow::bail!(
-                    "PARSE_POSITIONALS() expects 1 argument, got {}",
-                    values.len()
-                );
+                return Err(anyhow::Error::new(std_diag::std_parse_positionals_arity(
+                    values.len(),
+                )));
             }
             let mut iter = values.into_iter();
             let args_val = iter.next().expect("arity checked above");
-            let args = string_list_arg(&args_val, "PARSE_POSITIONALS() argument `$args`")?;
+            let args = string_list_arg(
+                &args_val,
+                &format!("{FUNC_PARSE_POSITIONALS}() argument `$args`"),
+            )?;
             let (_raw, positionals) = tokenize_raw_args(args)?;
             Ok(Value::list(positionals))
         });
         HostRegistration::Stateful {
-            name: "PARSE_POSITIONALS".to_string(),
+            name: FUNC_PARSE_POSITIONALS.to_string(),
             meta: FuncMeta {
-                name: "PARSE_POSITIONALS".to_string(),
+                name: FUNC_PARSE_POSITIONALS.to_string(),
                 module: String::new(),
                 kind: FuncKind::HostPure,
                 params: Some(vec![FuncParam {
@@ -3570,13 +3614,13 @@ fn describe<P: ProcessManager>(
     name: String,
 ) -> Result<Value> {
     if split_qualified(&name).is_none() && name != KEYWORD_INSPECT {
-        anyhow::bail!(
-            "unknown function `{name}`: DESCRIBE requires a qualified name (e.g. `STD::{name}`)"
-        );
+        return Err(anyhow::Error::new(std_diag::func_describe_unqualified(
+            &name,
+        )));
     }
     cx.state
         .describe_function(&name)
-        .ok_or_else(|| anyhow::anyhow!("unknown function {name}"))
+        .ok_or_else(|| anyhow::Error::new(std_diag::func_unknown(&name)))
 }
 
 /// List all known type names.
@@ -3671,12 +3715,12 @@ fn type_describe<P: ProcessManager>(
         map.insert(
             "docs".to_string(),
             Value::string(format!(
-                "Declared with TYPE {name} = {target}. The alias expands structurally at every declaration."
+                "Declared with {KEYWORD_TYPE} {name} = {target}. The alias expands structurally at every declaration."
             )),
         );
         return Ok(Value::map(map));
     }
-    Err(anyhow::anyhow!("unknown type {name}"))
+    Err(anyhow::Error::new(std_diag::std_unknown_type(&name)))
 }
 
 /// Path of the running interpreter binary.
@@ -3892,13 +3936,11 @@ fn is_terminal<P: ProcessManager>(
                 }
             }
         }
-        _ => anyhow::bail!(
-            // Unreachable through the macro path: the generated
-            // extractor rejects non-members before the body runs, and
-            // the static pre-pass rejects bad literals earlier still.
-            // Kept as a bail (never a panic) for hand-built callers.
-            "IS_TERMINAL expects \"stdin\", \"stdout\", or \"stderr\", got {stream_name:?}"
-        ),
+        _ => {
+            return Err(anyhow::Error::new(std_diag::std_is_terminal_expected(
+                &stream_name,
+            )));
+        }
     };
     Ok(Value::bool(terminal))
 }
@@ -3930,9 +3972,9 @@ fn semaphore_new<P: ProcessManager>(
 ) -> Result<Value> {
     let _ = cx;
     if max <= 0 {
-        return Err(anyhow::anyhow!(
-            "SEMAPHORE_NEW() requires a positive max, got {max}"
-        ));
+        return Err(anyhow::Error::new(std_diag::std_semaphore_needs_positive(
+            max,
+        )));
     }
     Ok(Value::semaphore(max as usize))
 }
@@ -4082,13 +4124,22 @@ fn text_trim<P: ProcessManager>(
     #[union(String, Pipe)]
     text: Value,
 ) -> Result<Value> {
-    super::args::mirror_stream(cx, "TEXT_TRIM", &text, super::args::TextPump::Trim)
+    Ok(super::args::mirror_stream(
+        cx,
+        "TEXT_TRIM",
+        &text,
+        super::args::TextPump::Trim,
+    )?)
 }
 
 /// Template projection of `TEXT_TRIM`: the same trim for `{{ }}`
 /// placeholders, which carry no step IO for pipes.
 fn text_trim_string(text: Value) -> Result<Value> {
-    super::args::mirror_string("TEXT_TRIM", &text, super::args::TextPump::Trim)
+    Ok(super::args::mirror_string(
+        "TEXT_TRIM",
+        &text,
+        super::args::TextPump::Trim,
+    )?)
 }
 
 /// Strip one leading prefix, returning the input unchanged when absent.
@@ -4149,22 +4200,22 @@ fn text_trim_prefix<P: ProcessManager>(
     /// Leading prefix to remove once.
     prefix: String,
 ) -> Result<Value> {
-    super::args::mirror_stream(
+    Ok(super::args::mirror_stream(
         cx,
         "TEXT_TRIM_PREFIX",
         &text,
         super::args::TextPump::TrimPrefix(prefix),
-    )
+    )?)
 }
 
 /// Template projection of `TEXT_TRIM_PREFIX`: the same strip for
 /// `{{ }}` placeholders, which carry no step IO for pipes.
 fn text_trim_prefix_string(text: Value, prefix: String) -> Result<Value> {
-    super::args::mirror_string(
+    Ok(super::args::mirror_string(
         "TEXT_TRIM_PREFIX",
         &text,
         super::args::TextPump::TrimPrefix(prefix),
-    )
+    )?)
 }
 
 /// Strip one trailing suffix, returning the input unchanged when absent.
@@ -4223,22 +4274,22 @@ fn text_trim_suffix<P: ProcessManager>(
     /// Trailing suffix to remove once.
     suffix: String,
 ) -> Result<Value> {
-    super::args::mirror_stream(
+    Ok(super::args::mirror_stream(
         cx,
         "TEXT_TRIM_SUFFIX",
         &text,
         super::args::TextPump::TrimSuffix(suffix),
-    )
+    )?)
 }
 
 /// Template projection of `TEXT_TRIM_SUFFIX`: the same strip for
 /// `{{ }}` placeholders, which carry no step IO for pipes.
 fn text_trim_suffix_string(text: Value, suffix: String) -> Result<Value> {
-    super::args::mirror_string(
+    Ok(super::args::mirror_string(
         "TEXT_TRIM_SUFFIX",
         &text,
         super::args::TextPump::TrimSuffix(suffix),
-    )
+    )?)
 }
 
 /// Join a directory and a file name with the host-native separator.
@@ -4305,7 +4356,8 @@ fn path_base(
     path: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&path)?;
-    let base = oxdock_fs::path_base(&text).map_err(|e| anyhow::anyhow!("PATH_BASE: {e:#}"))?;
+    let base = oxdock_fs::path_base(&text)
+        .map_err(|e| anyhow::Error::new(std_diag::std_path_base_failed(&e)))?;
     Ok(Value::string(base))
 }
 
@@ -4342,7 +4394,8 @@ fn path_rel(
 ) -> Result<Value> {
     let b = super::args::string_or_path_text(&base)?;
     let p = super::args::string_or_path_text(&path)?;
-    let rel = oxdock_fs::path_rel(&b, &p).map_err(|e| anyhow::anyhow!("PATH_REL: {e:#}"))?;
+    let rel = oxdock_fs::path_rel(&b, &p)
+        .map_err(|e| anyhow::Error::new(std_diag::std_path_rel_failed(&e)))?;
     Ok(Value::string(rel))
 }
 
@@ -4395,13 +4448,22 @@ fn text_to_upper<P: ProcessManager>(
     #[union(String, Pipe)]
     text: Value,
 ) -> Result<Value> {
-    super::args::mirror_stream(cx, "TEXT_TO_UPPER", &text, super::args::TextPump::ToUpper)
+    Ok(super::args::mirror_stream(
+        cx,
+        "TEXT_TO_UPPER",
+        &text,
+        super::args::TextPump::ToUpper,
+    )?)
 }
 
 /// Template projection of `TEXT_TO_UPPER`: the same fold for `{{ }}`
 /// placeholders, which carry no step IO for pipes.
 fn text_to_upper_string(text: Value) -> Result<Value> {
-    super::args::mirror_string("TEXT_TO_UPPER", &text, super::args::TextPump::ToUpper)
+    Ok(super::args::mirror_string(
+        "TEXT_TO_UPPER",
+        &text,
+        super::args::TextPump::ToUpper,
+    )?)
 }
 
 /// Lowercase text with full Unicode mapping.
@@ -4453,13 +4515,22 @@ fn text_to_lower<P: ProcessManager>(
     #[union(String, Pipe)]
     text: Value,
 ) -> Result<Value> {
-    super::args::mirror_stream(cx, "TEXT_TO_LOWER", &text, super::args::TextPump::ToLower)
+    Ok(super::args::mirror_stream(
+        cx,
+        "TEXT_TO_LOWER",
+        &text,
+        super::args::TextPump::ToLower,
+    )?)
 }
 
 /// Template projection of `TEXT_TO_LOWER`: the same fold for `{{ }}`
 /// placeholders, which carry no step IO for pipes.
 fn text_to_lower_string(text: Value) -> Result<Value> {
-    super::args::mirror_string("TEXT_TO_LOWER", &text, super::args::TextPump::ToLower)
+    Ok(super::args::mirror_string(
+        "TEXT_TO_LOWER",
+        &text,
+        super::args::TextPump::ToLower,
+    )?)
 }
 
 /// Replace every literal occurrence of `from` with `to`.
@@ -4520,22 +4591,22 @@ fn text_replace<P: ProcessManager>(
     /// Literal replacement text.
     to: String,
 ) -> Result<Value> {
-    super::args::mirror_stream(
+    Ok(super::args::mirror_stream(
         cx,
-        "TEXT_REPLACE",
+        FUNC_TEXT_REPLACE,
         &text,
         super::args::TextPump::ReplaceLiteral { from, to },
-    )
+    )?)
 }
 
 /// Template projection of `TEXT_REPLACE`: the same rewrite for `{{ }}`
 /// placeholders, which carry no step IO for pipes.
 fn text_replace_string(text: Value, from: String, to: String) -> Result<Value> {
-    super::args::mirror_string(
-        "TEXT_REPLACE",
+    Ok(super::args::mirror_string(
+        FUNC_TEXT_REPLACE,
         &text,
         super::args::TextPump::ReplaceLiteral { from, to },
-    )
+    )?)
 }
 
 /// Replace every regex match, expanding `$1` and `$name` captures.
@@ -4598,27 +4669,36 @@ fn text_replace_regex<P: ProcessManager>(
     replacement: String,
 ) -> Result<Value> {
     if let Some(s) = text.as_str() {
-        let out =
-            super::args::text_replace_regex_str(s, &pattern, &replacement, "TEXT_REPLACE_REGEX")?;
+        let out = super::args::text_replace_regex_str(
+            s,
+            &pattern,
+            &replacement,
+            FUNC_TEXT_REPLACE_REGEX,
+        )?;
         return Ok(Value::string(out));
     }
-    let content = super::args::read_pipe_eager(cx, "TEXT_REPLACE_REGEX", &text)?;
+    let content = super::args::read_pipe_eager(cx, FUNC_TEXT_REPLACE_REGEX, &text)?;
     let out = super::args::text_replace_regex_str(
         &content,
         &pattern,
         &replacement,
-        "TEXT_REPLACE_REGEX",
+        FUNC_TEXT_REPLACE_REGEX,
     )?;
-    super::args::write_completed_pipe(cx, "TEXT_REPLACE_REGEX", out)
+    Ok(super::args::write_completed_pipe(
+        cx,
+        FUNC_TEXT_REPLACE_REGEX,
+        out,
+    )?)
 }
 
 /// Template projection of `TEXT_REPLACE_REGEX`: the same rewrite for
 /// `{{ }}` placeholders, which carry no step IO for pipes.
 fn text_replace_regex_string(text: Value, pattern: String, replacement: String) -> Result<Value> {
     let Some(s) = text.as_str() else {
-        return Err(super::args::pipe_needs_step_io("TEXT_REPLACE_REGEX"));
+        return Err(std_diag::std_pipe_needs_step_io(FUNC_TEXT_REPLACE_REGEX).into());
     };
-    let out = super::args::text_replace_regex_str(s, &pattern, &replacement, "TEXT_REPLACE_REGEX")?;
+    let out =
+        super::args::text_replace_regex_str(s, &pattern, &replacement, FUNC_TEXT_REPLACE_REGEX)?;
     Ok(Value::string(out))
 }
 
@@ -4708,7 +4788,7 @@ fn shell_split_args(
 ) -> Result<Value> {
     match shell_words::split(&command) {
         Ok(words) => Ok(super::args::text_list_value(words)),
-        Err(err) => anyhow::bail!("SHELL_SPLIT_ARGS: {err}"),
+        Err(err) => Err(anyhow::Error::new(std_diag::std_shell_split_failed(&err))),
     }
 }
 
@@ -4842,7 +4922,7 @@ fn text_lines_range(
     to: i64,
 ) -> Result<Value> {
     Ok(super::args::text_list_value(
-        super::args::text_lines_range_str(&text, from, to, "TEXT_LINES_RANGE")?,
+        super::args::text_lines_range_str(&text, from, to, FUNC_TEXT_LINES_RANGE)?,
     ))
 }
 
@@ -4873,7 +4953,7 @@ fn text_match(
     /// Regex pattern to match.
     pattern: String,
 ) -> Result<Value> {
-    let re = super::args::text_compile_pattern("TEXT_MATCH", &pattern)?;
+    let re = super::args::text_compile_pattern(FUNC_TEXT_MATCH, &pattern)?;
     Ok(Value::bool(re.is_match(&text)))
 }
 
@@ -4905,13 +4985,15 @@ fn bool_convert(
         return Ok(Value::bool(b));
     }
     let Some(s) = val.as_str() else {
-        return Err(anyhow::anyhow!(
-            "BOOL needs a Bool or String, found {val:?}"
-        ));
+        return Err(anyhow::Error::new(std_diag::std_bool_needs_bool_or_string(
+            &val,
+        )));
     };
     match super::args::parse_bool_str(s) {
         Some(b) => Ok(Value::bool(b)),
-        None => anyhow::bail!("BOOL cannot coerce {s:?} to BOOL"),
+        None => Err(anyhow::Error::new(std_diag::std_bool_cannot_coerce(
+            FUNC_BOOL, s,
+        ))),
     }
 }
 
@@ -4950,7 +5032,10 @@ fn bool_or(
     }
     match super::args::parse_bool_str(&text) {
         Some(b) => Ok(Value::bool(b)),
-        None => anyhow::bail!("BOOL_OR cannot coerce {text:?} to BOOL"),
+        None => Err(anyhow::Error::new(std_diag::std_bool_cannot_coerce(
+            FUNC_BOOL_OR,
+            &text,
+        ))),
     }
 }
 
@@ -4980,7 +5065,7 @@ fn text_extract(
     /// Regex pattern with capture groups.
     pattern: String,
 ) -> Result<Value> {
-    let groups = super::args::text_extract_str(&text, &pattern, "TEXT_EXTRACT")?;
+    let groups = super::args::text_extract_str(&text, &pattern, FUNC_TEXT_EXTRACT)?;
     Ok(super::args::text_list_value(groups))
 }
 
@@ -5100,10 +5185,9 @@ fn contains(
 ) -> Result<Value> {
     if let Some(text) = haystack.as_str() {
         let Some(n) = needle.as_str() else {
-            return Err(anyhow::anyhow!(
-                "CONTAINS needs a STRING needle for a STRING haystack, found {}",
-                needle.type_name()
-            ));
+            return Err(anyhow::Error::new(std_diag::std_contains_needle_type(
+                needle.type_name(),
+            )));
         };
         return Ok(Value::bool(text.contains(n)));
     }
@@ -5115,10 +5199,9 @@ fn contains(
         }
         return Ok(Value::bool(false));
     }
-    Err(anyhow::anyhow!(
-        "CONTAINS needs a STRING or LIST haystack, found {}",
-        haystack.type_name()
-    ))
+    Err(anyhow::Error::new(std_diag::std_contains_haystack_type(
+        haystack.type_name(),
+    )))
 }
 
 /// Deduplicate a `LIST`, keeping the first occurrence of each member.
@@ -5225,10 +5308,9 @@ fn len(
     if let Some(entries) = value.as_map() {
         return Ok(Value::int(entries.len() as i64));
     }
-    Err(anyhow::anyhow!(
-        "LEN needs a STRING, LIST, or MAP value, got {}",
-        value.type_name()
-    ))
+    Err(anyhow::Error::new(std_diag::std_len_unexpected_type(
+        value.type_name(),
+    )))
 }
 
 /// Count non-overlapping literal occurrences of a needle.
@@ -5258,7 +5340,7 @@ fn text_count(
     /// Literal needle to count; empty fails closed.
     needle: String,
 ) -> Result<Value> {
-    let n = super::args::text_count_str(&text, &needle, "TEXT_COUNT")?;
+    let n = super::args::text_count_str(&text, &needle, FUNC_TEXT_COUNT)?;
     Ok(Value::int(n))
 }
 
@@ -5291,7 +5373,7 @@ fn text_count_matches(
     /// Regex pattern tested per line.
     pattern: String,
 ) -> Result<Value> {
-    let n = super::args::text_count_matches_str(&text, &pattern, "TEXT_COUNT_MATCHES")?;
+    let n = super::args::text_count_matches_str(&text, &pattern, FUNC_TEXT_COUNT_MATCHES)?;
     Ok(Value::int(n))
 }
 
@@ -5366,7 +5448,7 @@ fn text_grep(
         &text,
         &pattern,
         invert,
-        "TEXT_GREP",
+        FUNC_TEXT_GREP,
     )?))
 }
 
@@ -5696,7 +5778,7 @@ pub struct ModuleState {
 /// A pre-run steps inspection: pure function of the parsed steps,
 ///
 /// shared so the struct field stays under the complexity lint.
-pub type PreRunInspector = dyn Fn(&[Step]) -> Result<()> + Send + Sync;
+pub type PreRunInspector = dyn Fn(&[Step]) -> DiagnosticResult<()> + Send + Sync;
 
 /// A pre-run check riding in a module's `states`: the runner executes
 /// every staged check against the parsed steps before the first step
@@ -5710,14 +5792,14 @@ pub struct PreRunCheck {
 
 impl PreRunCheck {
     /// Wrap a steps inspector as a pre-run check.
-    pub fn new(check: impl Fn(&[Step]) -> Result<()> + Send + Sync + 'static) -> Self {
+    pub fn new(check: impl Fn(&[Step]) -> DiagnosticResult<()> + Send + Sync + 'static) -> Self {
         Self {
             check: Arc::new(check),
         }
     }
 
     /// Run the inspection: `Ok` lets execution start.
-    pub fn run(&self, steps: &[Step]) -> Result<()> {
+    pub fn run(&self, steps: &[Step]) -> DiagnosticResult<()> {
         (self.check)(steps)
     }
 }
@@ -5736,7 +5818,7 @@ impl<P: ProcessManager> HostModule<P> {
     /// Run every staged [`PreRunCheck`] against already-parsed steps.
     /// The runner calls this before the first step executes; the first
     /// failing check aborts the run with no side effects.
-    pub fn check_pre_run(&self, steps: &[Step]) -> Result<()> {
+    pub fn check_pre_run(&self, steps: &[Step]) -> DiagnosticResult<()> {
         for state in &self.states {
             if let Some(check) = state.state.downcast_ref::<PreRunCheck>() {
                 check.run(steps)?;
@@ -5860,7 +5942,7 @@ mod tests {
             resolve("T", "NOPE", vec![]).expect_err("unknown must fail")
         );
         assert!(
-            err.contains("unknown placeholder function 'T::NOPE'"),
+            err.contains("unknown placeholder function `T::NOPE`"),
             "names the call: {err}"
         );
         assert!(

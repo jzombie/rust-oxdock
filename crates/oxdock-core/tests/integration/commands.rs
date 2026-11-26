@@ -2057,7 +2057,7 @@ fn with_io_variable_pipe_undeclared_is_step_numbered_error() {
     let err = run_script(&root, "WITH_IO [stdout=$nope] ECHO hi\n")
         .expect_err("undeclared pipe var must fail");
     assert!(
-        err.to_string().contains("undefined variable $nope"),
+        err.to_string().contains("undefined variable `$nope`"),
         "{err}"
     );
 }
@@ -5510,15 +5510,15 @@ fn func_handle_params_agree_across_gates() {
     for (script, want) in [
         (
             "FUNC TAKES($t: HANDLE<ANY>): VOID {\n    AWAIT $t\n}\nLET $v: HANDLE<VOID> = ASYNC { ECHO hi }\nTAKES($v)\n",
-            "got HANDLE<VOID>",
+            "got `HANDLE<VOID>`",
         ),
         (
             "FUNC TAKES_TYPED($t: HANDLE<STRING>): VOID {\n    AWAIT $t\n}\nLET $v: HANDLE<ANY> = ASYNC { RETURN \"hi\" }\nTAKES_TYPED($v)\n",
-            "expected HANDLE<STRING>, got HANDLE<ANY>",
+            "expected `HANDLE<STRING>`, got `HANDLE<ANY>`",
         ),
         (
             "FUNC TAKES($t: HANDLE): VOID {\n    AWAIT $t\n}\n",
-            "bare HANDLE is not a declaration type",
+            "bare `HANDLE` is not a declaration type",
         ),
     ] {
         let temp = GuardedPath::tempdir().unwrap();
@@ -5571,7 +5571,7 @@ fn bare_handle_declaration_fails() {
         let err = run_script(&root, script).expect_err("bare HANDLE must fail");
         assert!(
             err.to_string()
-                .contains("bare HANDLE is not a declaration type"),
+                .contains("bare `HANDLE` is not a declaration type"),
             "{script:?}: {err}"
         );
     }
@@ -6056,8 +6056,8 @@ fn static_generic_annotations_enforce_shapes() {
     assert!(err.to_string().contains("unknown field"), "{err}");
     // Arity and shape misuse fail naming the rule.
     for (script, needle) in [
-        ("LET $x: LIST<MAP, INT> = []\n", "LIST takes exactly one"),
-        ("LET $x: MAP<STRING> = {}\n", "MAP fields require"),
+        ("LET $x: LIST<MAP, INT> = []\n", "`LIST` takes exactly one"),
+        ("LET $x: MAP<STRING> = {}\n", "`MAP` fields require"),
         ("LET $x: STRING<INT> = \"s\"\n", "takes no type arguments"),
         ("LET $x: NOPE<INT> = 1\n", "unknown type"),
     ] {
@@ -6107,7 +6107,7 @@ fn static_type_aliases_define_once_use_everywhere() {
     let err = run_script(&root, "FUNC F(): VOID {\n}\nTYPE F = MAP\n")
         .expect_err("func name collision must fail");
     assert!(
-        err.to_string().contains("collides with function 'F'"),
+        err.to_string().contains("collides with function `F`"),
         "{err}"
     );
     // Generic spellings work in every declaration form.
@@ -6208,7 +6208,7 @@ fn type_describe_reports_alias_targets() {
         "IMPORT [STD]\nLET $d: MAP<ANY> = TYPE_DESCRIBE(\"NOPE\")\n",
     )
     .expect_err("unknown type must still fail");
-    assert!(err.to_string().contains("unknown type NOPE"), "{err}");
+    assert!(err.to_string().contains("unknown type `NOPE`"), "{err}");
 }
 
 #[test]
@@ -6240,13 +6240,13 @@ fn static_pipe_param_rejects_non_pipe() {
     let err = run_script(&root, "IMPORT [STD]\nLET $b: BOOL = EOF(\"nope\")\n")
         .expect_err("non-pipe EOF arg must fail statically");
     assert!(err.to_string().contains("TypeMismatch"), "{err}");
-    assert!(err.to_string().contains("expected PIPE"), "{err}");
+    assert!(err.to_string().contains("expected `PIPE`"), "{err}");
     let err = run_script(
         &root,
         "IMPORT [STD]\nLET $m: MAP<a: INT> = {a: 1}\nLET $b: BOOL = EOF($m)\n",
     )
     .expect_err("map EOF arg must fail statically");
-    assert!(err.to_string().contains("expected PIPE"), "{err}");
+    assert!(err.to_string().contains("expected `PIPE`"), "{err}");
 }
 
 #[test]
@@ -6261,7 +6261,7 @@ fn static_semaphore_param_rejects_non_semaphore() {
     )
     .expect_err("non-semaphore arg must fail statically");
     assert!(err.to_string().contains("TypeMismatch"), "{err}");
-    assert!(err.to_string().contains("expected SEMAPHORE"), "{err}");
+    assert!(err.to_string().contains("expected `SEMAPHORE`"), "{err}");
 }
 
 #[test]

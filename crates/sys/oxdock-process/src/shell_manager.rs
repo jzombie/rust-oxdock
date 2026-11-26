@@ -1,11 +1,12 @@
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::Result;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::Command as ProcessCommand;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::Stdio;
 
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::PolicyPath;
 
 use crate::child::ChildHandle;
@@ -13,6 +14,7 @@ use crate::contract::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStderr,
     CommandStdin, CommandStdout, PROCESS_DEBUG_ENV_VAR, ProcessManager, SharedInput, SharedOutput,
 };
+use crate::diagnostics as proc_diag;
 use crate::shell::{batch_shell, direct_cmd, shell_cmd};
 
 /// Default process manager that shells out using the system shell.
@@ -88,7 +90,7 @@ fn run_prepared(
         CommandStdout::Stream(stream) => (Some(stream), None),
         CommandStdout::Capture => {
             if matches!(mode, CommandMode::Background) {
-                bail!("cannot capture stdout for background command");
+                return Err(anyhow::Error::new(proc_diag::run_bg_capture_unsupported()));
             }
             let buf = Arc::new(Mutex::new(Vec::new()));
             let writer: SharedOutput = buf.clone();
@@ -133,20 +135,22 @@ fn run_prepared(
             None
         }
     };
-    let desc = format!("{:?}", command);
-
     match mode {
         CommandMode::Foreground => {
             let mut handle =
                 spawn_child_with_streams(command, stdin_stream, stdout_stream, stderr_stream)?;
             let status = handle
                 .wait()
-                .with_context(|| format!("failed to run {desc}"))?;
+                .map_err(|err| anyhow::Error::new(proc_diag::run_wait_failed(&*command, &err)))?;
             if !status.success() {
-                bail!("command {desc} failed with status {}", status);
+                return Err(anyhow::Error::new(proc_diag::run_command_failed(
+                    &*command, &status,
+                )));
             }
             if let Some(buf) = capture_buf {
-                let mut guard = buf.lock().map_err(|_| anyhow!("capture stdout poisoned"))?;
+                let mut guard = buf
+                    .lock()
+                    .map_err(|_| anyhow::Error::new(proc_diag::run_capture_lock_poisoned()))?;
                 return Ok(CommandResult::Captured(std::mem::take(&mut *guard)));
             }
             Ok(CommandResult::Completed)
@@ -175,7 +179,7 @@ fn apply_ctx(
     ctx: &CommandContext,
     program: &str,
     require_path: bool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     // Use command_path to strip Windows verbatim prefixes (\\?\) before passing to Command.
     // While Rust's `std::process::Command` handles verbatim paths in current_dir correctly,
     // environment variables are passed as-is. If we pass a verbatim path in `CARGO_TARGET_DIR`,
@@ -213,7 +217,7 @@ fn spawn_child_with_streams(
     stdin: Option<SharedInput>,
     stdout: Option<SharedOutput>,
     stderr: Option<SharedOutput>,
-) -> Result<ChildHandle> {
+) -> DiagnosticResult<ChildHandle> {
     if stdin.is_some() {
         cmd.stdin(Stdio::piped());
     }
@@ -226,7 +230,7 @@ fn spawn_child_with_streams(
 
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("failed to spawn {:?}", cmd))?;
+        .map_err(|e| proc_diag::spawn_failed(&*cmd, &e))?;
     let mut io_threads = Vec::new();
     let mut stdin_thread = None;
 

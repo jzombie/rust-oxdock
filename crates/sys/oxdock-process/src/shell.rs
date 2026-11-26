@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::GuardedPath;
 #[cfg(all(unix, not(miri)))]
 use oxdock_fs::PathResolver;
@@ -9,6 +9,7 @@ use std::fs::File;
 use std::process::{Command, ExitStatus, Stdio};
 
 use crate::CommandBuilder;
+use crate::diagnostics as proc_diag;
 
 pub fn shell_program() -> String {
     #[cfg(windows)]
@@ -27,14 +28,14 @@ pub fn shell_program() -> String {
 /// of bridging an env var. `current_exe` is an unsupported isolation
 /// operation under Miri (hard error, not a recoverable `Err`), so Miri
 /// builds report it as unsupported instead of calling through.
-pub fn interpreter_exe() -> Result<String> {
+pub fn interpreter_exe() -> DiagnosticResult<String> {
     #[cfg(miri)]
     {
-        bail!("INTERPRETER is unsupported under Miri isolation")
+        Err(proc_diag::run_interpreter_unsupported_miri())
     }
     #[cfg(not(miri))]
     {
-        let exe = std::env::current_exe().context("determine current executable")?;
+        let exe = std::env::current_exe().map_err(|e| proc_diag::run_current_exe_failed(&e))?;
         Ok(exe.display().to_string())
     }
 }
@@ -59,12 +60,12 @@ pub fn batch_shell() -> String {
 }
 
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-pub(crate) fn direct_cmd(argv: &[String]) -> Result<Command> {
+pub(crate) fn direct_cmd(argv: &[String]) -> DiagnosticResult<Command> {
     let (program, rest) = argv
         .split_first()
-        .ok_or_else(|| anyhow::anyhow!("RUN exec form requires at least one argument"))?;
+        .ok_or_else(proc_diag::run_exec_requires_argv)?;
     if program.is_empty() {
-        bail!("RUN exec form requires a non-empty executable");
+        return Err(proc_diag::run_exec_requires_program());
     }
     let mut c = Command::new(program);
     c.args(rest);
@@ -89,27 +90,26 @@ pub struct ShellLauncher;
 
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 impl ShellLauncher {
-    pub fn run(&self, cmd: &mut Command) -> Result<()> {
-        let status = cmd
-            .status()
-            .with_context(|| format!("failed to run {:?}", cmd))?;
+    pub fn run(&self, cmd: &mut Command) -> DiagnosticResult<()> {
+        let status = cmd.status().map_err(|e| proc_diag::run_failed(&*cmd, &e))?;
         if !status.success() {
-            bail!("command {:?} failed with status {}", cmd, status);
+            return Err(proc_diag::run_command_failed(&*cmd, &status));
         }
         Ok(())
     }
 
-    pub fn run_with_output(&self, cmd: &mut Command) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    pub fn run_with_output(
+        &self,
+        cmd: &mut Command,
+    ) -> DiagnosticResult<(ExitStatus, Vec<u8>, Vec<u8>)> {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let output = cmd
-            .output()
-            .with_context(|| format!("failed to run {:?}", cmd))?;
+        let output = cmd.output().map_err(|e| proc_diag::run_failed(&*cmd, &e))?;
         Ok((output.status, output.stdout, output.stderr))
     }
 
-    pub fn spawn(&self, cmd: &mut Command) -> Result<()> {
+    pub fn spawn(&self, cmd: &mut Command) -> DiagnosticResult<()> {
         cmd.spawn()
-            .with_context(|| format!("failed to spawn {:?}", cmd))?;
+            .map_err(|e| proc_diag::spawn_failed(&*cmd, &e))?;
         Ok(())
     }
 
@@ -134,7 +134,7 @@ pub fn spawn_interactive_shell(
     cwd: &GuardedPath,
     workspace_root: &GuardedPath,
     banner: &str,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let _ = workspace_root;
     #[cfg(unix)]
     {
@@ -167,7 +167,7 @@ pub fn spawn_interactive_shell(
 
         let status = cmd.status()?;
         if !status.success() {
-            bail!("shell exited with status {}", status);
+            return Err(proc_diag::shell_exited_with_status(&status));
         }
         Ok(())
     }
@@ -196,14 +196,14 @@ pub fn spawn_interactive_shell(
         // Fire-and-forget so the parent console regains control immediately; the child window is
         // fully interactive. If the launch fails, surface the error right away.
         cmd.spawn()
-            .context("failed to start interactive shell window")?;
+            .map_err(|e| proc_diag::spawn_interactive_window_failed(&anyhow::Error::new(e)))?;
         Ok(())
     }
 
     #[cfg(not(any(unix, windows)))]
     {
         let _ = (cwd, workspace_root, banner);
-        bail!("interactive shell unsupported on this platform");
+        return Err(proc_diag::run_interactive_unsupported());
     }
 }
 
@@ -232,7 +232,7 @@ fn windows_banner_command(banner: &str, cwd: &GuardedPath) -> String {
 }
 
 #[cfg(test)]
-type ShellCmdHook = dyn FnMut(&crate::CommandSnapshot) -> Result<()> + Send;
+type ShellCmdHook = dyn FnMut(&crate::CommandSnapshot) -> DiagnosticResult<()> + Send;
 
 #[cfg(test)]
 thread_local! {
@@ -243,7 +243,7 @@ thread_local! {
 #[cfg(test)]
 fn set_shell_command_hook<F>(hook: F)
 where
-    F: FnMut(&crate::CommandSnapshot) -> Result<()> + Send + 'static,
+    F: FnMut(&crate::CommandSnapshot) -> DiagnosticResult<()> + Send + 'static,
 {
     SHELL_CMD_HOOK.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(hook));
@@ -258,7 +258,7 @@ fn clear_shell_command_hook() {
 }
 
 #[cfg(test)]
-fn try_shell_command_hook(cmd: &mut CommandBuilder) -> Result<bool> {
+fn try_shell_command_hook(cmd: &mut CommandBuilder) -> DiagnosticResult<bool> {
     SHELL_CMD_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow_mut().as_mut() {
             let snap = cmd.snapshot();
@@ -270,7 +270,7 @@ fn try_shell_command_hook(cmd: &mut CommandBuilder) -> Result<bool> {
 }
 
 #[cfg(not(test))]
-fn try_shell_command_hook(cmd: &mut CommandBuilder) -> Result<bool> {
+fn try_shell_command_hook(cmd: &mut CommandBuilder) -> DiagnosticResult<bool> {
     let _ = cmd;
     Ok(false)
 }

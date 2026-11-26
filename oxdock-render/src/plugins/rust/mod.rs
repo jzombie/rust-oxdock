@@ -387,7 +387,7 @@ mod tests {
             )
             .expect_err("missing description must fail");
         assert!(
-            format!("{err:#}").contains("missing field 'description'"),
+            format!("{err:#}").contains("missing field `description`"),
             "names the field: {err:#}"
         );
         engine

@@ -23,9 +23,11 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use oxdock_fs::{EntryKind, GuardedPath};
-use oxdock_parser::{Step, render_dsl_literal, render_quoted, render_structural};
+use oxdock_parser::{
+    KEYWORD_ENV, KEYWORD_LET, Step, render_dsl_literal, render_quoted, render_structural,
+};
 use oxdock_pipe::PipeInner;
 use oxdock_process::ProcessManager;
 
@@ -61,7 +63,9 @@ pub(super) fn copy_transfer<P: ProcessManager>(
     to: &oxdock_parser::Arg,
 ) -> Result<()> {
     if !cx.state.io.is_remote_guest() {
-        bail!("COPY --from-host and --to-host execute only inside a remote guest session");
+        return Err(anyhow::Error::new(
+            super::diagnostics::eval_remote_copy_outside_guest(),
+        ));
     }
     if to_host {
         // Resolve now, against live scope: the manifest records what ran,
@@ -137,7 +141,8 @@ impl TransferStage {
                 file.seek(std::io::SeekFrom::Start(0)).map(|_| ())
             }
         };
-        result.map_err(|err| anyhow::anyhow!("transfer stage rewind failed: {err:#}"))
+        result
+            .map_err(|err| anyhow::Error::new(super::diagnostics::eval_remote_rewind_failed(&err)))
     }
 }
 
@@ -368,27 +373,28 @@ fn resolve_header<P: ProcessManager>(
     let mut lines = Vec::new();
     for name in vars {
         let Some((decl_type, value)) = cx.state.get_var_typed(name) else {
-            bail!("REMOTE '{target}' uses unknown variable ${name}");
+            return Err(anyhow::Error::new(
+                super::diagnostics::eval_remote_unknown_var(target, name),
+            ));
         };
         let literal = render_dsl_literal(&value).with_context(|| {
-            format!(
-                "cannot pass ${name}: {} into REMOTE '{target}' (pass bytes via WITH_IO, files via the workspace)",
-                value.type_name()
-            )
+            super::diagnostics::eval_remote_unrenderable_var(name, value.type_name(), target)
         })?;
         // The declared type renders structurally, never as the coarse
         // word: the guest re-parses these lines under the same rules,
         // so a coarse word the guest rejects would break the seal.
         lines.push(format!(
-            "LET ${name}: {} = {literal}",
+            "{KEYWORD_LET} ${name}: {} = {literal}",
             render_structural(&decl_type)
         ));
     }
     for name in env_names {
         let Some(value) = cx.get_env(name) else {
-            bail!("REMOTE '{target}' uses unknown env {name}");
+            return Err(anyhow::Error::new(
+                super::diagnostics::eval_remote_unknown_env(target, name),
+            ));
         };
-        lines.push(format!("ENV {name}={}", render_quoted(&value)));
+        lines.push(format!("{KEYWORD_ENV} {name}={}", render_quoted(&value)));
     }
     Ok(lines)
 }
@@ -454,7 +460,9 @@ fn resolve_one_fetch<P: ProcessManager>(
         // actually executes. Unconditional declarations fail fast here.
         Err(_) if !decl.unconditional => return Ok(()),
         Err(_) => {
-            bail!("REMOTE fetch source missing: {}", decl.host_rel);
+            return Err(anyhow::Error::new(
+                super::diagnostics::eval_remote_fetch_missing(&decl.host_rel, None),
+            ));
         }
     };
     // Guest-dest mapping first so directory fan-out anchors correctly.
@@ -480,10 +488,12 @@ fn resolve_one_fetch<P: ProcessManager>(
                         }
                     }
                     if files.len() + dirs.len() > MAX_TRANSFER_ENTRIES {
-                        bail!(
-                            "REMOTE fetch hit the {MAX_TRANSFER_ENTRIES} entry cap: {} names too many paths",
-                            decl.host_rel
-                        );
+                        return Err(anyhow::Error::new(
+                            super::diagnostics::eval_remote_fetch_entry_cap(
+                                &decl.host_rel,
+                                MAX_TRANSFER_ENTRIES,
+                            ),
+                        ));
                     }
                 }
             }
@@ -496,8 +506,10 @@ fn resolve_one_fetch<P: ProcessManager>(
                     .as_path()
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
-                    .with_context(|| {
-                        format!("REMOTE fetch source has no file name: {}", decl.host_rel)
+                    .ok_or_else(|| {
+                        anyhow::Error::new(super::diagnostics::eval_remote_fetch_no_file_name(
+                            &decl.host_rel,
+                        ))
                     })?;
                 format!("{dest_base}{base}")
             } else {
@@ -506,7 +518,9 @@ fn resolve_one_fetch<P: ProcessManager>(
             files.push((dest, source));
         }
         Err(err) => {
-            bail!("REMOTE fetch source missing: {} ({err:#})", decl.host_rel);
+            return Err(anyhow::Error::new(
+                super::diagnostics::eval_remote_fetch_missing(&decl.host_rel, Some(&err)),
+            ));
         }
     }
     Ok(())
@@ -633,11 +647,10 @@ pub(super) fn run_remote_block<P: ProcessManager>(
             cx.stdin_pipe.clone(),
         );
     }
-    let runner = cx.state.io.remote_runner(target).ok_or_else(|| {
-        anyhow::anyhow!(
-            "REMOTE '{target}' has no registered session (bind it with --remote {target}=\"<command>\")"
-        )
-    })?;
+    let runner =
+        cx.state.io.remote_runner(target).ok_or_else(|| {
+            anyhow::Error::new(super::diagnostics::eval_remote_no_session(target))
+        })?;
     let mut script_text = resolve_header(cx, target, vars, env_names)?.join("\n");
     if !script_text.is_empty() {
         script_text.push('\n');
@@ -708,10 +721,10 @@ pub(super) fn run_remote_block<P: ProcessManager>(
         // transport-failed wrapper.
         Err(err) => match super::exit::exit_code_of(&err) {
             Some(code) => {
-                return Err(err.context(format!("REMOTE '{target}' exited with code {code}")));
+                return Err(err.context(super::diagnostics::eval_remote_exit_status(target, code)));
             }
             None => {
-                return Err(err.context(format!("REMOTE '{target}' transport failed")));
+                return Err(err.context(super::diagnostics::eval_remote_transport_failed(target)));
             }
         },
     };
@@ -738,7 +751,9 @@ pub fn apply_push_symlink(
     target: &str,
 ) -> Result<()> {
     let dst = root.join(rel).map_err(|err| {
-        anyhow::anyhow!("REMOTE push symlink destination {rel:?} escapes the workspace: {err:#}")
+        anyhow::Error::new(super::diagnostics::eval_remote_push_destination_escapes(
+            rel, &err,
+        ))
     })?;
     // Join-then-guard is the whole verdict: `GuardedPath::join`
     // normalizes `..` lexically and rejects escapes, so chains like
@@ -746,21 +761,29 @@ pub fn apply_push_symlink(
     // hand-rolled depth counter.
     let src = if target.starts_with('/') {
         root.join(target).map_err(|err| {
-            anyhow::anyhow!("REMOTE push symlink {rel:?} points outside the workspace: {err:#}")
+            anyhow::Error::new(super::diagnostics::eval_remote_push_target_outside(
+                rel, &err,
+            ))
         })?
     } else if let Some(parent) = rel.rfind('/') {
         root.join(&format!("{}/{target}", &rel[..parent]))
             .map_err(|err| {
-                anyhow::anyhow!("REMOTE push symlink {rel:?} points outside the workspace: {err:#}")
+                anyhow::Error::new(super::diagnostics::eval_remote_push_target_outside(
+                    rel, &err,
+                ))
             })?
     } else {
         root.join(target).map_err(|err| {
-            anyhow::anyhow!("REMOTE push symlink {rel:?} points outside the workspace: {err:#}")
+            anyhow::Error::new(super::diagnostics::eval_remote_push_target_outside(
+                rel, &err,
+            ))
         })?
     };
     match fs.entry_kind_no_follow(&dst) {
         Ok(EntryKind::Dir) => {
-            bail!("REMOTE sync-back cannot replace directory {rel:?} with a symlink");
+            return Err(anyhow::Error::new(
+                super::diagnostics::eval_remote_push_symlink_over_dir(rel),
+            ));
         }
         Ok(_) => {
             fs.remove_file(&dst)?;
