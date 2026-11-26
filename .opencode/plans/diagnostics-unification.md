@@ -2859,6 +2859,30 @@ transport, so this phase is mechanical:
    Test pins added to the key-uniqueness plus
    canonical-wording tests. net lib 38 plus net integration
    38 green; net clippy zero, fmt clean on both files.
+   build assets bulk 2026-11-27 (oxdock-build assets.rs plus
+   diagnostics, 6 new build.* ctors): converts all six
+   bare-string context layers; every remaining anyhow site is
+   a pure Error::new(ctor) boundary shim (public build-script
+   API keeps anyhow signatures, so no flips). New ctors follow
+   the build inline family ({reason:#} rendering): out_dir_missing
+   (concrete &std::env::VarError, OUT_DIR spelling from the
+   env contract) plus manifest_dir_missing_for_dsl_resolution
+   (&anyhow::Error: from_manifest_env chains) plus
+   dsl_script_read_failed (rel field plus &anyhow::Error) plus
+   manifest_dir_missing_for_directives (concrete &VarError,
+   build-script hint wording) plus manifest_dir_missing
+   (&anyhow::Error, bare wording) plus
+   workspace_root_discover_failed (&anyhow::Error). The three
+   manifest-dir variants keep distinct keys because the retired
+   wordings differ (resolution suffix vs hint suffix vs bare)
+   and bytes stay identical; each key mirrors its wording.
+   Env-var sites take concrete &VarError (std-type precedent:
+   chainless so {:#} equals Display, byte-identical under both
+   surfacings). Pins added to key-uniqueness plus
+   canonical-wording plus env-contract spelling tests. build
+   lib 27 plus packaging_invariant 4 green; build clippy zero,
+   fmt clean on both files; anyhow Context import drops from
+   assets.rs.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

@@ -148,6 +148,94 @@ pub fn out_dir_create_failed(target: &str, reason: &anyhow::Error) -> Diagnostic
     )
 }
 
+/// `$OUT_DIR` is unset (not running as a build script). Takes the
+/// concrete env failure (chainless, so `{reason:#}` equals the
+/// `Display`); the `OUT_DIR` spelling derives from the declared env
+/// contract, never a literal.
+pub fn out_dir_missing(reason: &std::env::VarError) -> Diagnostic {
+    let reason_text = reason.to_string();
+    let message = format!(
+        "{} missing (not running as a build script?): {reason_text}",
+        oxdock_env::cargo::build::OUT_DIR,
+    );
+    Diagnostic::new(
+        "build.out_dir.missing",
+        message,
+        Diagnostic::make_fields(&[(FIELD_REASON, &reason_text)]),
+    )
+}
+
+/// Manifest dir unavailable when resolving a file-based DSL source.
+/// Takes the wrapped resolver failure; the chain renders inline.
+/// Distinct key from the sibling manifest-dir ctors below: the retired
+/// context wordings differ, and bytes stay identical.
+pub fn manifest_dir_missing_for_dsl_resolution(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!(
+        "{} missing for DSL resolution: {reason_text}",
+        oxdock_env::cargo::MANIFEST_DIR,
+    );
+    Diagnostic::new(
+        "build.manifest_dir.missing_for_dsl_resolution",
+        message,
+        Diagnostic::make_fields(&[(FIELD_REASON, &reason_text)]),
+    )
+}
+
+/// Manifest dir unavailable when computing rerun directives. Takes
+/// the concrete env failure; rendering lives here. Distinct key:
+/// the retired wording carries the build-script hint.
+pub fn manifest_dir_missing_for_directives(reason: &std::env::VarError) -> Diagnostic {
+    let reason_text = reason.to_string();
+    let message = format!(
+        "{} missing (not running as a build script?): {reason_text}",
+        oxdock_env::cargo::MANIFEST_DIR,
+    );
+    Diagnostic::new(
+        "build.manifest_dir.missing_for_directives",
+        message,
+        Diagnostic::make_fields(&[(FIELD_REASON, &reason_text)]),
+    )
+}
+
+/// Manifest dir unavailable when materializing. Takes the wrapped
+/// resolver failure; the chain renders inline. Distinct key: the
+/// retired wording is the bare missing text.
+pub fn manifest_dir_missing(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{} missing: {reason_text}", oxdock_env::cargo::MANIFEST_DIR,);
+    Diagnostic::new(
+        "build.manifest_dir.missing",
+        message,
+        Diagnostic::make_fields(&[(FIELD_REASON, &reason_text)]),
+    )
+}
+
+/// DSL source file unreadable. Takes the relative path plus the
+/// wrapped filesystem failure; quoting lives here, the chain renders
+/// inline.
+pub fn dsl_script_read_failed(rel: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to read DSL script {rel}: {reason_text}");
+    Diagnostic::new(
+        "build.script.read_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_REL, rel), (FIELD_REASON, &reason_text)]),
+    )
+}
+
+/// Workspace root discovery failed. Takes the wrapped failure; the
+/// chain renders inline.
+pub fn workspace_root_discover_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to discover workspace root: {reason_text}");
+    Diagnostic::new(
+        "build.workspace_root.discover_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_REASON, &reason_text)]),
+    )
+}
+
 /// Built tree could not be copied into staging. Takes the underlying
 /// failure; `{reason:#}` formatting lives here.
 pub fn stage_copy_failed(reason: &anyhow::Error) -> Diagnostic {
@@ -164,6 +252,10 @@ pub fn stage_copy_failed(reason: &anyhow::Error) -> Diagnostic {
 mod tests {
     use super::*;
 
+    fn var_err() -> std::env::VarError {
+        std::env::var("OXDOCK_BUILD_TEST_DEFINITELY_UNSET_VAR").unwrap_err()
+    }
+
     #[test]
     fn each_failure_has_a_distinct_key() {
         let err = anyhow::anyhow!("boom");
@@ -178,6 +270,12 @@ mod tests {
             final_workdir_not_dir("/tmp/w").key(),
             out_dir_target_not_dir("/tmp/t").key(),
             out_dir_create_failed("/tmp/t", &err).key(),
+            out_dir_missing(&var_err()).key(),
+            manifest_dir_missing_for_dsl_resolution(&err).key(),
+            manifest_dir_missing_for_directives(&var_err()).key(),
+            manifest_dir_missing(&err).key(),
+            dsl_script_read_failed("a.oxdock", &err).key(),
+            workspace_root_discover_failed(&err).key(),
             stage_copy_failed(&err).key(),
         ];
         let mut seen = std::collections::HashSet::new();
@@ -227,6 +325,30 @@ mod tests {
             "failed to create /tmp/t: boom"
         );
         assert_eq!(
+            out_dir_missing(&var_err()).message(),
+            "OUT_DIR missing (not running as a build script?): environment variable not found"
+        );
+        assert_eq!(
+            manifest_dir_missing_for_dsl_resolution(&err).message(),
+            "CARGO_MANIFEST_DIR missing for DSL resolution: boom"
+        );
+        assert_eq!(
+            manifest_dir_missing_for_directives(&var_err()).message(),
+            "CARGO_MANIFEST_DIR missing (not running as a build script?): environment variable not found"
+        );
+        assert_eq!(
+            manifest_dir_missing(&err).message(),
+            "CARGO_MANIFEST_DIR missing: boom"
+        );
+        assert_eq!(
+            dsl_script_read_failed("a.oxdock", &err).message(),
+            "failed to read DSL script a.oxdock: boom"
+        );
+        assert_eq!(
+            workspace_root_discover_failed(&err).message(),
+            "failed to discover workspace root: boom"
+        );
+        assert_eq!(
             stage_copy_failed(&err).message(),
             "failed to copy build output into staging: boom"
         );
@@ -244,6 +366,26 @@ mod tests {
             out_dir_target_not_dir("/tmp/t")
                 .message()
                 .contains(oxdock_env::cargo::build::OUT_DIR)
+        );
+        assert!(
+            out_dir_missing(&var_err())
+                .message()
+                .contains(oxdock_env::cargo::build::OUT_DIR)
+        );
+        assert!(
+            manifest_dir_missing_for_dsl_resolution(&err)
+                .message()
+                .contains(oxdock_env::cargo::MANIFEST_DIR)
+        );
+        assert!(
+            manifest_dir_missing_for_directives(&var_err())
+                .message()
+                .contains(oxdock_env::cargo::MANIFEST_DIR)
+        );
+        assert!(
+            manifest_dir_missing(&err)
+                .message()
+                .contains(oxdock_env::cargo::MANIFEST_DIR)
         );
     }
 }

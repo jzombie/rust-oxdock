@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::diagnostics as build_diag;
 use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot};
@@ -268,7 +268,7 @@ fn init() {
 
 fn out_dir_root() -> Result<GuardedPath> {
     let out = std::env::var(oxdock_env::cargo::build::OUT_DIR)
-        .context("OUT_DIR missing (not running as a build script?)")?;
+        .map_err(|err| anyhow::Error::new(build_diag::out_dir_missing(&err)))?;
     GuardedPath::new_root_from_str(&out)
         .map_err(|e| anyhow::Error::new(build_diag::invalid_out_dir(&out, &e)))
 }
@@ -291,15 +291,16 @@ fn script_text(source: DslSource) -> Result<(String, Option<String>)> {
     match source {
         DslSource::Inline(text) => Ok((text.to_string(), None)),
         DslSource::File(rel) => {
-            let resolver = PathResolver::from_manifest_env()
-                .context("CARGO_MANIFEST_DIR missing for DSL resolution")?;
+            let resolver = PathResolver::from_manifest_env().map_err(|err| {
+                anyhow::Error::new(build_diag::manifest_dir_missing_for_dsl_resolution(&err))
+            })?;
             let guarded = resolver
                 .root()
                 .join(rel)
                 .map_err(|e| anyhow::Error::new(build_diag::dsl_path_escapes_manifest(rel, &e)))?;
             let text = resolver
                 .read_to_string(&guarded)
-                .with_context(|| format!("failed to read DSL script {rel}"))?;
+                .map_err(|err| anyhow::Error::new(build_diag::dsl_script_read_failed(rel, &err)))?;
             Ok((text, Some(rel.to_string())))
         }
     }
@@ -330,7 +331,7 @@ fn run_spec(
     // Emitting ANY rerun directive disables cargo's default invalidate-
     // everything, so watching build.rs is mandatory completeness.
     let manifest = std::env::var(oxdock_env::cargo::MANIFEST_DIR)
-        .context("CARGO_MANIFEST_DIR missing (not running as a build script?)")?;
+        .map_err(|err| anyhow::Error::new(build_diag::manifest_dir_missing_for_directives(&err)))?;
     push(
         &mut directives,
         &mut seen,
@@ -392,9 +393,10 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
     // Parse first so LOCAL-only scripts never create a snapshot directory.
     let steps = oxdock_core::parse_script(script)
         .map_err(|e| anyhow::Error::new(build_diag::script_parse_failed(&e)))?;
-    let resolver = PathResolver::from_manifest_env().context("CARGO_MANIFEST_DIR missing")?;
-    let workspace_root =
-        oxdock_fs::discover_workspace_root().context("failed to discover workspace root")?;
+    let resolver = PathResolver::from_manifest_env()
+        .map_err(|err| anyhow::Error::new(build_diag::manifest_dir_missing(&err)))?;
+    let workspace_root = oxdock_fs::discover_workspace_root()
+        .map_err(|err| anyhow::Error::new(build_diag::workspace_root_discover_failed(&err)))?;
 
     let output =
         run_steps_with_lazy_snapshot(&workspace_root, &steps, ExecIo::new()).map_err(|e| {
