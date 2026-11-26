@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use oxdock_diagnostics::Diagnostic;
 
 use crate::diagnostics as ssh_diag;
@@ -168,13 +168,13 @@ pub fn pump_run_session<P: ProcessManager>(
     }
     let reader = cx
         .pipe_reader(in_pipe)
-        .context("SSH run cannot borrow the input pipe")?;
+        .map_err(|e| anyhow::Error::new(ssh_diag::run_borrow_input_failed(e)))?;
     let out_writer = cx
         .pipe_writer(out_pipe)
-        .context("SSH run cannot borrow the output pipe")?;
+        .map_err(|e| anyhow::Error::new(ssh_diag::run_borrow_output_failed(e)))?;
     let err_writer = cx
         .pipe_writer(err_pipe)
-        .context("SSH run cannot borrow the error pipe")?;
+        .map_err(|e| anyhow::Error::new(ssh_diag::run_borrow_error_failed(e)))?;
 
     cx.ensure_scratch_materialized()?;
     let staged = cx.env_snapshot();
@@ -194,7 +194,7 @@ pub fn pump_run_session<P: ProcessManager>(
     }
     let piped = builder
         .spawn_piped_with_stderr()
-        .context("SSH run spawn failed")?;
+        .map_err(|e| anyhow::Error::new(ssh_diag::run_spawn_failed(e)))?;
     let PipedChild {
         handle,
         stdin,

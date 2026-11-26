@@ -2627,6 +2627,20 @@ transport, so this phase is mechanical:
    invalid_host_key pin plus parser 267+303 plus core lib
    410 plus integration 629 green; ssh clippy zero, fmt
    clean on both touched files.
+   ssh run-pty bulk 2026-11-27 (run.rs remainder plus pty.rs
+   plus ssh diagnostics): eight new ssh.* ctors with key plus
+   wording plus {:#} chain pins (run borrow_input/output/
+   error plus spawn with Diagnostic inners by value via Arc;
+   pty borrow_input/output with Diagnostic inners, session
+   init write/flush with concrete io by value). All eight
+   .context sites go bare-outer plus chained source, wrapped
+   in anyhow::Error::new at the boundary since both
+   supervisors keep anyhow return (leaf-to-root: the
+   anyhow-returning callees run_pty_session plus funcs.rs
+   callers flip later). Context imports drop from both
+   files. ssh lib 13 plus invalid_host_key pin plus parser
+   267+303 plus core lib 410 plus integration 629 green; ssh
+   clippy zero, fmt clean on three touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

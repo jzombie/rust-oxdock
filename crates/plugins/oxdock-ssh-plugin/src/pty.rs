@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::diagnostics as ssh_diag;
 use oxdock_core::{StepCtx, Value};
@@ -88,10 +88,10 @@ pub fn pump_pty_session<P: ProcessManager>(
 ) -> Result<i64> {
     let reader = cx
         .pipe_reader(in_pipe)
-        .context("SSH pty cannot borrow the input pipe")?;
+        .map_err(|e| anyhow::Error::new(ssh_diag::pty_borrow_input_failed(e)))?;
     let writer = cx
         .pipe_writer(out_pipe)
-        .context("SSH pty cannot borrow the output pipe")?;
+        .map_err(|e| anyhow::Error::new(ssh_diag::pty_borrow_output_failed(e)))?;
     // Interruptible chunk reads with the backend's keeper semantics,
     // unchanged from the inlined pump: `read_pump_chunk` carries the
     // timeout and wake contract, so the shared runner sees the exact
@@ -118,8 +118,10 @@ pub fn pump_pty_session<P: ProcessManager>(
             .map_err(|_| anyhow::Error::new(ssh_diag::pty_output_lock_poisoned()))?;
         guard
             .write_all(b"\x1b[2J\x1b[H")
-            .context("SSH pty session init write failed")?;
-        guard.flush().context("SSH pty session init flush failed")?;
+            .map_err(|e| anyhow::Error::new(ssh_diag::pty_session_init_write_failed(e)))?;
+        guard
+            .flush()
+            .map_err(|e| anyhow::Error::new(ssh_diag::pty_session_init_flush_failed(e)))?;
     }
     let hub = cx.cancel_hub();
     let outcome = run_pty_session(PtyRequest {

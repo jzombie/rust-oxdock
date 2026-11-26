@@ -716,6 +716,54 @@ pub fn run_interrupted_by_cancellation() -> Diagnostic {
     )
 }
 
+/// SSH run cannot borrow the input pipe. Takes the underlying
+/// typed failure by value; bare outer plus chained source.
+pub fn run_borrow_input_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.run.borrow_input_failed",
+        "SSH run cannot borrow the input pipe".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// SSH run cannot borrow the output pipe. Takes the underlying
+/// typed failure by value; bare outer plus chained source.
+pub fn run_borrow_output_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.run.borrow_output_failed",
+        "SSH run cannot borrow the output pipe".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// SSH run cannot borrow the error pipe. Takes the underlying
+/// typed failure by value; bare outer plus chained source.
+pub fn run_borrow_error_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.run.borrow_error_failed",
+        "SSH run cannot borrow the error pipe".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// SSH run spawn failed. Takes the underlying typed failure by
+/// value; bare outer plus chained source.
+pub fn run_spawn_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.run.spawn_failed",
+        "SSH run spawn failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
 /// SSH pty output lock poisoned. Parameterless: the wording is
 /// fixed.
 pub fn pty_output_lock_poisoned() -> Diagnostic {
@@ -734,6 +782,58 @@ pub fn pty_interrupted_by_cancellation() -> Diagnostic {
         "SSH pty run interrupted by cancellation".to_string(),
         Diagnostic::make_fields(&[]),
     )
+}
+
+/// SSH pty cannot borrow the input pipe. Takes the underlying
+/// typed failure by value; bare outer plus chained source.
+pub fn pty_borrow_input_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.pty.borrow_input_failed",
+        "SSH pty cannot borrow the input pipe".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// SSH pty cannot borrow the output pipe. Takes the underlying
+/// typed failure by value; bare outer plus chained source.
+pub fn pty_borrow_output_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.pty.borrow_output_failed",
+        "SSH pty cannot borrow the output pipe".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// SSH pty session init write failed. Takes the concrete failure
+/// by value; bare outer plus chained source.
+pub fn pty_session_init_write_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.pty.session_init_write_failed",
+        "SSH pty session init write failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// SSH pty session init flush failed. Takes the concrete failure
+/// by value; bare outer plus chained source.
+pub fn pty_session_init_flush_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.pty.session_init_flush_failed",
+        "SSH pty session init flush failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
 }
 
 /// Dequeue wait cancelled. Takes the invoking func (`SSH_DEQUEUE` /
@@ -1000,8 +1100,16 @@ mod tests {
             run_needs_program().key(),
             run_spawn_lost_stderr().key(),
             run_interrupted_by_cancellation().key(),
+            run_borrow_input_failed(pump_output_lock_poisoned()).key(),
+            run_borrow_output_failed(pump_output_lock_poisoned()).key(),
+            run_borrow_error_failed(pump_output_lock_poisoned()).key(),
+            run_spawn_failed(pump_output_lock_poisoned()).key(),
             pty_output_lock_poisoned().key(),
             pty_interrupted_by_cancellation().key(),
+            pty_borrow_input_failed(pump_output_lock_poisoned()).key(),
+            pty_borrow_output_failed(pump_output_lock_poisoned()).key(),
+            pty_session_init_write_failed(io_err("boom")).key(),
+            pty_session_init_flush_failed(io_err("boom")).key(),
             dequeue_task_cancelled("SSH_DEQUEUE").key(),
             dequeue_server_closed("SSH_DEQUEUE").key(),
             dequeue_requires_async().key(),
@@ -1485,12 +1593,100 @@ mod tests {
             "SSH run interrupted by cancellation"
         );
         assert_eq!(
+            run_borrow_input_failed(pump_output_lock_poisoned()).message(),
+            "SSH run cannot borrow the input pipe"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(run_borrow_input_failed(pump_output_lock_poisoned()))
+            ),
+            "SSH run cannot borrow the input pipe: SSH pump output lock poisoned"
+        );
+        assert_eq!(
+            run_borrow_output_failed(pump_output_lock_poisoned()).message(),
+            "SSH run cannot borrow the output pipe"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(run_borrow_output_failed(pump_output_lock_poisoned()))
+            ),
+            "SSH run cannot borrow the output pipe: SSH pump output lock poisoned"
+        );
+        assert_eq!(
+            run_borrow_error_failed(pump_output_lock_poisoned()).message(),
+            "SSH run cannot borrow the error pipe"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(run_borrow_error_failed(pump_output_lock_poisoned()))
+            ),
+            "SSH run cannot borrow the error pipe: SSH pump output lock poisoned"
+        );
+        assert_eq!(
+            run_spawn_failed(pump_output_lock_poisoned()).message(),
+            "SSH run spawn failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(run_spawn_failed(pump_output_lock_poisoned()))
+            ),
+            "SSH run spawn failed: SSH pump output lock poisoned"
+        );
+        assert_eq!(
             pty_output_lock_poisoned().message(),
             "SSH pty output lock poisoned"
         );
         assert_eq!(
             pty_interrupted_by_cancellation().message(),
             "SSH pty run interrupted by cancellation"
+        );
+        assert_eq!(
+            pty_borrow_input_failed(pump_output_lock_poisoned()).message(),
+            "SSH pty cannot borrow the input pipe"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(pty_borrow_input_failed(pump_output_lock_poisoned()))
+            ),
+            "SSH pty cannot borrow the input pipe: SSH pump output lock poisoned"
+        );
+        assert_eq!(
+            pty_borrow_output_failed(pump_output_lock_poisoned()).message(),
+            "SSH pty cannot borrow the output pipe"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(pty_borrow_output_failed(pump_output_lock_poisoned()))
+            ),
+            "SSH pty cannot borrow the output pipe: SSH pump output lock poisoned"
+        );
+        assert_eq!(
+            pty_session_init_write_failed(io_err("boom")).message(),
+            "SSH pty session init write failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(pty_session_init_write_failed(io_err("boom")))
+            ),
+            "SSH pty session init write failed: boom"
+        );
+        assert_eq!(
+            pty_session_init_flush_failed(io_err("boom")).message(),
+            "SSH pty session init flush failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(pty_session_init_flush_failed(io_err("boom")))
+            ),
+            "SSH pty session init flush failed: boom"
         );
         assert_eq!(
             dequeue_task_cancelled("SSH_DEQUEUE").message(),
