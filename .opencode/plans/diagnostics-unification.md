@@ -1377,6 +1377,19 @@ transport, so this phase is mechanical:
    clippy shows only the pre-existing
    needless_borrow warnings elsewhere in the file;
    fmt clean.
+   Func-registry step 2026-11-26: no new ctors,
+   all wordings already pinned. Two signatures
+   flip to DiagnosticResult in static_check.rs:
+   collect_func_harvest_edges plus
+   extend_funcs_checked. Bodies drop two
+   anyhow::Error::new wrappers; both are pure
+   leaves (closure-key probe plus map insert, no
+   fallible callees). Callers hold via the blanket
+   Diagnostic-into-anyhow conversion with no
+   change. Core 409 plus integration 629 green;
+   clippy shows only the pre-existing
+   needless_borrow warnings elsewhere in the file;
+   fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

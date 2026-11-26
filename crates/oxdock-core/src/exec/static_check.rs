@@ -737,7 +737,7 @@ fn collect_func_harvest_edges<P: ProcessManager>(
     unit: &str,
     is_entry: bool,
     out: &mut HashMap<(String, String), String>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     for step in steps {
         if let StepKind::ImportFuncs {
             path,
@@ -756,7 +756,7 @@ fn collect_func_harvest_edges<P: ProcessManager>(
                 path,
                 is_entry,
             ) else {
-                return Err(anyhow::Error::new(check_diag::import_not_in_closure(path)));
+                return Err(check_diag::import_not_in_closure(path));
             };
             for name in func_names {
                 out.insert((unit.to_string(), name.clone()), key.clone());
@@ -2043,14 +2043,12 @@ fn extend_funcs_checked(
     all_funcs: &mut HashMap<String, FuncInfo>,
     incoming: HashMap<String, FuncInfo>,
     display: &str,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     for (key, info) in incoming {
         if let Some(existing) = all_funcs.get(&key)
             && existing.module != info.module
         {
-            return Err(anyhow::Error::new(check_diag::check_duplicate_func(
-                &key, display,
-            )));
+            return Err(check_diag::check_duplicate_func(&key, display));
         }
         all_funcs.insert(key, info);
     }
