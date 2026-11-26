@@ -2641,6 +2641,23 @@ transport, so this phase is mechanical:
    files. ssh lib 13 plus invalid_host_key pin plus parser
    267+303 plus core lib 410 plus integration 629 green; ssh
    clippy zero, fmt clean on three touched files.
+   ssh funcs bulk 2026-11-27 (funcs.rs plus ssh diagnostics):
+   six new ssh.* ctors with key plus wording plus {:#} chain
+   pins (shared option_must_be_duration across SSH_SERVE/
+   SSH_EXEC via func field with cross-leg shared-key pin;
+   ephemeral generate, listener clone, server spawn with
+   concrete inners by value via Arc; connect_failed/
+   exec_failed with Diagnostic inners). AMEND: all seven
+   sites go by-value map_err (option/connect/exec take
+   reason: Diagnostic with FIELD_ERR plus with_source, not
+   sourceless with_context layers: parse/connect/run legs
+   already return DiagnosticResult, so with_context trapped
+   the inner in anyhow ContextError and left source() None;
+   eval_inside_isolated precedent does not apply since that
+   wraps opaque anyhow). anyhow::Context drops from funcs.rs
+   entirely. ssh lib 13 plus invalid_host_key pin plus parser
+   267+303 plus core lib 410 plus integration 629 green; ssh
+   clippy zero, fmt clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

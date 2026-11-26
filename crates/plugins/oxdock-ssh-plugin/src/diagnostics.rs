@@ -24,6 +24,7 @@ const FIELD_MODE: &str = "mode";
 const FIELD_ERR: &str = "err";
 const FIELD_CODE: &str = "code";
 const FIELD_OPTION: &str = "option";
+const FIELD_GOT: &str = "got";
 
 /// `key_path` escapes the workspace guard. Takes the invoking func
 /// and the raw path; quoting lives here.
@@ -925,6 +926,18 @@ pub fn connect_username_empty() -> Diagnostic {
     )
 }
 
+/// `SSH_CONNECT` session leg failed. Takes the leg's typed failure
+/// by value; bare outer plus chained source.
+pub fn connect_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.connect.failed",
+        "SSH_CONNECT failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
 /// `SSH_PTY_RUN` outside `ASYNC`. Parameterless: the wording is
 /// fixed.
 pub fn pty_run_requires_async() -> Diagnostic {
@@ -1000,6 +1013,47 @@ pub fn serve_option_required(option: &str) -> Diagnostic {
     )
 }
 
+/// Ephemeral Ed25519 host key generation failed. Takes the concrete
+/// failure by value; bare outer plus chained source. The legacy
+/// wording stays byte-identical.
+pub fn ephemeral_key_generate_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.serve.ephemeral_key_generate_failed",
+        "generate ephemeral Ed25519 host key".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// `SSH_SERVE` cannot clone its listener. Takes the concrete
+/// failure by value; bare outer plus chained source.
+pub fn serve_listener_clone_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.serve.listener_clone_failed",
+        "SSH_SERVE cannot clone its listener".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// `SSH_SERVE` cannot spawn the server thread. Takes the concrete
+/// failure by value; bare outer plus chained source.
+pub fn serve_spawn_failed(reason: impl std::error::Error + Send + Sync + 'static) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.serve.spawn_failed",
+        "SSH_SERVE cannot spawn the server thread".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
 /// `SSH_EXEC` numeric option not positive. Takes the option name
 /// (callers pass the `OPT_*` constants); quoting lives here.
 /// Shared by `timeout` / `max_bytes`: one key, one mode.
@@ -1010,6 +1064,43 @@ pub fn exec_option_must_be_positive(option: &str) -> Diagnostic {
         message,
         Diagnostic::make_fields(&[(FIELD_OPTION, option)]),
     )
+}
+
+/// Duration option holds a non-duration string. Takes the invoking
+/// func (`SSH_SERVE` / `SSH_EXEC`: same failure mode, one key),
+/// the option name, the offending text, and the parse failure by
+/// value; quoting lives here. Bare outer plus chained source.
+pub fn option_must_be_duration(
+    func: &str,
+    option: &str,
+    got: &str,
+    reason: Diagnostic,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    let message = format!("{func} option '{option}' must be a duration, got {got:?}");
+    Diagnostic::new(
+        "ssh.option.must_be_duration",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_FUNC, func),
+            (FIELD_OPTION, option),
+            (FIELD_GOT, got),
+            (FIELD_ERR, &reason_text),
+        ]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// `SSH_EXEC` remote leg failed. Takes the leg's typed failure by
+/// value; bare outer plus chained source.
+pub fn exec_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.exec.failed",
+        "SSH_EXEC failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
 }
 
 /// `SSH_SEND_EXIT_STATUS` with a negative code. Takes the code;
@@ -1118,13 +1209,25 @@ mod tests {
             connect_requires_async().key(),
             connect_offline().key(),
             connect_username_empty().key(),
+            connect_failed(pump_output_lock_poisoned()).key(),
             pty_run_requires_async().key(),
             run_requires_async().key(),
             exec_needs_program().key(),
             exec_username_empty().key(),
             exec_offline().key(),
+            exec_failed(pump_output_lock_poisoned()).key(),
             serve_option_empty("username").key(),
             serve_option_required("username").key(),
+            option_must_be_duration(
+                "SSH_SERVE",
+                "idle_timeout",
+                "x",
+                pump_output_lock_poisoned(),
+            )
+            .key(),
+            ephemeral_key_generate_failed(io_err("boom")).key(),
+            serve_listener_clone_failed(io_err("boom")).key(),
+            serve_spawn_failed(io_err("boom")).key(),
             exec_option_must_be_positive("timeout").key(),
             send_exit_status_negative(-1).key(),
             send_exit_status_out_of_range(1 << 40).key(),
@@ -1168,6 +1271,16 @@ mod tests {
         assert_eq!(
             serve_option_required("username").key(),
             serve_option_required("password").key()
+        );
+        assert_eq!(
+            option_must_be_duration(
+                "SSH_SERVE",
+                "idle_timeout",
+                "x",
+                pump_output_lock_poisoned(),
+            )
+            .key(),
+            option_must_be_duration("SSH_EXEC", "timeout", "y", pump_output_lock_poisoned()).key()
         );
         assert_eq!(
             exec_option_must_be_positive("timeout").key(),
@@ -1721,6 +1834,17 @@ mod tests {
             "SSH_CONNECT username must not be empty"
         );
         assert_eq!(
+            connect_failed(pump_output_lock_poisoned()).message(),
+            "SSH_CONNECT failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(connect_failed(pump_output_lock_poisoned()))
+            ),
+            "SSH_CONNECT failed: SSH pump output lock poisoned"
+        );
+        assert_eq!(
             pty_run_requires_async().message(),
             "SSH_PTY_RUN requires ASYNC: run it in its own task beside the session pump task"
         );
@@ -1741,12 +1865,83 @@ mod tests {
             "SSH_EXEC failed: engine running in --offline mode"
         );
         assert_eq!(
+            exec_failed(pump_output_lock_poisoned()).message(),
+            "SSH_EXEC failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(exec_failed(pump_output_lock_poisoned()))
+            ),
+            "SSH_EXEC failed: SSH pump output lock poisoned"
+        );
+        assert_eq!(
             serve_option_empty("username").message(),
             "SSH_SERVE option 'username' must not be empty"
         );
         assert_eq!(
             serve_option_required("password").message(),
             "SSH_SERVE option 'password' is required"
+        );
+        assert_eq!(
+            option_must_be_duration(
+                "SSH_SERVE",
+                "idle_timeout",
+                "soon",
+                pump_output_lock_poisoned(),
+            )
+            .message(),
+            "SSH_SERVE option 'idle_timeout' must be a duration, got \"soon\""
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(option_must_be_duration(
+                    "SSH_SERVE",
+                    "idle_timeout",
+                    "soon",
+                    pump_output_lock_poisoned(),
+                ))
+            ),
+            "SSH_SERVE option 'idle_timeout' must be a duration, got \"soon\": SSH pump output lock poisoned"
+        );
+        assert_eq!(
+            option_must_be_duration("SSH_EXEC", "timeout", "soon", pump_output_lock_poisoned())
+                .message(),
+            "SSH_EXEC option 'timeout' must be a duration, got \"soon\""
+        );
+        assert_eq!(
+            ephemeral_key_generate_failed(io_err("boom")).message(),
+            "generate ephemeral Ed25519 host key"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(ephemeral_key_generate_failed(io_err("boom")))
+            ),
+            "generate ephemeral Ed25519 host key: boom"
+        );
+        assert_eq!(
+            serve_listener_clone_failed(io_err("boom")).message(),
+            "SSH_SERVE cannot clone its listener"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(serve_listener_clone_failed(io_err("boom")))
+            ),
+            "SSH_SERVE cannot clone its listener: boom"
+        );
+        assert_eq!(
+            serve_spawn_failed(io_err("boom")).message(),
+            "SSH_SERVE cannot spawn the server thread"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(serve_spawn_failed(io_err("boom")))
+            ),
+            "SSH_SERVE cannot spawn the server thread: boom"
         );
         assert_eq!(
             exec_option_must_be_positive("timeout").message(),

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::diagnostics as ssh_diag;
 use oxdock_core::{Field, HostModule, OxDockFn, OxDockType, RecordSchema, StepCtx, TypeTag, Value};
@@ -274,10 +274,8 @@ fn ssh_serve<P: ProcessManager>(
                 let text = value
                     .as_str()
                     .expect("check_options verified DURATION|STRING");
-                oxdock_parser::command::parse_duration(text).with_context(|| {
-                    format!(
-                        "SSH_SERVE option '{OPT_IDLE_TIMEOUT}' must be a duration, got {text:?}"
-                    )
+                oxdock_parser::command::parse_duration(text).map_err(|e| {
+                    ssh_diag::option_must_be_duration("SSH_SERVE", OPT_IDLE_TIMEOUT, text, e)
                 })?
             };
             (!timeout.is_zero()).then_some(timeout)
@@ -298,7 +296,7 @@ fn ssh_serve<P: ProcessManager>(
     let host_key = match load_or_create_host_key(cx, "SSH_SERVE", key_path)? {
         Some(key) => key,
         None => PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
-            .context("generate ephemeral Ed25519 host key")?,
+            .map_err(ssh_diag::ephemeral_key_generate_failed)?,
     };
     let id = SERVER_IDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let id = format!("ssh-{pid}-{id}", pid = std::process::id());
@@ -309,7 +307,7 @@ fn ssh_serve<P: ProcessManager>(
             // The runtime owns a clone; the slot keeps the backlog socket.
             let owned = listener
                 .try_clone()
-                .context("SSH_SERVE cannot clone its listener")?;
+                .map_err(ssh_diag::serve_listener_clone_failed)?;
             let thread_queue = Arc::clone(&queue);
             let thread_user = username.clone();
             let thread_pass = password.clone();
@@ -326,7 +324,7 @@ fn ssh_serve<P: ProcessManager>(
                         idle_timeout,
                     )
                 })
-                .context("SSH_SERVE cannot spawn the server thread")?;
+                .map_err(ssh_diag::serve_spawn_failed)?;
             (addr, addr.to_string(), Some(thread))
         }
         AcquiredListener::Memory => {
@@ -674,7 +672,7 @@ fn ssh_connect<P: ProcessManager>(
     let runtime = connect_runtime()?;
     let session = runtime
         .block_on(connect_session(&addr, &username, &password))
-        .context("SSH_CONNECT failed")?;
+        .map_err(ssh_diag::connect_failed)?;
     let crate::runtime::OutboundSession {
         up_rx,
         down_tx,
@@ -1070,8 +1068,8 @@ fn ssh_exec<P: ProcessManager>(
                 let text = value
                     .as_str()
                     .expect("check_options verified DURATION|STRING");
-                oxdock_parser::command::parse_duration(text).with_context(|| {
-                    format!("SSH_EXEC option '{OPT_TIMEOUT}' must be a duration, got {text:?}")
+                oxdock_parser::command::parse_duration(text).map_err(|e| {
+                    ssh_diag::option_must_be_duration("SSH_EXEC", OPT_TIMEOUT, text, e)
                 })?
             };
             if timeout.is_zero() {
@@ -1102,7 +1100,7 @@ fn ssh_exec<P: ProcessManager>(
         .block_on(crate::runtime::run_remote_exec(
             &addr, &username, &password, command, timeout, max_bytes,
         ))
-        .context("SSH_EXEC failed")?;
+        .map_err(ssh_diag::exec_failed)?;
     let mut map = BTreeMap::new();
     map.insert(
         FIELD_EXIT.to_string(),
