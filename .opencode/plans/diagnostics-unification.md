@@ -2439,6 +2439,34 @@ transport, so this phase is mechanical:
    Context stays (both with_context sites keep the anyhow
    chain). Core lib 410 plus integration 629 green; clippy at
    baseline (3 pre-existing), fmt clean on both touched files.
+   REMOTE bulk step 2026-11-27 (file-sized batch): fourteen new
+   dsl.eval.* ctors with key plus wording pins. Guest guard:
+   remote_copy_outside_guest parameterless. Transfer: rewind_failed
+   with io error inline, fetch_missing with rel plus
+   Option-cause (one key for the fast-fail and probe-cause arms),
+   fetch_entry_cap with rel plus cap (call site passes
+   MAX_TRANSFER_ENTRIES, mirroring unarchive_expansion_cap),
+   fetch_no_file_name with rel (Option context becomes
+   ok_or_else). Header: remote_unknown_var and remote_unknown_env
+   (runtime twins of the check ctors, which keep backticks and
+   step prefixes), unrenderable_var with name plus type plus
+   target (typed Diagnostic with_context layer over the renderer
+   error, never stringified). Session: no_session with target,
+   exit_status with target plus code and transport_failed with
+   target (both typed Diagnostic context layers over runner
+   errors, per the eval_inside_isolated precedent). Push:
+   push_destination_escapes plus push_target_outside (one key
+   for the absolute, nested, and bare shapings) with Debug path
+   plus inline reason, push_symlink_over_dir with path.
+   Seventeen sites re-keyed across copy_transfer, resolve_header,
+   resolve_fetch_entries, dispatch_remote, and apply_push_symlink.
+   Bytes identical (contains pins on fetch-source-missing and
+   transport-failed plus unexpected-EOF chain). Dropped the now-
+   unused anyhow bail macro plus KEYWORD_COPY, KEYWORD_REMOTE,
+   and KEYWORD_WITH_IO imports from remote; Context stays (three
+   typed-layer sites). Core lib 410 plus integration 629 green
+   (including 19 remote); clippy at baseline (3 pre-existing),
+   fmt clean on all three touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

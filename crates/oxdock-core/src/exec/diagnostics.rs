@@ -2409,6 +2409,198 @@ pub fn eval_placeholder_miss_text(text: &str) -> Diagnostic {
     )
 }
 
+/// Flagged `COPY --from-host` / `--to-host` outside a remote guest
+/// session. Parameterless: unreachable by construction (the parser
+/// only produces flagged copies inside `REMOTE` bodies), so no
+/// source rides along.
+pub fn eval_remote_copy_outside_guest() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.remote_copy_outside_guest",
+        format!(
+            "{KEYWORD_COPY} --from-host and --to-host execute only inside a remote guest session"
+        ),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Transfer-stage rewind failure. Takes the underlying I/O failure;
+/// the text is inlined, so no source rides along.
+pub fn eval_remote_rewind_failed(reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("transfer stage rewind failed: {reason_text}");
+    Diagnostic::new(
+        "dsl.eval.remote_rewind_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// `REMOTE` header naming an unknown variable. Takes the target and
+/// the name; quoting lives here. The runtime twin of
+/// `check_remote_unknown_var` (which renders backticks and a step
+/// prefix); this path renders single quotes with no step. No source
+/// rides along.
+pub fn eval_remote_unknown_var(target: &str, name: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_REMOTE} '{target}' uses unknown variable ${name}");
+    Diagnostic::new(
+        "dsl.eval.remote_unknown_var",
+        message,
+        Diagnostic::make_fields(&[("target", target), ("var", name)]),
+    )
+}
+
+/// `REMOTE` header variable with no literal rendering. Takes the name,
+/// the value's type name, and the target; quoting lives here. The
+/// remediation names the shared keyword constants. The typed diagnostic
+/// rides the anyhow context chain over the renderer error (never
+/// stringified); no source rides along on the diagnostic itself.
+pub fn eval_remote_unrenderable_var(name: &str, actual: &str, target: &str) -> Diagnostic {
+    let message = format!(
+        "cannot pass ${name}: {actual} into {KEYWORD_REMOTE} '{target}' (pass bytes via {KEYWORD_WITH_IO}, files via the workspace)"
+    );
+    Diagnostic::new(
+        "dsl.eval.remote_unrenderable_var",
+        message,
+        Diagnostic::make_fields(&[("var", name), ("actual", actual), ("target", target)]),
+    )
+}
+
+/// `REMOTE` header naming an unknown env entry. Takes the target and
+/// the name; quoting lives here. The runtime twin of
+/// `check_remote_undeclared_env` (which carries the static position
+/// and remediation); this path stands alone. No source rides along.
+pub fn eval_remote_unknown_env(target: &str, name: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_REMOTE} '{target}' uses unknown env {name}");
+    Diagnostic::new(
+        "dsl.eval.remote_unknown_env",
+        message,
+        Diagnostic::make_fields(&[("target", target), ("env", name)]),
+    )
+}
+
+/// `REMOTE` fetch declaration with no host source. Takes the declared
+/// host path and the optional underlying failure: `None` on the
+/// fast-fail arm, `Some` where the entry-kind probe failed (rendered
+/// `{reason:#}` inline with no `with_source`, per the passthrough
+/// contract). One key covers both arms.
+pub fn eval_remote_fetch_missing(rel: &str, reason: Option<&anyhow::Error>) -> Diagnostic {
+    let reason_text = reason.map(|err| format!("{err:#}"));
+    let message = match &reason_text {
+        Some(text) => format!("{KEYWORD_REMOTE} fetch source missing: {rel} ({text})"),
+        None => format!("{KEYWORD_REMOTE} fetch source missing: {rel}"),
+    };
+    let fields = match &reason_text {
+        Some(text) => Diagnostic::make_fields(&[("rel", rel), ("reason", text.as_str())]),
+        None => Diagnostic::make_fields(&[("rel", rel)]),
+    };
+    Diagnostic::new("dsl.eval.remote_fetch_missing", message, fields)
+}
+
+/// `REMOTE` fetch breaching the transfer entry cap. Takes the declared
+/// host path and the cap; one key covers every walk site. No source
+/// rides along: the cap is the whole verdict.
+pub fn eval_remote_fetch_entry_cap(rel: &str, cap: usize) -> Diagnostic {
+    let message =
+        format!("{KEYWORD_REMOTE} fetch hit the {cap} entry cap: {rel} names too many paths");
+    Diagnostic::new(
+        "dsl.eval.remote_fetch_entry_cap",
+        message,
+        Diagnostic::make_fields(&[("rel", rel), ("cap", &cap.to_string())]),
+    )
+}
+
+/// `REMOTE` fetch source with no file name. Takes the declared host
+/// path. No source rides along: the `None` filename carries nothing.
+pub fn eval_remote_fetch_no_file_name(rel: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_REMOTE} fetch source has no file name: {rel}");
+    Diagnostic::new(
+        "dsl.eval.remote_fetch_no_file_name",
+        message,
+        Diagnostic::make_fields(&[("rel", rel)]),
+    )
+}
+
+/// `REMOTE` target with no registered session. Takes the target; the
+/// remediation names the CLI flag spelling. No source rides along.
+pub fn eval_remote_no_session(target: &str) -> Diagnostic {
+    let message = format!(
+        "{KEYWORD_REMOTE} '{target}' has no registered session (bind it with --remote {target}=\"<command>\")"
+    );
+    Diagnostic::new(
+        "dsl.eval.remote_no_session",
+        message,
+        Diagnostic::make_fields(&[("target", target)]),
+    )
+}
+
+/// Guest `EXIT` relayed as a host failure. Takes the target and the
+/// relayed code; the typed diagnostic rides the anyhow context chain
+/// over the guest error (never stringified, per the `eval_inside_isolated`
+/// precedent). No source rides along on the diagnostic itself.
+pub fn eval_remote_exit_status(target: &str, code: i64) -> Diagnostic {
+    let message = format!("{KEYWORD_REMOTE} '{target}' exited with code {code}");
+    Diagnostic::new(
+        "dsl.eval.remote_exit_status",
+        message,
+        Diagnostic::make_fields(&[("target", target), ("code", &code.to_string())]),
+    )
+}
+
+/// `REMOTE` transport failure. Takes the target; the typed diagnostic
+/// rides the anyhow context chain over the runner error (never
+/// stringified). No source rides along on the diagnostic itself.
+pub fn eval_remote_transport_failed(target: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_REMOTE} '{target}' transport failed");
+    Diagnostic::new(
+        "dsl.eval.remote_transport_failed",
+        message,
+        Diagnostic::make_fields(&[("target", target)]),
+    )
+}
+
+/// Push-symlink destination escaping the workspace. Takes the link
+/// path and the join failure; the text is inlined, so no source rides
+/// along. `Debug` rendering of the path lives here.
+pub fn eval_remote_push_destination_escapes(rel: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!(
+        "{KEYWORD_REMOTE} push symlink destination {rel:?} escapes the workspace: {reason_text}"
+    );
+    Diagnostic::new(
+        "dsl.eval.remote_push_destination_escapes",
+        message,
+        Diagnostic::make_fields(&[("rel", rel), ("reason", &reason_text)]),
+    )
+}
+
+/// Push-symlink target resolving outside the workspace. Takes the link
+/// path and the join failure; one key covers the absolute, nested,
+/// and bare shapings. The text is inlined, so no source rides along.
+pub fn eval_remote_push_target_outside(rel: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!(
+        "{KEYWORD_REMOTE} push symlink {rel:?} points outside the workspace: {reason_text}"
+    );
+    Diagnostic::new(
+        "dsl.eval.remote_push_target_outside",
+        message,
+        Diagnostic::make_fields(&[("rel", rel), ("reason", &reason_text)]),
+    )
+}
+
+/// Push-syncback refusing to replace a directory with a symlink.
+/// Takes the link path; `Debug` rendering lives here. No source rides
+/// along: the entry kind is the whole verdict.
+pub fn eval_remote_push_symlink_over_dir(rel: &str) -> Diagnostic {
+    let message =
+        format!("{KEYWORD_REMOTE} sync-back cannot replace directory {rel:?} with a symlink");
+    Diagnostic::new(
+        "dsl.eval.remote_push_symlink_over_dir",
+        message,
+        Diagnostic::make_fields(&[("rel", rel)]),
+    )
+}
+
 /// `RUN` interrupted by cancellation. Takes the rendered command
 /// (shell text or pty `what`); one key covers both, the template
 /// is identical. No source rides along.
@@ -6306,6 +6498,20 @@ mod tests {
             eval_inside_isolated().key(),
             eval_isolated_outside_allowlist().key(),
             eval_placeholder_miss_text("placeholder miss").key(),
+            eval_remote_copy_outside_guest().key(),
+            eval_remote_rewind_failed(&std::io::Error::other("rewind")).key(),
+            eval_remote_unknown_var("t", "v").key(),
+            eval_remote_unrenderable_var("v", "HANDLE", "t").key(),
+            eval_remote_unknown_env("t", "N").key(),
+            eval_remote_fetch_missing("a/b", None).key(),
+            eval_remote_fetch_entry_cap("a/b", 100_000).key(),
+            eval_remote_fetch_no_file_name("a/b").key(),
+            eval_remote_no_session("t").key(),
+            eval_remote_exit_status("t", 3).key(),
+            eval_remote_transport_failed("t").key(),
+            eval_remote_push_destination_escapes("a", &anyhow::anyhow!("x")).key(),
+            eval_remote_push_target_outside("a", &anyhow::anyhow!("x")).key(),
+            eval_remote_push_symlink_over_dir("a").key(),
             eval_with_io_tty_live_pipe("stdin").key(),
             eval_run_cancelled("echo hi").key(),
             eval_run_argv_cancelled(&["echo".to_string()]).key(),
@@ -6942,6 +7148,66 @@ mod tests {
         assert_eq!(
             eval_placeholder_miss_text("placeholder miss").message(),
             "placeholder miss"
+        );
+        assert_eq!(
+            eval_remote_copy_outside_guest().message(),
+            "COPY --from-host and --to-host execute only inside a remote guest session"
+        );
+        assert_eq!(
+            eval_remote_rewind_failed(&std::io::Error::other("boom")).message(),
+            "transfer stage rewind failed: boom"
+        );
+        assert_eq!(
+            eval_remote_unknown_var("t", "v").message(),
+            "REMOTE 't' uses unknown variable $v"
+        );
+        assert_eq!(
+            eval_remote_unrenderable_var("v", "HANDLE", "t").message(),
+            "cannot pass $v: HANDLE into REMOTE 't' (pass bytes via WITH_IO, files via the workspace)"
+        );
+        assert_eq!(
+            eval_remote_unknown_env("t", "N").message(),
+            "REMOTE 't' uses unknown env N"
+        );
+        assert_eq!(
+            eval_remote_fetch_missing("a/b", None).message(),
+            "REMOTE fetch source missing: a/b"
+        );
+        assert_eq!(
+            eval_remote_fetch_missing("a/b", Some(&anyhow::anyhow!("gone"))).message(),
+            "REMOTE fetch source missing: a/b (gone)"
+        );
+        assert_eq!(
+            eval_remote_fetch_entry_cap("a/b", 100_000).message(),
+            "REMOTE fetch hit the 100000 entry cap: a/b names too many paths"
+        );
+        assert_eq!(
+            eval_remote_fetch_no_file_name("a/b").message(),
+            "REMOTE fetch source has no file name: a/b"
+        );
+        assert_eq!(
+            eval_remote_no_session("t").message(),
+            "REMOTE 't' has no registered session (bind it with --remote t=\"<command>\")"
+        );
+        assert_eq!(
+            eval_remote_exit_status("t", 3).message(),
+            "REMOTE 't' exited with code 3"
+        );
+        assert_eq!(
+            eval_remote_transport_failed("t").message(),
+            "REMOTE 't' transport failed"
+        );
+        assert_eq!(
+            eval_remote_push_destination_escapes("a", &anyhow::anyhow!("gone")).message(),
+            "REMOTE push symlink destination \"a\" escapes the workspace: gone"
+        );
+        assert_eq!(
+            eval_remote_push_target_outside("a", &anyhow::anyhow!("gone")).message(),
+            "REMOTE push symlink \"a\" points outside the workspace: gone"
+        );
+        assert_eq!(
+            eval_remote_push_symlink_over_dir("a").message(),
+            "REMOTE sync-back cannot replace directory \"a\" with a symlink"
         );
         assert_eq!(
             eval_run_cancelled("echo hi").message(),
