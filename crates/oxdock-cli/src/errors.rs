@@ -199,11 +199,14 @@ pub fn publish_outer_invalid(raw: &str) -> anyhow::Error {
 }
 
 /// `-p` inner endpoint rejected by the endpoint grammar. Takes the
-/// underlying failure; `{reason:#}` (full chain) formatting lives
-/// here so call sites stay `format!`-free. Net-only: lean builds store
-/// the raw inner text and reject later with the feature error.
+/// underlying `Diagnostic` by value; `{reason:#}` (full chain)
+/// formatting lives here so call sites stay `format!`-free. The inner
+/// is a leaf parse-surface failure (sourceless inline), so rendering
+/// the bare `Diagnostic` matches the retired anyhow-chain bytes
+/// exactly. Net-only: lean builds store the raw inner text and reject
+/// later with the feature error.
 #[cfg(feature = "net")]
-pub fn publish_inner_invalid(raw: &str, reason: &anyhow::Error) -> anyhow::Error {
+pub fn publish_inner_invalid(raw: &str, reason: Diagnostic) -> anyhow::Error {
     let reason_text = format!("{reason:#}");
     let message = format!("-p inner endpoint invalid in {raw:?}: {reason_text}");
     let diag = Diagnostic::new(
@@ -662,7 +665,14 @@ mod tests {
             #[cfg(feature = "net")]
             (
                 "cli.publish_inner_invalid",
-                publish_inner_invalid("2222:0", &anyhow::anyhow!("bad endpoint")),
+                publish_inner_invalid(
+                    "2222:0",
+                    Diagnostic::new(
+                        "t.reason",
+                        "bad endpoint".to_string(),
+                        Diagnostic::make_fields(&[]),
+                    ),
+                ),
             ),
             ("cli.module_unlinked", module_unlinked("NET", "net")),
             ("cli.unexpected_flag", unexpected_flag("frobnicate", true)),
@@ -892,7 +902,14 @@ mod tests {
         );
         #[cfg(feature = "net")]
         {
-            let err = publish_inner_invalid("2222:0", &anyhow::anyhow!("bad endpoint"));
+            let err = publish_inner_invalid(
+                "2222:0",
+                Diagnostic::new(
+                    "t.reason",
+                    "bad endpoint".to_string(),
+                    Diagnostic::make_fields(&[]),
+                ),
+            );
             let text = err.to_string();
             assert!(text.contains("\"2222:0\""), "{text}");
             assert!(text.contains("bad endpoint"), "{text}");

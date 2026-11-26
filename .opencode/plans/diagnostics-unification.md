@@ -2973,6 +2973,17 @@ transport, so this phase is mechanical:
    not coerce; ? sites hold via blanket From). Workspace
    check clean; parser 267 plus 303 green, clippy zero, fmt
    clean.
+   cli publish_inner_invalid normalization bulk 2026-11-27
+   (cli errors.rs 1 ctor plus endpoints.rs 2 sites): ctor
+   normalizes from reason: &anyhow::Error to reason:
+   Diagnostic by value (net endpoint_ref_invalid precedent);
+   both parse_endpoint_ref sites drop the
+   anyhow::Error::new round-trip and pass e directly; ctor
+   still returns anyhow::Error (CLI pattern) with inline
+   {reason:#} rendering, byte-identical for the leaf
+   parse-surface inner. Test pins swap anyhow bad endpoint
+   for a real Diagnostic leaf. cli 49 plus 12 green, clippy
+   zero, fmt clean; lean no-default-features check clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
