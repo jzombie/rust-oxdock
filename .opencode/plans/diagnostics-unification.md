@@ -1339,6 +1339,26 @@ transport, so this phase is mechanical:
    `.expect()` test harnesses work unchanged since
    Diagnostic is Debug. Core 409 plus integration
    629 plus fs 71 green; clippy and fmt clean.
+   Import-closure step 2026-11-26: no new ctors,
+   all wordings already pinned. Eight signatures
+   flip to DiagnosticResult in import.rs:
+   resolve_top_level_with plus resolve_top_level
+   plus load_file plus expand_load plus expand_walk
+   plus expand_walk_top plus expand_walk_kind plus
+   expand_import_closure. Bodies drop ten
+   anyhow::Error::new wrappers; the two
+   resolve_tag sites keep their inner
+   anyhow::Error::new(e) reason wrap (the callee is
+   already Diagnostic, the ctor takes
+   &anyhow::Error) and only shed the outer wrap.
+   read_import_bytes holds anyhow: the caller maps
+   it into import_cannot_read with reason chaining,
+   so no intermediate conversion is lost. Holders
+   convert at the boundary with explicit
+   map_err(anyhow::Error::from): dry_run_resolve
+   plus load_import stay anyhow for the dry-run and
+   runtime paths. Core 409 plus integration 629
+   green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use super::diagnostics as import_diag;
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::{GuardedPath, WorkspaceFs};
 use oxdock_parser::{
     ExportKind, Exports, MODULE_SEPARATOR, ModuleTable, Step, StepKind, Value, qualify,
@@ -236,7 +237,7 @@ fn resolve_top_level_with(
     entry_parent: Option<&GuardedPath>,
     fallback: Option<&GuardedPath>,
     path: &str,
-) -> Result<GuardedPath> {
+) -> DiagnosticResult<GuardedPath> {
     if top
         && let Some(eparent) = entry_parent
         && eparent != dir
@@ -264,7 +265,7 @@ fn resolve_top_level_with(
         return Ok(candidate);
     }
     dir.join(path)
-        .map_err(|e| anyhow::Error::new(import_diag::import_cannot_resolve(path, &e)))
+        .map_err(|e| import_diag::import_cannot_resolve(path, &e))
 }
 
 /// Preview-phase entry point: no entry handle here, so the workspace
@@ -278,6 +279,7 @@ fn dry_run_resolve(
 ) -> Result<GuardedPath> {
     let fallback = workspace_fallback(fs);
     resolve_top_level_with(fs, dir, is_top, None, is_top.then_some(&fallback), path)
+        .map_err(anyhow::Error::from)
 }
 
 /// Preview a harvest target: only its top-level nested imports load,
@@ -1251,7 +1253,7 @@ pub(super) struct ClosureFile {
 pub(crate) fn expand_import_closure<P: ProcessManager>(
     state: &mut ExecState<P>,
     steps: &[Step],
-) -> Result<Vec<ClosureFile>> {
+) -> DiagnosticResult<Vec<ClosureFile>> {
     let base = import_base(state);
     let mut stack: Vec<GuardedPath> = Vec::new();
     let mut files: Vec<ClosureFile> = Vec::new();
@@ -1268,7 +1270,7 @@ fn expand_walk<P: ProcessManager>(
     dir: &GuardedPath,
     stack: &mut Vec<GuardedPath>,
     files: &mut Vec<ClosureFile>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     for step in steps {
         match &step.kind {
             StepKind::ImportFile { path, alias } => {
@@ -1305,11 +1307,11 @@ fn expand_walk<P: ProcessManager>(
                     if !file_exists && state.module_table.modules.contains_key(path) {
                         for name in type_names {
                             state.resolve_tag(name).map_err(|e| {
-                                anyhow::Error::new(import_diag::import_unknown_type(
+                                import_diag::import_unknown_type(
                                     path,
                                     name,
                                     Some(&anyhow::Error::new(e)),
-                                ))
+                                )
                             })?;
                         }
                         // No file body to recurse into; still walk nested
@@ -1349,7 +1351,7 @@ fn expand_walk_top<P: ProcessManager>(
     dir: &GuardedPath,
     stack: &mut Vec<GuardedPath>,
     files: &mut Vec<ClosureFile>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     for step in steps {
         match &step.kind {
             StepKind::ImportFile { path, alias } => {
@@ -1381,11 +1383,11 @@ fn expand_walk_top<P: ProcessManager>(
                     if !file_exists && state.module_table.modules.contains_key(path) {
                         for name in type_names {
                             state.resolve_tag(name).map_err(|e| {
-                                anyhow::Error::new(import_diag::import_unknown_type(
+                                import_diag::import_unknown_type(
                                     path,
                                     name,
                                     Some(&anyhow::Error::new(e)),
-                                ))
+                                )
                             })?;
                         }
                         continue;
@@ -1421,7 +1423,7 @@ fn expand_walk_kind<P: ProcessManager>(
     dir: &GuardedPath,
     stack: &mut Vec<GuardedPath>,
     files: &mut Vec<ClosureFile>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     for body in child_bodies(kind) {
         expand_walk(state, body, dir, stack, files)?;
     }
@@ -1568,26 +1570,23 @@ fn expand_load<P: ProcessManager>(
     dir: &GuardedPath,
     stack: &[GuardedPath],
     path: &str,
-) -> Result<ExpandedImport> {
+) -> DiagnosticResult<ExpandedImport> {
     let resolved = resolve_top_level(state, dir, stack, path)?;
     let key = resolved.display();
     if stack.iter().any(|p| p == &resolved) {
         let mut chain: Vec<String> = stack.iter().map(|p| p.display()).collect();
         chain.push(key);
-        return Err(anyhow::Error::new(import_diag::import_cycle(&chain)));
+        return Err(import_diag::import_cycle(&chain));
     }
     if stack.len() >= MAX_IMPORT_DEPTH {
-        return Err(anyhow::Error::new(import_diag::import_depth_limit(
-            MAX_IMPORT_DEPTH,
-            path,
-        )));
+        return Err(import_diag::import_depth_limit(MAX_IMPORT_DEPTH, path));
     }
     // The file must already exist: expansion is the analysis pass,
     // and analysis needs bytes. Probing through the run filesystem so
     // memory-backed test filesystems answer from their own state, not
     // the host disk.
     if state.fs.entry_kind(&resolved).is_err() {
-        return Err(anyhow::Error::new(import_diag::import_not_found(path)));
+        return Err(import_diag::import_not_found(path));
     }
     let LoadedFile {
         resolved,
@@ -1610,7 +1609,7 @@ fn expand_load<P: ProcessManager>(
 fn load_import<P: ProcessManager>(state: &mut ExecState<P>, path: &str) -> Result<LoadedFile> {
     let base = import_base(state);
     let stack = state.import_stack.clone();
-    load_file(state, &base, &stack, path)
+    load_file(state, &base, &stack, path).map_err(anyhow::Error::from)
 }
 
 /// One resolved import target: the file, its parsed body, and its
@@ -1631,7 +1630,7 @@ fn load_file<P: ProcessManager>(
     base: &GuardedPath,
     stack: &[GuardedPath],
     path: &str,
-) -> Result<LoadedFile> {
+) -> DiagnosticResult<LoadedFile> {
     // Workspace-side resolution: imported files live next to the
     // importing file in the source tree (not in the snapshot), so join
     // lexically under the importer's own guard instead of routing
@@ -1645,13 +1644,10 @@ fn load_file<P: ProcessManager>(
     if stack.iter().any(|p| p == &resolved) {
         let mut chain: Vec<String> = stack.iter().map(|p| p.display()).collect();
         chain.push(key.clone());
-        return Err(anyhow::Error::new(import_diag::import_cycle(&chain)));
+        return Err(import_diag::import_cycle(&chain));
     }
     if stack.len() >= MAX_IMPORT_DEPTH {
-        return Err(anyhow::Error::new(import_diag::import_depth_limit(
-            MAX_IMPORT_DEPTH,
-            path,
-        )));
+        return Err(import_diag::import_depth_limit(MAX_IMPORT_DEPTH, path));
     }
     if let Some(record) = state.modules.get(&key) {
         return Ok(LoadedFile {
@@ -1661,10 +1657,9 @@ fn load_file<P: ProcessManager>(
         });
     }
     let bytes = read_import_bytes(state.fs.as_ref(), &resolved)
-        .map_err(|e| anyhow::Error::new(import_diag::import_cannot_read(path, &e)))?;
-    let text = std::str::from_utf8(&bytes).map_err(|e| {
-        anyhow::Error::new(import_diag::import_bad_utf8(path, &anyhow::Error::new(e)))
-    })?;
+        .map_err(|e| import_diag::import_cannot_read(path, &e))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|e| import_diag::import_bad_utf8(path, &anyhow::Error::new(e)))?;
     let table = state.module_table.clone();
     let mut reserved = super::native::builtin_function_names();
     reserved.extend(table.reserved_base_names());
@@ -1674,12 +1669,7 @@ fn load_file<P: ProcessManager>(
         reserved,
         table,
     )
-    .map_err(|e| {
-        anyhow::Error::new(import_diag::import_parse_failed(
-            path,
-            &anyhow::Error::new(e),
-        ))
-    })?;
+    .map_err(|e| import_diag::import_parse_failed(path, &anyhow::Error::new(e)))?;
     state.modules.insert(
         key,
         super::state::ModuleRecord {
@@ -1730,7 +1720,7 @@ pub(crate) fn resolve_top_level<P: ProcessManager>(
     dir: &GuardedPath,
     stack: &[GuardedPath],
     path: &str,
-) -> Result<GuardedPath> {
+) -> DiagnosticResult<GuardedPath> {
     resolve_top_level_with(
         state.fs.as_ref(),
         dir,
