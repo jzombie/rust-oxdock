@@ -1,6 +1,6 @@
 use super::diagnostics as markdown_diag;
-use anyhow::Result;
 use line_ending::LineEnding;
+use oxdock_diagnostics::DiagnosticResult;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 /// Runner configuration parsed from a fenced block's info-string.
@@ -30,7 +30,7 @@ pub struct FencedBlock {
 /// Uses `pulldown-cmark` for reliable CommonMark fence parsing. The first
 /// whitespace-delimited token of an opening fence's info-string selects the
 /// language; remaining tokens are scanned as `key:value` metadata.
-pub fn extract_fenced_blocks(markdown: &str, lang: &str) -> Result<Vec<FencedBlock>> {
+pub fn extract_fenced_blocks(markdown: &str, lang: &str) -> DiagnosticResult<Vec<FencedBlock>> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     let offset_parser = Parser::new_ext(markdown, options).into_offset_iter();
@@ -71,9 +71,7 @@ pub fn extract_fenced_blocks(markdown: &str, lang: &str) -> Result<Vec<FencedBlo
                 // range terminates with an explicit fence closer.
                 let block_slice = markdown[range.start..range.end].trim_end();
                 if !block_slice.ends_with("```") && !block_slice.ends_with("~~~") {
-                    return Err(anyhow::Error::new(markdown_diag::markdown_unclosed_fence(
-                        current_line_no,
-                    )));
+                    return Err(markdown_diag::markdown_unclosed_fence(current_line_no));
                 }
                 let metadata = parse_metadata(&current_info, current_line_no)?;
                 // Trim trailing newline that pulldown-cmark includes from the last line.
@@ -90,9 +88,7 @@ pub fn extract_fenced_blocks(markdown: &str, lang: &str) -> Result<Vec<FencedBlo
     }
 
     if in_block {
-        return Err(anyhow::Error::new(markdown_diag::markdown_unclosed_fence(
-            current_line_no,
-        )));
+        return Err(markdown_diag::markdown_unclosed_fence(current_line_no));
     }
     Ok(blocks)
 }
@@ -101,7 +97,7 @@ pub fn extract_fenced_blocks(markdown: &str, lang: &str) -> Result<Vec<FencedBlo
 /// `oxdock expect_error:"boom"`. Returns `None` when the key is absent.
 /// Malformed metadata errors, exactly like fenced-block extraction, so
 /// generators and runners agree on what a fence means.
-pub fn expect_error_from_info(info: &str) -> Result<Option<String>> {
+pub fn expect_error_from_info(info: &str) -> DiagnosticResult<Option<String>> {
     Ok(parse_metadata(info, 0)?.expect_error)
 }
 
@@ -110,9 +106,7 @@ fn skip_token(info: &str) -> &str {
     info.trim_start()[first.len()..].trim_start()
 }
 
-fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
-    let fail = |diag: oxdock_diagnostics::Diagnostic| anyhow::Error::new(diag);
-
+fn parse_metadata(info: &str, line_no: usize) -> DiagnosticResult<BlockMetadata> {
     let rest = skip_token(info);
     let mut metadata = BlockMetadata::default();
     let mut scanner = rest.chars().peekable();
@@ -125,9 +119,9 @@ fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
             break;
         };
         if !first_char.is_ascii_alphanumeric() && first_char != '_' {
-            return Err(fail(markdown_diag::markdown_metadata_unexpected_char(
+            return Err(markdown_diag::markdown_metadata_unexpected_char(
                 line_no, first_char,
-            )));
+            ));
         }
         let mut key = String::new();
         let mut saw_equals = false;
@@ -148,15 +142,15 @@ fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
             }
             other => {
                 let _ = other;
-                return Err(fail(markdown_diag::markdown_metadata_missing_colon(
+                return Err(markdown_diag::markdown_metadata_missing_colon(
                     line_no, &key,
-                )));
+                ));
             }
         }
         if saw_equals {
-            return Err(fail(markdown_diag::markdown_metadata_equals_syntax(
+            return Err(markdown_diag::markdown_metadata_equals_syntax(
                 line_no, &key,
-            )));
+            ));
         }
 
         while matches!(scanner.peek(), Some(' ')) {
@@ -170,9 +164,7 @@ fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
                     Some('"') => break,
                     Some(c) => value.push(c),
                     None => {
-                        return Err(fail(markdown_diag::markdown_metadata_unterminated_quote(
-                            line_no,
-                        )));
+                        return Err(markdown_diag::markdown_metadata_unterminated_quote(line_no));
                     }
                 }
             }
@@ -192,26 +184,24 @@ fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
             "env" => {
                 let (name, val) = value
                     .split_once('=')
-                    .ok_or_else(|| fail(markdown_diag::markdown_metadata_env_shape(line_no)))?;
+                    .ok_or_else(|| markdown_diag::markdown_metadata_env_shape(line_no))?;
                 metadata.env.push((name.to_string(), val.to_string()));
             }
             "roots" => {
                 if value != "unified" {
-                    return Err(fail(markdown_diag::markdown_metadata_roots_unsupported(
+                    return Err(markdown_diag::markdown_metadata_roots_unsupported(
                         line_no, &value,
-                    )));
+                    ));
                 }
                 if metadata.unified_roots {
-                    return Err(fail(markdown_diag::markdown_metadata_roots_duplicate(
-                        line_no,
-                    )));
+                    return Err(markdown_diag::markdown_metadata_roots_duplicate(line_no));
                 }
                 metadata.unified_roots = true;
             }
             "expect_error" => {
                 if metadata.expect_error.replace(value.clone()).is_some() {
-                    return Err(fail(
-                        markdown_diag::markdown_metadata_expect_error_duplicate(line_no),
+                    return Err(markdown_diag::markdown_metadata_expect_error_duplicate(
+                        line_no,
                     ));
                 }
             }
@@ -219,9 +209,7 @@ fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
                 metadata.mock_remote.push(value.clone());
             }
             other => {
-                return Err(fail(markdown_diag::markdown_metadata_unknown_key(
-                    line_no, other,
-                )));
+                return Err(markdown_diag::markdown_metadata_unknown_key(line_no, other));
             }
         }
     }

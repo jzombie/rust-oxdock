@@ -2961,6 +2961,18 @@ transport, so this phase is mechanical:
    by value (unwrapping, not stringifying) so the inner
    dsl.check.* key survives in the chain instead of
    flattening to text.
+   parser markdown bulk 2026-11-27 (parser markdown.rs, 3
+   signature flips, zero new ctors): extract_fenced_blocks
+   plus expect_error_from_info plus parse_metadata flip to
+   DiagnosticResult; both unclosed-fence Error::new shims drop
+   to bare ctors; the fail closure deletes and all 10
+   metadata sites return bare ctors directly. Callers hold:
+   core conformance uses match plus Display (no change);
+   logic-tests docs_conformance load_blocks takes the
+   standard Ok(...?) boundary adaptation (direct return does
+   not coerce; ? sites hold via blanket From). Workspace
+   check clean; parser 267 plus 303 green, clippy zero, fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
