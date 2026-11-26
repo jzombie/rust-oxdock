@@ -1584,11 +1584,9 @@ fn check_var_binding_access(
     key: &str,
     site: Option<&GuardExpr>,
     prefix: &str,
-) -> Result<TypeTag> {
+) -> DiagnosticResult<TypeTag> {
     if !env.is_declared(key) {
-        return Err(anyhow::Error::new(check_diag::check_undefined_var(
-            prefix, key,
-        )));
+        return Err(check_diag::check_undefined_var(prefix, key));
     }
     env.read_guarded(key, site)
 }
@@ -2143,7 +2141,7 @@ impl Env {
     /// the site are live on that path, and they unify. No overlap
     /// means the name is never bound where the read executes — the
     /// same undeclared error runtime would produce there.
-    fn read_guarded(&self, key: &str, site: Option<&GuardExpr>) -> Result<TypeTag> {
+    fn read_guarded(&self, key: &str, site: Option<&GuardExpr>) -> DiagnosticResult<TypeTag> {
         Ok(self.read_entry_guarded(key, site)?.0)
     }
 
@@ -2155,7 +2153,7 @@ impl Env {
         &self,
         key: &str,
         site: Option<&GuardExpr>,
-    ) -> Result<(TypeTag, Option<GuardExpr>)> {
+    ) -> DiagnosticResult<(TypeTag, Option<GuardExpr>)> {
         for frame in self.frames.iter().rev() {
             if let Some(entries) = frame.get(key) {
                 let live: Vec<&Binding> = entries
@@ -2163,7 +2161,7 @@ impl Env {
                     .filter(|entry| oxdock_parser::guards_overlap(entry.guard.as_ref(), site))
                     .collect();
                 if live.is_empty() {
-                    return Err(anyhow::Error::new(check_diag::check_undefined_var("", key)));
+                    return Err(check_diag::check_undefined_var("", key));
                 }
                 // Coverage: an unguarded live entry fires everywhere,
                 // otherwise the site must imply the disjunction of
@@ -2182,9 +2180,7 @@ impl Env {
                         }
                     }
                     if oxdock_parser::guard_satisfiable(&GuardExpr::All(atoms)) {
-                        return Err(anyhow::Error::new(check_diag::check_var_not_guaranteed(
-                            key,
-                        )));
+                        return Err(check_diag::check_var_not_guaranteed(key));
                     }
                 }
                 let mut unified: Option<TypeTag> = None;
@@ -2236,9 +2232,7 @@ impl Env {
                         }
                     }
                     if oxdock_parser::guard_satisfiable(&GuardExpr::All(atoms)) {
-                        return Err(anyhow::Error::new(check_diag::check_var_not_guaranteed(
-                            key,
-                        )));
+                        return Err(check_diag::check_var_not_guaranteed(key));
                     }
                 }
                 let mut unified: Option<TypeTag> = None;
@@ -2256,7 +2250,7 @@ impl Env {
                 return Ok((unified.expect("live never empty"), None));
             }
         }
-        Err(anyhow::Error::new(check_diag::check_undefined_var("", key)))
+        Err(check_diag::check_undefined_var("", key))
     }
 
     fn is_declared(&self, key: &str) -> bool {
@@ -4584,7 +4578,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// for one.
     fn check_name_read(env: &Env, name: &str, scope: &Scope, idx: usize) -> Result<TypeTag> {
         let key = clean_var(name);
-        check_var_binding_access(env, &key, scope.site.as_ref(), &step_prefix(idx))
+        Ok(check_var_binding_access(
+            env,
+            &key,
+            scope.site.as_ref(),
+            &step_prefix(idx),
+        )?)
     }
 
     /// Static counterpart of `resolve_pipe_handle`: a pipe endpoint
