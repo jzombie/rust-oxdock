@@ -466,7 +466,9 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             Ok(v.clone())
         }
         Expr::Var { name } => Ok(load_var_binding(cx.state, name)?),
-        Expr::ConstRef { alias, name } => super::import::resolve_const_ref(cx.state, alias, name),
+        Expr::ConstRef { alias, name } => {
+            Ok(super::import::resolve_const_ref(cx.state, alias, name)?)
+        }
         Expr::Env(key) => match cx.state.get_env(key) {
             Some(v) => Ok(Value::string(v.to_string())),
             // Declared-but-absent reads empty, exactly like a host
@@ -1232,19 +1234,19 @@ pub fn value_to_json(value: &Value) -> DiagnosticResult<serde_json::Value> {
 fn resolve_const_call_arg<P: ProcessManager>(
     state: &ExecState<P>,
     src: &str,
-) -> Result<Option<Value>> {
+) -> DiagnosticResult<Option<Value>> {
     use oxdock_parser::template::{TemplateArg, classify_template_arg};
     match classify_template_arg(src) {
         TemplateArg::DollarQualified { alias, name, keys } => {
             if keys.is_empty() {
                 super::import::resolve_const_ref(state, alias, name).map(Some)
             } else {
-                Err(args_diag::eval_const_arg_keypath().into())
+                Err(args_diag::eval_const_arg_keypath())
             }
         }
         TemplateArg::Dollar(_) => Ok(None),
         TemplateArg::ConstRef { .. } | TemplateArg::KeyPath { .. } | TemplateArg::Var(_) => {
-            Err(args_diag::eval_const_arg_bare_sigil(src.trim()).into())
+            Err(args_diag::eval_const_arg_bare_sigil(src.trim()))
         }
         _ => Ok(None),
     }

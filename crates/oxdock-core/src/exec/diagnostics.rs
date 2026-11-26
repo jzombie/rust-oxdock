@@ -659,6 +659,19 @@ pub fn import_const_is_let(qualified: &str) -> Diagnostic {
     )
 }
 
+/// `CONST` forward-chain failure. Takes the chain error verbatim: the
+/// `ForwardError` `Display` in `native` owns the wording
+/// (unknown/broken/split/cycle/ambiguous hops), so no wrapper is
+/// added and no source is attached.
+pub fn import_const_forward_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.import.const_forward_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
 /// Control flow escaping an import boundary during file init. Takes
 /// the flow kind (`BREAK`/`CONTINUE`), the 1-based step number, and
 /// the importing path.
@@ -3919,6 +3932,7 @@ mod tests {
             import_const_unknown("q").key(),
             import_const_uninitialized("q").key(),
             import_const_is_let("q").key(),
+            import_const_forward_failed(&anyhow::anyhow!("x")).key(),
             import_not_in_closure("f").key(),
             import_export_type_mismatch("f", "T").key(),
             check_var_tag("v", &anyhow::anyhow!("x")).key(),
@@ -5086,6 +5100,10 @@ mod tests {
                 .contains("never initialized")
         );
         assert!(import_const_is_let("q").message().contains("LET binding"));
+        assert_eq!(
+            import_const_forward_failed(&anyhow::anyhow!("unknown CONST `U::N`")).message(),
+            "unknown CONST `U::N`"
+        );
         assert_eq!(
             import_flow_crosses_boundary("BREAK", 3, "f").message(),
             "step 3: BREAK cannot cross import boundary (in IMPORT `f`)"

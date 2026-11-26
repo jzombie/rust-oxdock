@@ -2017,7 +2017,7 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
     state: &ExecState<P>,
     alias: &str,
     name: &str,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     use super::native::{
         ConstHolders, chase_const_forward, const_holder_files, missing_const_hint,
     };
@@ -2028,21 +2028,15 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
     let holders = match const_holder_files(state, &targets, alias, name) {
         ConstHolders::Found(holders) => holders,
         ConstHolders::NoAlias => {
-            return Err(anyhow::Error::new(import_diag::import_const_no_alias(
-                &qualified, alias,
-            )));
+            return Err(import_diag::import_const_no_alias(&qualified, alias));
         }
         ConstHolders::Ambiguous { alias, base, files } => {
-            return Err(anyhow::Error::new(import_diag::import_const_ambiguous(
-                &alias, &base, &files,
-            )));
+            return Err(import_diag::import_const_ambiguous(&alias, &base, &files));
         }
     };
     if holders.len() > 1 {
         let files: std::collections::HashSet<String> = holders.into_iter().collect();
-        return Err(anyhow::Error::new(import_diag::import_const_ambiguous(
-            alias, name, &files,
-        )));
+        return Err(import_diag::import_const_ambiguous(alias, name, &files));
     }
     let Some(file) = holders.into_iter().next() else {
         // Hint owned by `missing_const_hint`: unexported CONST or
@@ -2050,14 +2044,10 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
         let hint = missing_const_hint(state, &targets, alias, name);
         match hint {
             Some(hint) => {
-                return Err(anyhow::Error::new(import_diag::import_const_hinted(
-                    &qualified, &hint,
-                )));
+                return Err(import_diag::import_const_hinted(&qualified, &hint));
             }
             None => {
-                return Err(anyhow::Error::new(import_diag::import_const_no_alias(
-                    &qualified, alias,
-                )));
+                return Err(import_diag::import_const_no_alias(&qualified, alias));
             }
         }
     };
@@ -2066,37 +2056,28 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
     // included (the clone below shares the frozen buffer). Runtime
     // targets carry no guards, so disjoint branches cannot co-exist
     // here: several terminals fail loud like several holders.
-    let mut terminals = chase_const_forward(state, &file, name, &qualified)?;
+    let mut terminals = chase_const_forward(state, &file, name, &qualified)
+        .map_err(|err| import_diag::import_const_forward_failed(&anyhow::Error::new(err)))?;
     if terminals.len() > 1 {
         let files: std::collections::HashSet<String> = terminals.drain(..).collect();
-        return Err(anyhow::Error::new(import_diag::import_const_ambiguous(
-            alias, name, &files,
-        )));
+        return Err(import_diag::import_const_ambiguous(alias, name, &files));
     }
     let Some(terminal) = terminals.into_iter().next() else {
-        return Err(anyhow::Error::new(import_diag::import_const_unknown(
-            &qualified,
-        )));
+        return Err(import_diag::import_const_unknown(&qualified));
     };
     let Some(record) = state.modules.get(&terminal) else {
-        return Err(anyhow::Error::new(import_diag::import_const_unknown(
-            &qualified,
-        )));
+        return Err(import_diag::import_const_unknown(&qualified));
     };
     let Some(init) = record.init.as_ref() else {
-        return Err(anyhow::Error::new(import_diag::import_const_uninitialized(
-            &qualified,
-        )));
+        return Err(import_diag::import_const_uninitialized(&qualified));
     };
     if !init.const_vars.contains(name) {
-        return Err(anyhow::Error::new(import_diag::import_const_is_let(
-            &qualified,
-        )));
+        return Err(import_diag::import_const_is_let(&qualified));
     }
     init.vars
         .get(name)
         .map(|(_, value)| value.clone())
-        .ok_or_else(|| anyhow::Error::new(import_diag::import_const_unknown(&qualified)))
+        .ok_or_else(|| import_diag::import_const_unknown(&qualified))
 }
 
 /// Record one executed import under the importing unit: alias to its

@@ -1749,6 +1749,32 @@ transport, so this phase is mechanical:
    blanket conversion. Core 409 plus
    integration 629 green; clippy and fmt
    clean.
+   Const-ref bulk step 2026-11-26: unblocks
+   the template/arg cluster. One new ctor
+   (import_const_forward_failed verbatim
+   passthrough of the ForwardError Display,
+   which stays the single wording owner for
+   unknown/broken/split/cycle/ambiguous
+   hops; no wrapper, no source) with key
+   plus wording pins. Two signatures flip:
+   import.rs resolve_const_ref plus args.rs
+   resolve_const_call_arg return
+   DiagnosticResult. resolve_const_ref drops
+   all anyhow::Error::new wrappers; the
+   chase_const_forward leg maps via the new
+   ctor keeping the inner anyhow::Error::new
+   (err) reason wrap since the ctor takes
+   &anyhow::Error. All four
+   resolve_const_ref callers (evaluate_expr,
+   resolve_const_call_arg, compiled-math
+   LoadConstRef, expand_string placeholder)
+   are still anyhow and hold via the blanket
+   conversion with zero edits except one
+   Ok(? ) firewall on the evaluate_expr
+   ConstRef match tail (other arms already
+   use that shape). Core 409 plus
+   integration 629 green; clippy and fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
