@@ -2255,6 +2255,23 @@ transport, so this phase is mechanical:
    Core 410 plus integration 629 green; clippy at
    baseline (3 pre-existing), fmt clean on both
    touched files.
+   EXPAND bulk step 2026-11-27 (file-sized batch):
+   four new dsl.eval.* ctors with key plus wording pins
+   (expand_resolve_failed with path;
+   expand_read_failed with display; expand_write_failed
+   taking ref-io-Error with the static wording living in
+   the ctor, one key covering both streaming loops plus
+   the final flush; expand_needs_stdin parameterless with
+   shared keyword constants). Seven sites re-keyed across
+   replace/expand via map_err plus anyhow Error new
+   (stdin-missing bail becomes explicit return Err).
+   The file-open site reuses eval_read_open_failed,
+   single ownership holding for the shared failed to open
+   wording. The chunk-read site wraps its std io Error
+   with anyhow Error new at the call site. Bytes identical.
+   Core 410 plus integration 629 green; clippy at
+   baseline (3 pre-existing), fmt clean on both
+   touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

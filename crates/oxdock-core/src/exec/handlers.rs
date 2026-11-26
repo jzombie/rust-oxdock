@@ -1689,30 +1689,32 @@ pub(super) fn replace<P: ProcessManager>(
                 .state
                 .fs
                 .resolve_read(&cx.state.cwd, path)
-                .with_context(|| format!("{KEYWORD_EXPAND} {}", path))?;
-            let mut reader = cx
-                .state
-                .fs
-                .open_read(&target)
-                .with_context(|| format!("failed to open {}", target.display()))?;
+                .map_err(|e| anyhow::Error::new(diag::eval_expand_resolve_failed(path, &e)))?;
+            let mut reader = cx.state.fs.open_read(&target).map_err(|e| {
+                anyhow::Error::new(diag::eval_read_open_failed(
+                    &target.display().to_string(),
+                    &e,
+                ))
+            })?;
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
-                let n = reader
-                    .read(&mut buf)
-                    .with_context(|| format!("failed to read {}", target.display()))?;
+                let n = reader.read(&mut buf).map_err(|e| {
+                    anyhow::Error::new(diag::eval_expand_read_failed(
+                        &target.display().to_string(),
+                        &anyhow::Error::new(e),
+                    ))
+                })?;
                 if n == 0 {
                     break;
                 }
                 expander.process_bytes(&buf[..n], &mut out_buf)?;
-                w.write_all(&out_buf).context("failed to write output")?;
+                w.write_all(&out_buf)
+                    .map_err(|e| anyhow::Error::new(diag::eval_expand_write_failed(&e)))?;
                 out_buf.clear();
             }
         } else {
             let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-                bail!(
-                    "EXPAND requires stdin when no file path is given \
-                     (use WITH_IO [stdin=...] EXPAND)"
-                );
+                return Err(anyhow::Error::new(diag::eval_expand_needs_stdin()));
             };
             let mut guard = input_stream
                 .lock()
@@ -1726,14 +1728,16 @@ pub(super) fn replace<P: ProcessManager>(
                     break;
                 }
                 expander.process_bytes(&buf[..n], &mut out_buf)?;
-                w.write_all(&out_buf).context("failed to write output")?;
+                w.write_all(&out_buf)
+                    .map_err(|e| anyhow::Error::new(diag::eval_expand_write_failed(&e)))?;
                 out_buf.clear();
             }
         }
 
         expander.flush(&mut out_buf)?;
         if !out_buf.is_empty() {
-            w.write_all(&out_buf).context("failed to write output")?;
+            w.write_all(&out_buf)
+                .map_err(|e| anyhow::Error::new(diag::eval_expand_write_failed(&e)))?;
             out_buf.clear();
         }
 

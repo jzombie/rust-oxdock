@@ -12,12 +12,13 @@ use oxdock_parser::{
     ANY_TYPE_NAME, BOOL_TYPE_NAME, Expr, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
     KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT,
     KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT, KEYWORD_ENV,
-    KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED,
-    KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_READ, KEYWORD_READ_LINE,
-    KEYWORD_REMOTE, KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE,
-    KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TYPE, KEYWORD_WITH_IO, KEYWORD_WORKDIR,
-    KEYWORD_WRITE, LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME,
-    SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
+    KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV,
+    KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_READ,
+    KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN,
+    KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TYPE,
+    KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE, LIST_TYPE_NAME, MAP_TYPE_NAME,
+    PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag,
+    VOID_TYPE_NAME, render_structural,
 };
 
 use super::function_names::{
@@ -2618,6 +2619,62 @@ pub fn eval_remove_not_empty_failed(path: &str, reason: &anyhow::Error) -> Diagn
         Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
     )
     .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `EXPAND` destination-resolution failure. Takes the script spelling
+/// and the underlying failure. Bare outer context plus chained
+/// source.
+pub fn eval_expand_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_EXPAND} {path}");
+    Diagnostic::new(
+        "dsl.eval.expand_resolve_failed",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `EXPAND` chunk-read failure. Takes the resolved display and the
+/// underlying failure. Bare outer context plus chained source. The
+/// file-open site reuses `eval_read_open_failed`: one owner for the
+/// shared `failed to open` wording.
+pub fn eval_expand_read_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to read {display}");
+    Diagnostic::new(
+        "dsl.eval.expand_read_failed",
+        message,
+        Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `EXPAND` template-output write failure. Takes the underlying I/O
+/// failure; the static wording lives here. One key covers all three
+/// write sites (both streaming loops plus the final flush) since the
+/// outer text is identical.
+pub fn eval_expand_write_failed(reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    Diagnostic::new(
+        "dsl.eval.expand_write_failed",
+        "failed to write output".to_string(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `EXPAND` without a stdin stream and no file path. Parameterless:
+/// the remediation names the shared keyword constants.
+pub fn eval_expand_needs_stdin() -> Diagnostic {
+    let message = format!(
+        "{KEYWORD_EXPAND} requires stdin when no file path is given (use {KEYWORD_WITH_IO} [stdin=...] {KEYWORD_EXPAND})"
+    );
+    Diagnostic::new(
+        "dsl.eval.expand_needs_stdin",
+        message,
+        Diagnostic::make_fields(&[]),
+    )
 }
 
 /// `int`-typed argument whose resolution failed. Takes the underlying
@@ -5457,6 +5514,10 @@ mod tests {
             eval_remove_missing("p").key(),
             eval_remove_link_changed("p").key(),
             eval_remove_not_empty_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_expand_resolve_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_expand_read_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_expand_write_failed(&std::io::Error::other("x")).key(),
+            eval_expand_needs_stdin().key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -6071,6 +6132,22 @@ mod tests {
         assert_eq!(
             eval_remove_not_empty_failed("f", &anyhow::anyhow!("boom")).message(),
             "REMOVE f: directory not empty (use --recursive)"
+        );
+        assert_eq!(
+            eval_expand_resolve_failed("f", &anyhow::anyhow!("boom")).message(),
+            "EXPAND f"
+        );
+        assert_eq!(
+            eval_expand_read_failed("/x", &anyhow::anyhow!("boom")).message(),
+            "failed to read /x"
+        );
+        assert_eq!(
+            eval_expand_write_failed(&std::io::Error::other("boom")).message(),
+            "failed to write output"
+        );
+        assert_eq!(
+            eval_expand_needs_stdin().message(),
+            "EXPAND requires stdin when no file path is given (use WITH_IO [stdin=...] EXPAND)"
         );
         assert!(
             eval_run_exit_status("echo hi", &exit_status_sample())
