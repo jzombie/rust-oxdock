@@ -2163,6 +2163,34 @@ transport, so this phase is mechanical:
    handlers. Bytes identical. Core 410 plus
    integration 629 green; clippy at baseline (3
    pre-existing), fmt clean on both touched files.
+   READ/READ_LINE bulk step 2026-11-26
+   (file-sized batch): seven new dsl.eval.*
+   ctors with key plus wording pins
+   (read_resolve_failed with path;
+   read_open_failed with display keeping the
+   lowercase failed to open wording
+   byte-identical; read_file_failed plus
+   read_write_failed taking &io::Error with
+   static wordings living in the ctors, one key
+   each covering both branches; read_needs_stdin
+   plus read_line_needs_stdin parameterless with
+   shared keyword constants; read_line_not_utf8
+   taking &FromUtf8Error). Eight sites re-keyed
+   across read/read_line via map_err plus anyhow
+   Error new (stdin-missing bails become explicit
+   return Err, utf8 uses map_err on from_utf8).
+   All failure ctors keep the bare outer-context
+   message plus chained source (Other-kind io
+   error), matching the symlink chain shape; the
+   missing-file chain test (failed to open plus
+   leaf under causes) and the requires-stdin pin
+   both pass. Message pins use literal
+   READ/WITH_IO/READ_LINE spellings (test pins
+   out of scope for the constants sweep); ctor
+   bodies use the shared constants. Bytes
+   identical. Core 410 plus integration 629
+   green; clippy at baseline (3 pre-existing),
+   fmt clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

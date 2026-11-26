@@ -1373,30 +1373,31 @@ pub(super) fn read<P: ProcessManager>(
             .state
             .fs
             .resolve_read(&cx.state.cwd, path)
-            .with_context(|| format!("{KEYWORD_READ} {}", path))?;
-        let mut reader = cx
-            .state
-            .fs
-            .open_read(&target)
-            .with_context(|| format!("failed to open {}", target.display()))?;
+            .map_err(|e| anyhow::Error::new(diag::eval_read_resolve_failed(path, &e)))?;
+        let mut reader = cx.state.fs.open_read(&target).map_err(|e| {
+            anyhow::Error::new(diag::eval_read_open_failed(
+                &target.display().to_string(),
+                &e,
+            ))
+        })?;
         write_stdout(cx.out.clone(), |writer| {
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
-                let n = reader.read(&mut buf).context("failed to read from file")?;
+                let n = reader
+                    .read(&mut buf)
+                    .map_err(|e| anyhow::Error::new(diag::eval_read_file_failed(&e)))?;
                 if n == 0 {
                     break;
                 }
                 writer
                     .write_all(&buf[..n])
-                    .context("failed to write to output")?;
+                    .map_err(|e| anyhow::Error::new(diag::eval_read_write_failed(&e)))?;
             }
             Ok(())
         })?;
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-            bail!(
-                "{KEYWORD_READ} requires stdin (use {KEYWORD_WITH_IO} [stdin=...] {KEYWORD_READ})"
-            );
+            return Err(anyhow::Error::new(diag::eval_read_needs_stdin()));
         };
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
@@ -1414,7 +1415,7 @@ pub(super) fn read<P: ProcessManager>(
             write_stdout(cx.out.clone(), |writer| {
                 writer
                     .write_all(&buf[..n])
-                    .context("failed to write to output")
+                    .map_err(|e| anyhow::Error::new(diag::eval_read_write_failed(&e)))
             })?;
         }
     }
@@ -1423,9 +1424,7 @@ pub(super) fn read<P: ProcessManager>(
 
 pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -> Result<()> {
     let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-        bail!(
-            "{KEYWORD_READ_LINE} requires stdin (use {KEYWORD_WITH_IO} [stdin=...] {KEYWORD_READ_LINE} $var)"
-        );
+        return Err(anyhow::Error::new(diag::eval_read_line_needs_stdin()));
     };
     let clean_var = var.trim_start_matches('$').to_string();
     let mut buf = Vec::new();
@@ -1448,7 +1447,7 @@ pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -
         }
     }
     let line = String::from_utf8(buf)
-        .with_context(|| format!("{KEYWORD_READ_LINE} received non-UTF8 bytes"))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_read_line_not_utf8(&e)))?;
     let line = line
         .strip_suffix("\r\n")
         .or_else(|| line.strip_suffix('\n'))

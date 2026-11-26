@@ -13,10 +13,11 @@ use oxdock_parser::{
     KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CONST,
     KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT, KEYWORD_ENV, KEYWORD_EXPORT, KEYWORD_FUNC,
     KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND,
-    KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE,
-    KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TYPE, KEYWORD_WITH_IO, KEYWORD_WORKDIR,
-    LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME,
-    STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
+    KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_RETURN,
+    KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK,
+    KEYWORD_TYPE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, LIST_TYPE_NAME, MAP_TYPE_NAME,
+    PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag,
+    VOID_TYPE_NAME, render_structural,
 };
 
 use super::function_names::{
@@ -2305,6 +2306,101 @@ pub fn eval_ls_read_failed(display: &str, reason: &anyhow::Error) -> Diagnostic 
         "dsl.eval.ls_read_failed",
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `READ` destination-resolution failure. Takes the script spelling
+/// and the underlying failure. Bare outer context plus chained
+/// source, mirroring `eval_symlink_failed`.
+pub fn eval_read_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_READ} {path}");
+    Diagnostic::new(
+        "dsl.eval.read_resolve_failed",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `READ` file-open failure. Takes the resolved display and the
+/// underlying failure. The `failed to open` wording is kept
+/// byte-identical; the cause rides as the chained source so the
+/// snapshot renderer keeps every layer (the missing-file chain
+/// test pins the leaf under `causes:`).
+pub fn eval_read_open_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to open {display}");
+    Diagnostic::new(
+        "dsl.eval.read_open_failed",
+        message,
+        Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `READ` chunk-read failure. Takes the underlying I/O failure; the
+/// static wording lives here so call sites pass no prose. Bare outer
+/// context plus chained source.
+pub fn eval_read_file_failed(reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    Diagnostic::new(
+        "dsl.eval.read_file_failed",
+        "failed to read from file".to_string(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `READ` stdout-write failure. Takes the underlying I/O failure.
+/// One key covers both the file and stdin branches since the outer
+/// text is identical.
+pub fn eval_read_write_failed(reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    Diagnostic::new(
+        "dsl.eval.read_write_failed",
+        "failed to write to output".to_string(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `READ` without a stdin stream. Parameterless: the remediation
+/// names the shared keyword constants, so no value is passed in.
+pub fn eval_read_needs_stdin() -> Diagnostic {
+    let message =
+        format!("{KEYWORD_READ} requires stdin (use {KEYWORD_WITH_IO} [stdin=...] {KEYWORD_READ})");
+    Diagnostic::new(
+        "dsl.eval.read_needs_stdin",
+        message,
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `READ_LINE` without a stdin stream. Parameterless; the `$var`
+/// suffix is a literal usage hint, not the variable name.
+pub fn eval_read_line_needs_stdin() -> Diagnostic {
+    let message = format!(
+        "{KEYWORD_READ_LINE} requires stdin (use {KEYWORD_WITH_IO} [stdin=...] {KEYWORD_READ_LINE} $var)"
+    );
+    Diagnostic::new(
+        "dsl.eval.read_line_needs_stdin",
+        message,
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `READ_LINE` decoding failure. Takes the UTF-8 error; the message
+/// stays the bare outer context and the detail rides as the chained
+/// source. No interpolation, source attached.
+pub fn eval_read_line_not_utf8(reason: &std::string::FromUtf8Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("{KEYWORD_READ_LINE} received non-UTF8 bytes");
+    Diagnostic::new(
+        "dsl.eval.read_line_not_utf8",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
     )
     .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
 }
@@ -5123,6 +5219,13 @@ mod tests {
             eval_set_executable_failed("p", &anyhow::anyhow!("x")).key(),
             eval_ls_resolve_failed(Some("p"), &anyhow::anyhow!("x")).key(),
             eval_ls_read_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_read_resolve_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_read_open_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_read_file_failed(&std::io::Error::other("x")).key(),
+            eval_read_write_failed(&std::io::Error::other("x")).key(),
+            eval_read_needs_stdin().key(),
+            eval_read_line_needs_stdin().key(),
+            eval_read_line_not_utf8(&String::from_utf8(vec![0xff]).unwrap_err()).key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -5645,6 +5748,34 @@ mod tests {
         assert_eq!(
             eval_ls_read_failed("/x", &anyhow::anyhow!("boom")).message(),
             "LS /x"
+        );
+        assert_eq!(
+            eval_read_resolve_failed("f", &anyhow::anyhow!("boom")).message(),
+            "READ f"
+        );
+        assert_eq!(
+            eval_read_open_failed("/x", &anyhow::anyhow!("boom")).message(),
+            "failed to open /x"
+        );
+        assert_eq!(
+            eval_read_file_failed(&std::io::Error::other("boom")).message(),
+            "failed to read from file"
+        );
+        assert_eq!(
+            eval_read_write_failed(&std::io::Error::other("boom")).message(),
+            "failed to write to output"
+        );
+        assert_eq!(
+            eval_read_needs_stdin().message(),
+            "READ requires stdin (use WITH_IO [stdin=...] READ)"
+        );
+        assert_eq!(
+            eval_read_line_needs_stdin().message(),
+            "READ_LINE requires stdin (use WITH_IO [stdin=...] READ_LINE $var)"
+        );
+        assert_eq!(
+            eval_read_line_not_utf8(&String::from_utf8(vec![0xff]).unwrap_err()).message(),
+            "READ_LINE received non-UTF8 bytes"
         );
         assert!(
             eval_run_exit_status("echo hi", &exit_status_sample())
