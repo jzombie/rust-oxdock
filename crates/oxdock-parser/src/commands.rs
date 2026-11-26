@@ -128,7 +128,7 @@ pub fn lower_env_assignment(args: Vec<Arg>) -> ParseResult<StepKind> {
             ParseErrorKind::Validation {
                 command: KEYWORD_ENV.to_string(),
             },
-            dsl_diag::env_assignment_error(&e),
+            dsl_diag::env_assignment_error(e),
             &SpanContext::line_only(0),
         )
     })?
@@ -2671,7 +2671,7 @@ declare_commands! {
                         ParseErrorKind::Validation {
                             command: KEYWORD_EXPAND.to_string(),
                         },
-                        dsl_diag::expand_assignment_error(&e),
+                        dsl_diag::expand_assignment_error(e),
                         &SpanContext::line_only(0),
                     )
                 })? {
@@ -6218,7 +6218,7 @@ pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> Pars
                         ParseErrorKind::Validation {
                             command: KEYWORD_ENV.to_string(),
                         },
-                        dsl_diag::env_assignment_error(&e),
+                        dsl_diag::env_assignment_error(e),
                         ctx,
                     )
                 })?
@@ -6243,7 +6243,7 @@ pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> Pars
                     ParseErrorKind::Validation {
                         command: KEYWORD_ENV.to_string(),
                     },
-                    dsl_diag::env_assignment_error(&e),
+                    dsl_diag::env_assignment_error(e),
                     ctx,
                 )
             })? {
@@ -6297,7 +6297,7 @@ pub(crate) fn lower_expand_tokens(
                                 ParseErrorKind::Validation {
                                     command: KEYWORD_EXPAND.to_string(),
                                 },
-                                dsl_diag::expand_assignment_error(&e),
+                                dsl_diag::expand_assignment_error(e),
                                 ctx,
                             )
                         })?
@@ -6322,7 +6322,7 @@ pub(crate) fn lower_expand_tokens(
                                 ParseErrorKind::Validation {
                                     command: KEYWORD_EXPAND.to_string(),
                                 },
-                                dsl_diag::expand_path_error(&e),
+                                dsl_diag::expand_path_error(e),
                                 ctx,
                             )
                         })?;

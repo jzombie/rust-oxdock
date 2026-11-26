@@ -248,15 +248,11 @@ pub fn missing_argument(command: &str, name: &str) -> Diagnostic {
 }
 
 /// Statically-known type violation for one positional. Takes the
-/// underlying failure; `{reason:#}` (full chain) formatting lives
-/// here so call sites stay `format!`-free.
-pub fn arg_type_mismatch(
-    command: &str,
-    name: &str,
-    got: &str,
-    reason: &anyhow::Error,
-) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+/// underlying diagnostic by value and inlines its message: parse
+/// errors render only the outer message, so the reason rides inline
+/// (never as a chained source) and stays visible in snapshots.
+pub fn arg_type_mismatch(command: &str, name: &str, got: &str, reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
     let message = format!("{command} argument `{name}` got {got:?}: {reason_text}");
     Diagnostic::new(
         "dsl.validation.arg_type_mismatch",
@@ -299,11 +295,12 @@ pub fn env_bad_format() -> Diagnostic {
     )
 }
 
-/// `ENV` split failure passthrough. Takes the underlying failure;
-/// `{reason:#}` formatting lives here so call sites stay
-/// `format!`-free.
-pub fn env_assignment_error(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+/// `ENV` split failure passthrough. Takes the underlying diagnostic
+/// by value; its message renders verbatim, so the key carries the
+/// context while the text stays byte-identical. No source rides
+/// along: passthroughs never attach `with_source`.
+pub fn env_assignment_error(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
     Diagnostic::new(
         "dsl.validation.env_assignment_error",
         reason_text.clone(),
@@ -320,10 +317,11 @@ pub fn expand_bad_override() -> Diagnostic {
     )
 }
 
-/// `EXPAND` split failure passthrough. Takes the underlying failure;
-/// `{reason:#}` formatting lives here.
-pub fn expand_assignment_error(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+/// `EXPAND` split failure passthrough. Takes the underlying
+/// diagnostic by value; its message renders verbatim. No source
+/// rides along: passthroughs never attach `with_source`.
+pub fn expand_assignment_error(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
     Diagnostic::new(
         "dsl.validation.expand_assignment_error",
         reason_text.clone(),
@@ -334,9 +332,11 @@ pub fn expand_assignment_error(reason: &anyhow::Error) -> Diagnostic {
     )
 }
 
-/// `EXPAND` path validation failure passthrough.
-pub fn expand_path_error(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+/// `EXPAND` path validation failure passthrough. Takes the
+/// underlying diagnostic by value; its message renders verbatim.
+/// No source rides along.
+pub fn expand_path_error(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
     Diagnostic::new(
         "dsl.validation.expand_path_error",
         reason_text.clone(),
@@ -1013,6 +1013,63 @@ pub fn byte_count_not_positive(got: &str) -> Diagnostic {
     )
 }
 
+/// Static literal that is not an integer. Takes the raw literal;
+/// `Debug` rendering lives here. Bytes stay identical to the
+/// legacy bail.
+pub fn expected_int(got: &str) -> Diagnostic {
+    let message = format!("expected int, got {got:?}");
+    Diagnostic::new(
+        "dsl.validation.expected_int",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, got)]),
+    )
+}
+
+/// Static literal where a `$var` is required. Takes the raw
+/// literal; `Debug` rendering lives here.
+pub fn expected_var(got: &str) -> Diagnostic {
+    let message = format!("expected $var, got {got:?}");
+    Diagnostic::new(
+        "dsl.validation.expected_var",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, got)]),
+    )
+}
+
+/// Static literal outside a closed option set. Takes the allowed
+/// spellings plus the raw literal; the `|` join lives here so call
+/// sites stay `format!`-free.
+pub fn expected_one_of(options: &[&str], got: &str) -> Diagnostic {
+    let joined = options.join("|");
+    let message = format!("expected one of {joined}, got {got:?}");
+    Diagnostic::new(
+        "dsl.validation.expected_one_of",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, got), ("options", &joined)]),
+    )
+}
+
+/// Non-variable expression where a `$var` is required. Takes the
+/// rendered expression, never the `format!` string.
+pub fn expected_var_expression(rendered: &str) -> Diagnostic {
+    let message = format!("expected $var, got expression {rendered}");
+    Diagnostic::new(
+        "dsl.validation.expected_var_expression",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, rendered)]),
+    )
+}
+
+/// Split text without `KEY=value` shape. Parameterless: the wording
+/// is static.
+pub fn assignment_requires_key_value() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.assignment_requires_key_value",
+        "assignment requires KEY=value format".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
 /// `LIST_APPEND` without a LIST variable.
 pub fn list_append_requires_list() -> Diagnostic {
     Diagnostic::new(
@@ -1343,14 +1400,19 @@ mod tests {
             unknown_flag("CMD", "--nope").key(),
             too_many_positionals("CMD", 1, 2).key(),
             missing_argument("CMD", "path").key(),
-            arg_type_mismatch("CMD", "path", "3", &anyhow::anyhow!("expected PATH")).key(),
+            arg_type_mismatch("CMD", "path", "3", expected_int("x")).key(),
+            expected_int("3").key(),
+            expected_var("3").key(),
+            expected_one_of(&["A", "B"], "x").key(),
+            expected_var_expression("f()").key(),
+            assignment_requires_key_value().key(),
             needs_value("ECHO").key(),
             env_requires_assignment().key(),
             env_bad_format().key(),
-            env_assignment_error(&anyhow::anyhow!("bad split")).key(),
+            env_assignment_error(assignment_requires_key_value()).key(),
             expand_bad_override().key(),
-            expand_assignment_error(&anyhow::anyhow!("bad split")).key(),
-            expand_path_error(&anyhow::anyhow!("bad path")).key(),
+            expand_assignment_error(assignment_requires_key_value()).key(),
+            expand_path_error(expected_int("x")).key(),
             expand_extra_path().key(),
             workdir_requires_path().key(),
             workspace_requires_target().key(),
@@ -1503,9 +1565,25 @@ mod tests {
             d.message(),
             "CMD expects at most 1 positional arguments, got 3"
         );
-        let err = anyhow::anyhow!("expected PATH");
-        let d = arg_type_mismatch("CMD", "path", "3", &err);
-        assert_eq!(d.message(), "CMD argument `path` got \"3\": expected PATH");
+        let d = arg_type_mismatch("CMD", "path", "3", expected_int("PATH"));
+        assert_eq!(
+            d.message(),
+            "CMD argument `path` got \"3\": expected int, got \"PATH\""
+        );
+        assert_eq!(expected_int("3").message(), "expected int, got \"3\"");
+        assert_eq!(expected_var("3").message(), "expected $var, got \"3\"");
+        assert_eq!(
+            expected_one_of(&["A", "B"], "x").message(),
+            "expected one of A|B, got \"x\""
+        );
+        assert_eq!(
+            expected_var_expression("f()").message(),
+            "expected $var, got expression f()"
+        );
+        assert_eq!(
+            assignment_requires_key_value().message(),
+            "assignment requires KEY=value format"
+        );
     }
 
     #[test]
@@ -1527,9 +1605,8 @@ mod tests {
             needs_value("ECHO").message(),
             "ECHO requires at least one argument"
         );
-        let inner = anyhow::anyhow!("assignment requires KEY=value format");
         assert_eq!(
-            env_assignment_error(&inner).message(),
+            env_assignment_error(assignment_requires_key_value()).message(),
             "assignment requires KEY=value format"
         );
     }
@@ -1837,14 +1914,18 @@ mod tests {
     }
 
     #[test]
-    fn arg_mismatch_renders_full_chain() {
-        let err = anyhow::anyhow!("expected PATH").context("static check failed");
-        let d = arg_type_mismatch("CMD", "path", "3", &err);
-        assert!(d.message().contains("expected PATH"), "{}", d.message());
-        assert!(
-            d.message().contains("static check failed"),
-            "{}",
-            d.message()
+    fn arg_mismatch_inlines_reason_verbatim() {
+        // Parse errors render only the outer message, so the reason
+        // rides inline (never as a chained source): the actionable
+        // text stays visible in `parse_err` snapshots.
+        let d = arg_type_mismatch("CMD", "path", "3", expected_int("PATH"));
+        assert_eq!(
+            d.message(),
+            "CMD argument `path` got \"3\": expected int, got \"PATH\""
+        );
+        assert_eq!(
+            d.fields().get("reason").map(String::as_str),
+            Some("expected int, got \"PATH\"")
         );
     }
 }

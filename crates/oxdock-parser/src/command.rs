@@ -5,7 +5,7 @@ use crate::{
     BOOL_TYPE_NAME, DURATION_TYPE_NAME, INT_TYPE_NAME, LIST_TYPE_NAME, PATH_TYPE_NAME,
     STRING_TYPE_NAME,
 };
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 use oxdock_diagnostics::DiagnosticResult;
 
 /// Metadata for a single command argument.
@@ -87,21 +87,19 @@ impl ArgType {
 
     /// Validate a statically-known literal against this type.
     /// Templates and variables are never passed here : see `check_arg`.
-    pub fn validate_literal(&self, literal: &str) -> Result<()> {
+    pub fn validate_literal(&self, literal: &str) -> DiagnosticResult<()> {
         match self {
             ArgType::String | ArgType::Path | ArgType::Any => Ok(()),
             ArgType::Int => strip_digit_separators(literal)
                 .parse::<i64>()
                 .map(|_| ())
-                .map_err(|_| anyhow!("expected int, got {literal:?}")),
-            ArgType::Duration => parse_duration(literal)
-                .map(|_| ())
-                .map_err(anyhow::Error::from),
+                .map_err(|_| dsl_diag::expected_int(literal)),
+            ArgType::Duration => parse_duration(literal).map(|_| ()),
             ArgType::List => {
                 if literal.starts_with('$') {
                     Ok(())
                 } else {
-                    bail!("expected $var, got {literal:?}")
+                    Err(dsl_diag::expected_var(literal))
                 }
             }
             ArgType::OneOf(options) => {
@@ -110,7 +108,7 @@ impl ArgType {
                 if options.contains(&literal) {
                     Ok(())
                 } else {
-                    bail!("expected one of {}, got {literal:?}", options.join("|"))
+                    Err(dsl_diag::expected_one_of(options, literal))
                 }
             }
             ArgType::Rest(inner) => inner.validate_literal(literal),
@@ -121,7 +119,7 @@ impl ArgType {
     /// `Static` literals validate now; templates, variables (except a
     /// `$var` where `List` is required), and mixed fragments defer to the
     /// runtime resolvers, which see interpolated values.
-    pub fn check_arg(&self, arg: &Arg) -> Result<CheckOutcome> {
+    pub fn check_arg(&self, arg: &Arg) -> DiagnosticResult<CheckOutcome> {
         match arg {
             Arg::String(s, _) if !s.contains("{{") => {
                 self.validate_literal(s)?;
@@ -138,7 +136,7 @@ impl ArgType {
             }
             Arg::Expr(_) => {
                 if matches!(*self, ArgType::List) {
-                    bail!("expected $var, got expression {}", arg.render())
+                    Err(dsl_diag::expected_var_expression(&arg.render()))
                 } else {
                     Ok(CheckOutcome::Deferred)
                 }
@@ -229,7 +227,7 @@ fn check_one(
             ParseErrorKind::Validation {
                 command: cmd_name.to_string(),
             },
-            dsl_diag::arg_type_mismatch(cmd_name, spec.name, &arg.render(), &e),
+            dsl_diag::arg_type_mismatch(cmd_name, spec.name, &arg.render(), e),
             &SpanContext::line_only(0),
         )),
     }
@@ -350,12 +348,12 @@ fn common_prefix(a: &str, b: &str) -> String {
 /// exotic keys the grammar cannot classify (single tokens only : no whitespace
 /// reassembly, so the quoted-space corruption class cannot arise here).
 /// Returns `Ok(None)` when there is no `=`.
-pub fn split_assignment(text: &str) -> Result<Option<(String, Arg)>> {
+pub fn split_assignment(text: &str) -> DiagnosticResult<Option<(String, Arg)>> {
     let Some((key, raw)) = text.split_once('=') else {
         return Ok(None);
     };
     if key.is_empty() {
-        bail!("assignment requires KEY=value format");
+        return Err(dsl_diag::assignment_requires_key_value());
     }
     Ok(Some((
         key.to_string(),

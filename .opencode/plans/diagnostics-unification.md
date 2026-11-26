@@ -2532,6 +2532,23 @@ transport, so this phase is mechanical:
    plus core lib 410 plus integration 629 green; clippy at
    baseline (process 1 plus core 3 pre-existing), fmt clean on
    all six touched files.
+   static-validation bulk 2026-11-27 (parser-only, file-sized):
+   five new dsl.validation.* ctors with key plus wording pins
+   (expected_int, expected_var, expected_one_of, 
+   expected_var_expression, assignment_requires_key_value).
+   command.rs validate_literal, check_arg, and split_assignment
+   flip to DiagnosticResult; anyhow import drops to Result-only.
+   Four passthroughs flip to by-value Diagnostic and stay
+   sourceless (arg_type_mismatch, env_assignment_error,
+   expand_assignment_error, expand_path_error): ParseError
+   renders only the outer message, so the reason rides inline
+   and stays visible in parse_err snapshots (a bare-outer plus
+   source try regressed workspace_accepts_all_four_targets, 
+   caught and reverted within the bulk). Six commands.rs sites
+   drop the borrow; parser.rs TokenError sites hold unchanged
+   via e.to_string. Parser 267+303 plus core lib 410 plus
+   integration 629 green; parser clippy zero, fmt clean on all
+   three touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
