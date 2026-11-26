@@ -330,17 +330,19 @@ pub(crate) fn resolve_arg_state<P: ProcessManager>(
     state: &ExecState<P>,
 ) -> DiagnosticResult<String> {
     match arg {
-        Arg::String(s, _) => Ok(expand_string(s, &state.envs, state)
-            .map_err(|err| args_diag::eval_arg_expand_failed(&anyhow::Error::from(err)))?),
+        Arg::String(s, _) => {
+            Ok(expand_string(s, &state.envs, state).map_err(args_diag::eval_arg_expand_failed)?)
+        }
         Arg::Expr(e) => Err(args_diag::eval_arg_expr_needs_step_ctx(e)),
         Arg::Parts(parts) => {
             let mut out = String::new();
             for part in parts {
                 match part {
                     ArgPart::Text(s, _) => {
-                        out.push_str(&expand_string(s, &state.envs, state).map_err(|err| {
-                            args_diag::eval_arg_expand_failed(&anyhow::Error::from(err))
-                        })?);
+                        out.push_str(
+                            &expand_string(s, &state.envs, state)
+                                .map_err(args_diag::eval_arg_expand_failed)?,
+                        );
                     }
                     ArgPart::Expr(e) => {
                         return Err(args_diag::eval_arg_expr_needs_step_ctx(e));

@@ -2994,6 +2994,24 @@ transport, so this phase is mechanical:
    build.rs callers hold via .expect (Diagnostic is Debug).
    build 27 plus 4 green, clippy zero, fmt clean, workspace
    check clean.
+   core eval_arg_expand_failed normalization bulk 2026-11-27
+   (core diagnostics.rs 1 ctor plus args.rs 2 sites):
+   ctor normalizes from reason: &anyhow::Error to reason:
+   Diagnostic by value; both resolve_arg_state sites drop the
+   anyhow::Error::from round-trip and pass via function
+   reference. Byte-identical by construction: all 7
+   expand_string inners are sourceless leaves (zero
+   with_source in the template cluster), so bare
+   Diagnostic {:#} equals the retired anyhow-chain text.
+   Deliberately skipped in the same audit: eval_int_arg_resolve
+   (resolve_arg inners unbounded, may chain),
+   std_pipe_read/create_failed (pipe_reader/writer inners
+   reach os_pipe_creation_failed, which carries a source;
+   normalizing would drop the chained io text). Test pins
+   swap anyhow boom for verbatim placeholder_miss leaf.
+   core lib 410 plus integration 629 plus 12 plus 2 green;
+   clippy shows only the pre-existing static_check
+   need_borrow baseline; fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

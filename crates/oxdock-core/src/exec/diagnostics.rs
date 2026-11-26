@@ -3726,8 +3726,10 @@ pub fn eval_arg_expr_needs_step_ctx(expr: &Expr) -> Diagnostic {
 
 /// String expansion failure during `Arg` resolution. Takes the
 /// underlying failure verbatim: it already names the variable and the
-/// cause, so no wrapper is added.
-pub fn eval_arg_expand_failed(reason: &anyhow::Error) -> Diagnostic {
+/// cause, so no wrapper is added. By value: every `expand_string`
+/// failure is a sourceless leaf, so rendering the bare `Diagnostic`
+/// matches the retired anyhow-chain bytes exactly.
+pub fn eval_arg_expand_failed(reason: Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     Diagnostic::new(
         "dsl.eval.arg_expand_failed",
@@ -6682,7 +6684,7 @@ mod tests {
             eval_list_append_failed("v", eval_remove_missing("x")).key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
-            eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
+            eval_arg_expand_failed(eval_template_placeholder_miss("x")).key(),
             coerce_type_mismatch(
                 "coercion",
                 &TypeTag::Int,
@@ -7677,7 +7679,8 @@ mod tests {
             "Arg::Expr cannot be resolved without StepCtx: Env(\"X\")"
         );
         assert_eq!(
-            eval_arg_expand_failed(&anyhow::anyhow!("undefined variable `$x`")).message(),
+            eval_arg_expand_failed(eval_template_placeholder_miss("undefined variable `$x`"))
+                .message(),
             "undefined variable `$x`"
         );
         assert_eq!(
