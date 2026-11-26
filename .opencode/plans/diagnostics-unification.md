@@ -2052,6 +2052,29 @@ transport, so this phase is mechanical:
    plus integration 629 green; clippy at
    baseline (3 pre-existing), fmt clean on
    both touched files.
+   Exec-form plus SLEEP bulk step 2026-11-26
+   (file-sized batch): five new dsl.eval.*
+   ctors with key plus wording pins
+   (run_exec_pipe_arg, run_exec_semaphore_arg,
+   and run_exec_permit_arg parameterless;
+   run_exec_element_needs_string with got
+   covering map plus task handle task#N, one
+   key mirroring check_flow_outside_loop;
+   sleep_cancelled parameterless). Six sites
+   re-keyed across flatten_exec_value plus
+   sleep: pipe/semaphore/permit bails become
+   bare Err tails (fn tail, avoids needless_
+   return); map plus handle use explicit return
+   Err with got string (map literal versus
+   formatted task handle); SLEEP keeps explicit
+   return Err (loop statement must diverge).
+   Unused KEYWORD_SLEEP plus
+   PERMIT/SEMAPHORE imports dropped from
+   handlers (messages now owned downstream).
+   Bytes identical. Core 410 plus integration
+   629 green; clippy at baseline (3
+   pre-existing), fmt clean on both touched
+   files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

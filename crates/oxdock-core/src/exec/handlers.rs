@@ -18,14 +18,13 @@ use oxdock_parser::constants::{
     KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
     KEYWORD_EXPAND, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET,
     KEYWORD_LIST_APPEND, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE,
-    KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SYMLINK,
-    KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WORKDIR,
-    KEYWORD_WRITE,
+    KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_SET_EXECUTABLE, KEYWORD_SYMLINK, KEYWORD_TIMEOUT,
+    KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE,
 };
 use oxdock_parser::{
-    Arg, Command, Expr, IoBinding, IoStream, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME,
-    PipeTarget, SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Step, StepKind, TypeTag, Value,
-    WorkspaceTarget, render_structural, sigil_var,
+    Arg, Command, Expr, IoBinding, IoStream, MAP_TYPE_NAME, PIPE_TYPE_NAME, PipeTarget,
+    STRING_TYPE_NAME, Step, StepKind, TypeTag, Value, WorkspaceTarget, render_structural,
+    sigil_var,
 };
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
@@ -647,19 +646,13 @@ fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
     if val.as_pipe_handle().is_some() {
         // A pipe in argv position is always a bug: a child process
         // cannot receive a handle as an argument string.
-        anyhow::bail!(
-            "cannot pass {PIPE_TYPE_NAME} as a command argument: pipes carry streams between steps, not text. Capture the producing step's output with {KEYWORD_LET} $var: {STRING_TYPE_NAME} = ... instead."
-        );
+        return Err(anyhow::Error::new(diag::eval_run_exec_pipe_arg()));
     }
     if val.as_semaphore().is_some() {
-        anyhow::bail!(
-            "cannot pass {SEMAPHORE_TYPE_NAME} as a command argument: semaphores coordinate task access between steps, not text."
-        );
+        return Err(anyhow::Error::new(diag::eval_run_exec_semaphore_arg()));
     }
     if val.as_permit().is_some() {
-        anyhow::bail!(
-            "cannot pass {PERMIT_TYPE_NAME} as a command argument: permits grant scoped task access, not text."
-        );
+        return Err(anyhow::Error::new(diag::eval_run_exec_permit_arg()));
     }
     if let Some(d) = val.as_duration() {
         out.push(oxdock_parser::command::format_duration(&d));
@@ -676,10 +669,14 @@ fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
         return Ok(());
     }
     if val.as_map().is_some() {
-        bail!("{KEYWORD_RUN} exec form element must be a string, got map");
+        return Err(anyhow::Error::new(
+            diag::eval_run_exec_element_needs_string("map"),
+        ));
     }
     if let Some(id) = val.as_handle() {
-        bail!("{KEYWORD_RUN} exec form element must be a string, got task handle task#{id}");
+        return Err(anyhow::Error::new(
+            diag::eval_run_exec_element_needs_string(&format!("task handle task#{id}")),
+        ));
     }
     // Every other type stringifies through its descriptor rendering
     // (host values through their `Display`).
@@ -729,7 +726,7 @@ pub(crate) fn sleep<P: ProcessManager>(
     let start = Instant::now();
     loop {
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            bail!("{KEYWORD_SLEEP} interrupted by cancellation");
+            return Err(anyhow::Error::new(diag::eval_sleep_cancelled()));
         }
         let elapsed = start.elapsed();
         if elapsed >= *duration {

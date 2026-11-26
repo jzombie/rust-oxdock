@@ -13,9 +13,9 @@ use oxdock_parser::{
     KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CONST,
     KEYWORD_CONTINUE, KEYWORD_ENV, KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_IMPORT,
     KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_REMOTE,
-    KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SWITCH, KEYWORD_TYPE, KEYWORD_WITH_IO, LIST_TYPE_NAME,
-    MAP_TYPE_NAME, PIPE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME,
-    render_structural,
+    KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_TYPE, KEYWORD_WITH_IO,
+    LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME,
+    STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
 };
 
 use super::function_names::{
@@ -2055,6 +2055,70 @@ pub fn eval_run_argv_spawn_failed(argv: &[String], reason: &anyhow::Error) -> Di
         "dsl.eval.run_argv_spawn_failed",
         message,
         Diagnostic::make_fields(&[("argv", &format!("{argv:?}")), ("reason", &reason_text)]),
+    )
+}
+
+/// Pipe handle in `RUN` argv position. Parameterless: the type name,
+/// the `LET` capture recipe, and the `STRING` target are fixed, so no
+/// fields vary. No source rides along.
+pub fn eval_run_exec_pipe_arg() -> Diagnostic {
+    let message = format!(
+        "cannot pass {PIPE_TYPE_NAME} as a command argument: pipes carry streams between steps, not text. Capture the producing step's output with {KEYWORD_LET} $var: {STRING_TYPE_NAME} = ... instead."
+    );
+    Diagnostic::new(
+        "dsl.eval.run_exec_pipe_arg",
+        message,
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Semaphore in `RUN` argv position. Parameterless: the wording is
+/// fixed. No source rides along.
+pub fn eval_run_exec_semaphore_arg() -> Diagnostic {
+    let message = format!(
+        "cannot pass {SEMAPHORE_TYPE_NAME} as a command argument: semaphores coordinate task access between steps, not text."
+    );
+    Diagnostic::new(
+        "dsl.eval.run_exec_semaphore_arg",
+        message,
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Permit in `RUN` argv position. Parameterless: the wording is
+/// fixed. No source rides along.
+pub fn eval_run_exec_permit_arg() -> Diagnostic {
+    let message = format!(
+        "cannot pass {PERMIT_TYPE_NAME} as a command argument: permits grant scoped task access, not text."
+    );
+    Diagnostic::new(
+        "dsl.eval.run_exec_permit_arg",
+        message,
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `RUN` exec-form element that is not stringifiable. Takes the
+/// rendered `got` (`map` or `task handle task#N`); one key covers
+/// both shapes, mirroring `check_flow_outside_loop`. No source rides
+/// along.
+pub fn eval_run_exec_element_needs_string(got: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_RUN} exec form element must be a string, got {got}");
+    Diagnostic::new(
+        "dsl.eval.run_exec_element_needs_string",
+        message,
+        Diagnostic::make_fields(&[("got", got)]),
+    )
+}
+
+/// `SLEEP` interrupted by cancellation. Parameterless: the keyword
+/// is fixed, so no fields vary. No source rides along.
+pub fn eval_sleep_cancelled() -> Diagnostic {
+    let message = format!("{KEYWORD_SLEEP} interrupted by cancellation");
+    Diagnostic::new(
+        "dsl.eval.sleep_cancelled",
+        message,
+        Diagnostic::make_fields(&[]),
     )
 }
 
@@ -4855,6 +4919,11 @@ mod tests {
             eval_pipe_not_utf8("ASSERT", &String::from_utf8(vec![0xff]).unwrap_err()).key(),
             eval_run_spawn_failed("echo hi", &anyhow::anyhow!("x")).key(),
             eval_run_argv_spawn_failed(&["echo".to_string()], &anyhow::anyhow!("x")).key(),
+            eval_run_exec_pipe_arg().key(),
+            eval_run_exec_semaphore_arg().key(),
+            eval_run_exec_permit_arg().key(),
+            eval_run_exec_element_needs_string("map").key(),
+            eval_sleep_cancelled().key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -5298,6 +5367,30 @@ mod tests {
             eval_run_argv_spawn_failed(&["echo".to_string()], &anyhow::anyhow!("boom"))
                 .message()
                 .starts_with("RUN [\"echo\"]: ")
+        );
+        assert_eq!(
+            eval_run_exec_pipe_arg().message(),
+            "cannot pass PIPE as a command argument: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: STRING = ... instead."
+        );
+        assert_eq!(
+            eval_run_exec_semaphore_arg().message(),
+            "cannot pass SEMAPHORE as a command argument: semaphores coordinate task access between steps, not text."
+        );
+        assert_eq!(
+            eval_run_exec_permit_arg().message(),
+            "cannot pass PERMIT as a command argument: permits grant scoped task access, not text."
+        );
+        assert_eq!(
+            eval_run_exec_element_needs_string("map").message(),
+            "RUN exec form element must be a string, got map"
+        );
+        assert_eq!(
+            eval_run_exec_element_needs_string("task handle task#7").message(),
+            "RUN exec form element must be a string, got task handle task#7"
+        );
+        assert_eq!(
+            eval_sleep_cancelled().message(),
+            "SLEEP interrupted by cancellation"
         );
         assert!(
             eval_run_exit_status("echo hi", &exit_status_sample())
