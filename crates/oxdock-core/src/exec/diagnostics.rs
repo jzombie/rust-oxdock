@@ -10,8 +10,11 @@ use oxdock_diagnostics::Diagnostic;
 use oxdock_parser::template::{bare_sigil_error, qualified_keypath_error};
 use oxdock_parser::{
     ANY_TYPE_NAME, BOOL_TYPE_NAME, Expr, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
-    LIST_TYPE_NAME, MAP_TYPE_NAME, PIPE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag,
-    render_structural,
+    KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_ENV,
+    KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED,
+    KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_SWITCH, KEYWORD_TYPE,
+    KEYWORD_WITH_IO, LIST_TYPE_NAME, MAP_TYPE_NAME, PIPE_TYPE_NAME, STRING_TYPE_NAME, Spelled,
+    TypeTag, VOID_TYPE_NAME, render_structural,
 };
 
 use super::function_names::{
@@ -80,7 +83,7 @@ pub fn typing_max_depth_spelled(max: usize, spelled: &Spelled) -> Diagnostic {
 /// Bare `MAP` without arguments.
 pub fn typing_bare_map() -> Diagnostic {
     let message = format!(
-        "bare `{MAP_TYPE_NAME}` is not a declaration type: write a shape (`{MAP_TYPE_NAME}<name: TYPE, ...>`) or `{MAP_TYPE_NAME}<{ANY_TYPE_NAME}>` for maps with unknown keys"
+        "bare `{MAP_TYPE_NAME}` is not a declaration type: write a shape (`{MAP_TYPE_NAME}<name: {KEYWORD_TYPE}, ...>`) or `{MAP_TYPE_NAME}<{ANY_TYPE_NAME}>` for maps with unknown keys"
     );
     Diagnostic::new(
         "dsl.typing.bare_map",
@@ -92,7 +95,7 @@ pub fn typing_bare_map() -> Diagnostic {
 /// Bare `LIST` without arguments.
 pub fn typing_bare_list() -> Diagnostic {
     let message = format!(
-        "bare `{LIST_TYPE_NAME}` is not a declaration type: write a shape (`{LIST_TYPE_NAME}<TYPE>`) or `{LIST_TYPE_NAME}<{ANY_TYPE_NAME}>` for lists with unknown elements"
+        "bare `{LIST_TYPE_NAME}` is not a declaration type: write a shape (`{LIST_TYPE_NAME}<{KEYWORD_TYPE}>`) or `{LIST_TYPE_NAME}<{ANY_TYPE_NAME}>` for lists with unknown elements"
     );
     Diagnostic::new(
         "dsl.typing.bare_list",
@@ -169,7 +172,7 @@ pub fn typing_unregistered(what: &str, name: &str, types: &[String]) -> Diagnost
 /// wording.
 pub fn typing_void_position(what: &str) -> Diagnostic {
     let message = format!(
-        "{what} declares VOID outside a return annotation: VOID is only a return type (or HANDLE<VOID> payload)"
+        "{what} declares {VOID_TYPE_NAME} outside a return annotation: {VOID_TYPE_NAME} is only a return type (or {HANDLE_TYPE_NAME}<{VOID_TYPE_NAME}> payload)"
     );
     Diagnostic::new(
         "dsl.typing.void_position",
@@ -237,8 +240,9 @@ pub fn typing_list_arity() -> Diagnostic {
 /// Bare argument where `MAP` requires `name: TYPE`. Takes the head
 /// name for the trailing clause.
 pub fn typing_map_bare(head: &str) -> Diagnostic {
-    let message =
-        format!("`{MAP_TYPE_NAME}` fields require `name: TYPE`; `{head}` takes no bare arguments");
+    let message = format!(
+        "`{MAP_TYPE_NAME}` fields require `name: {KEYWORD_TYPE}`; `{head}` takes no bare arguments"
+    );
     Diagnostic::new(
         "dsl.typing.map_bare",
         message,
@@ -336,8 +340,9 @@ pub fn tail_chars(s: &str, n: usize) -> String {
 /// imported file's export. Takes the exported name; quoting lives
 /// here.
 pub fn mcp_export_type_unknown(name: &str) -> Diagnostic {
-    let message =
-        format!("EXPORT TYPE `{name}` matches no local TYPE and no imported file exports it");
+    let message = format!(
+        "{KEYWORD_EXPORT} {KEYWORD_TYPE} `{name}` matches no local {KEYWORD_TYPE} and no imported file exports it"
+    );
     Diagnostic::new(
         "dsl.mcp.export_type_unknown",
         message,
@@ -348,7 +353,7 @@ pub fn mcp_export_type_unknown(name: &str) -> Diagnostic {
 /// MCP linear init hit `BREAK` outside any loop. Takes the 1-based
 /// step number, matching the core runtime `step N` convention.
 pub fn mcp_break_outside_loop(step: usize) -> Diagnostic {
-    let message = format!("step {step}: BREAK outside loop");
+    let message = format!("step {step}: {KEYWORD_BREAK} outside loop");
     Diagnostic::new(
         "dsl.mcp.break_outside_loop",
         message,
@@ -358,7 +363,7 @@ pub fn mcp_break_outside_loop(step: usize) -> Diagnostic {
 
 /// MCP linear init hit `CONTINUE` outside any loop.
 pub fn mcp_continue_outside_loop(step: usize) -> Diagnostic {
-    let message = format!("step {step}: CONTINUE outside loop");
+    let message = format!("step {step}: {KEYWORD_CONTINUE} outside loop");
     Diagnostic::new(
         "dsl.mcp.continue_outside_loop",
         message,
@@ -368,7 +373,9 @@ pub fn mcp_continue_outside_loop(step: usize) -> Diagnostic {
 
 /// MCP linear init hit `RETURN` outside any function, task, or block.
 pub fn mcp_return_outside_function(step: usize) -> Diagnostic {
-    let message = format!("step {step}: RETURN outside function, ASYNC task, or LET block");
+    let message = format!(
+        "step {step}: {KEYWORD_RETURN} outside function, {KEYWORD_ASYNC} task, or {KEYWORD_LET} block"
+    );
     Diagnostic::new(
         "dsl.mcp.return_outside_function",
         message,
@@ -413,7 +420,7 @@ pub fn mcp_call_failed(reason: &anyhow::Error, stdout: &str, stderr: &str) -> Di
 /// chain including the repeated key; joining lives here.
 pub fn import_cycle(chain: &[String]) -> Diagnostic {
     let joined = chain.join(" -> ");
-    let message = format!("IMPORT cycle detected: {joined}");
+    let message = format!("{KEYWORD_IMPORT} cycle detected: {joined}");
     Diagnostic::new(
         "dsl.import.cycle",
         message,
@@ -424,7 +431,7 @@ pub fn import_cycle(chain: &[String]) -> Diagnostic {
 /// IMPORT nesting deeper than the cap. Takes the cap and the path
 /// that exceeded it.
 pub fn import_depth_limit(max: usize, path: &str) -> Diagnostic {
-    let message = format!("IMPORT depth limit exceeded ({max}): `{path}`");
+    let message = format!("{KEYWORD_IMPORT} depth limit exceeded ({max}): `{path}`");
     Diagnostic::new(
         "dsl.import.depth_limit",
         message,
@@ -435,7 +442,7 @@ pub fn import_depth_limit(max: usize, path: &str) -> Diagnostic {
 /// IMPORT naming a file that does not exist at run start.
 pub fn import_not_found(path: &str) -> Diagnostic {
     let message = format!(
-        "IMPORT `{path}` not found: the file must exist when the run starts (generated imports are not supported)"
+        "{KEYWORD_IMPORT} `{path}` not found: the file must exist when the run starts (generated imports are not supported)"
     );
     Diagnostic::new(
         "dsl.import.not_found",
@@ -449,7 +456,7 @@ pub fn import_not_found(path: &str) -> Diagnostic {
 /// `format!`-free.
 pub fn import_cannot_resolve(path: &str, reason: &anyhow::Error) -> Diagnostic {
     let reason_text = format!("{reason:#}");
-    let message = format!("IMPORT `{path}` cannot be resolved: {reason_text}");
+    let message = format!("{KEYWORD_IMPORT} `{path}` cannot be resolved: {reason_text}");
     Diagnostic::new(
         "dsl.import.cannot_resolve",
         message,
@@ -460,7 +467,7 @@ pub fn import_cannot_resolve(path: &str, reason: &anyhow::Error) -> Diagnostic {
 /// IMPORT file that cannot be read.
 pub fn import_cannot_read(path: &str, reason: &anyhow::Error) -> Diagnostic {
     let reason_text = format!("{reason:#}");
-    let message = format!("IMPORT `{path}` cannot be read: {reason_text}");
+    let message = format!("{KEYWORD_IMPORT} `{path}` cannot be read: {reason_text}");
     Diagnostic::new(
         "dsl.import.cannot_read",
         message,
@@ -471,7 +478,7 @@ pub fn import_cannot_read(path: &str, reason: &anyhow::Error) -> Diagnostic {
 /// IMPORT file that is not valid UTF-8.
 pub fn import_bad_utf8(path: &str, reason: &anyhow::Error) -> Diagnostic {
     let reason_text = format!("{reason:#}");
-    let message = format!("IMPORT `{path}` is not valid UTF-8: {reason_text}");
+    let message = format!("{KEYWORD_IMPORT} `{path}` is not valid UTF-8: {reason_text}");
     Diagnostic::new(
         "dsl.import.bad_utf8",
         message,
@@ -482,7 +489,7 @@ pub fn import_bad_utf8(path: &str, reason: &anyhow::Error) -> Diagnostic {
 /// IMPORT file that fails to parse.
 pub fn import_parse_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
     let reason_text = format!("{reason:#}");
-    let message = format!("IMPORT `{path}` failed to parse: {reason_text}");
+    let message = format!("{KEYWORD_IMPORT} `{path}` failed to parse: {reason_text}");
     Diagnostic::new(
         "dsl.import.parse_failed",
         message,
@@ -494,12 +501,12 @@ pub fn import_parse_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
 /// (`FUNC`/`TYPE`/`CONST`); the template owns the kind word (`FUNC`
 /// exports read bare, others spell their kind).
 pub fn import_missing_export(path: &str, kind: &str, name: &str) -> Diagnostic {
-    let what = if kind == "FUNC" {
+    let what = if kind == KEYWORD_FUNC {
         String::new()
     } else {
         format!("{kind} ")
     };
-    let message = format!("IMPORT `{path}` does not export {what}`{name}`");
+    let message = format!("{KEYWORD_IMPORT} `{path}` does not export {what}`{name}`");
     Diagnostic::new(
         "dsl.import.missing_export",
         message,
@@ -510,7 +517,7 @@ pub fn import_missing_export(path: &str, kind: &str, name: &str) -> Diagnostic {
 /// IMPORT file with no such member. Takes the noun as rendered
 /// (`function`/`TYPE`/`CONST`).
 pub fn import_unknown_member(path: &str, noun: &str, name: &str) -> Diagnostic {
-    let message = format!("IMPORT `{path}` has no such {noun} `{name}`");
+    let message = format!("{KEYWORD_IMPORT} `{path}` has no such {noun} `{name}`");
     Diagnostic::new(
         "dsl.import.unknown_member",
         message,
@@ -522,8 +529,10 @@ pub fn import_unknown_member(path: &str, noun: &str, name: &str) -> Diagnostic {
 /// failure; chained and bare are the same failure mode.
 pub fn import_unknown_type(path: &str, name: &str, reason: Option<&anyhow::Error>) -> Diagnostic {
     let message = match reason {
-        Some(reason) => format!("IMPORT `{path}` has no such TYPE `{name}`: {reason:#}"),
-        None => format!("IMPORT `{path}` has no such TYPE `{name}`"),
+        Some(reason) => {
+            format!("{KEYWORD_IMPORT} `{path}` has no such {KEYWORD_TYPE} `{name}`: {reason:#}")
+        }
+        None => format!("{KEYWORD_IMPORT} `{path}` has no such {KEYWORD_TYPE} `{name}`"),
     };
     Diagnostic::new(
         "dsl.import.unknown_type",
@@ -535,7 +544,7 @@ pub fn import_unknown_type(path: &str, name: &str, reason: Option<&anyhow::Error
 /// IMPORT body failing validation. Takes the underlying failure.
 pub fn import_failed_validation(path: &str, reason: &anyhow::Error) -> Diagnostic {
     let reason_text = format!("{reason:#}");
-    let message = format!("IMPORT `{path}` failed validation: {reason_text}");
+    let message = format!("{KEYWORD_IMPORT} `{path}` failed validation: {reason_text}");
     Diagnostic::new(
         "dsl.import.failed_validation",
         message,
@@ -546,8 +555,9 @@ pub fn import_failed_validation(path: &str, reason: &anyhow::Error) -> Diagnosti
 /// IMPORT harvesting a stateful function (the file body never runs,
 /// so there is no initialized state to observe).
 pub fn import_stateful_harvest(path: &str, offender: &str) -> Diagnostic {
-    let message =
-        format!("IMPORT `{path}` cannot harvest stateful function `{offender}`: import the file");
+    let message = format!(
+        "{KEYWORD_IMPORT} `{path}` cannot harvest stateful function `{offender}`: import the file"
+    );
     Diagnostic::new(
         "dsl.import.stateful_harvest",
         message,
@@ -557,7 +567,7 @@ pub fn import_stateful_harvest(path: &str, offender: &str) -> Diagnostic {
 
 /// IMPORT file with no such function.
 pub fn import_unknown_function(path: &str, name: &str) -> Diagnostic {
-    let message = format!("IMPORT `{path}` has no such function `{name}`");
+    let message = format!("{KEYWORD_IMPORT} `{path}` has no such function `{name}`");
     Diagnostic::new(
         "dsl.import.unknown_function",
         message,
@@ -570,7 +580,7 @@ pub fn import_unknown_function(path: &str, name: &str) -> Diagnostic {
 /// are named by their targets.
 pub fn import_type_collision(path: &str, name: &str, existing: &str, target: &str) -> Diagnostic {
     let message = format!(
-        "IMPORT `{path}` TYPE `{name}` collides: already defined with target `{existing}`, new target `{target}`"
+        "{KEYWORD_IMPORT} `{path}` {KEYWORD_TYPE} `{name}` collides: already defined with target `{existing}`, new target `{target}`"
     );
     Diagnostic::new(
         "dsl.import.type_collision",
@@ -586,8 +596,9 @@ pub fn import_type_collision(path: &str, name: &str, existing: &str, target: &st
 
 /// `unknown CONST` with no import alias exporting the name.
 pub fn import_const_no_alias(qualified: &str, alias: &str) -> Diagnostic {
-    let message =
-        format!("unknown CONST `{qualified}`: no import alias `{alias}` exports that name");
+    let message = format!(
+        "unknown {KEYWORD_CONST} `{qualified}`: no import alias `{alias}` exports that name"
+    );
     Diagnostic::new(
         "dsl.import.const_no_alias",
         message,
@@ -603,8 +614,11 @@ pub fn import_const_ambiguous(
     name: &str,
     files: &std::collections::HashSet<String>,
 ) -> Diagnostic {
-    let message =
-        super::native::ambiguous_alias_message(alias, name, files).replacen("function", "CONST", 1);
+    let message = super::native::ambiguous_alias_message(alias, name, files).replacen(
+        "function",
+        KEYWORD_CONST,
+        1,
+    );
     Diagnostic::new(
         "dsl.import.const_ambiguous",
         message,
@@ -615,7 +629,7 @@ pub fn import_const_ambiguous(
 /// `unknown CONST` with a resolution hint (unexported `CONST` or
 /// private `LET` under the alias).
 pub fn import_const_hinted(qualified: &str, hint: &str) -> Diagnostic {
-    let message = format!("unknown CONST `{qualified}`: {hint}");
+    let message = format!("unknown {KEYWORD_CONST} `{qualified}`: {hint}");
     Diagnostic::new(
         "dsl.import.const_hinted",
         message,
@@ -625,7 +639,7 @@ pub fn import_const_hinted(qualified: &str, hint: &str) -> Diagnostic {
 
 /// Bare `unknown CONST` (no holder, no terminal, no record).
 pub fn import_const_unknown(qualified: &str) -> Diagnostic {
-    let message = format!("unknown CONST `{qualified}`");
+    let message = format!("unknown {KEYWORD_CONST} `{qualified}`");
     Diagnostic::new(
         "dsl.import.const_unknown",
         message,
@@ -650,7 +664,7 @@ pub fn import_const_uninitialized(qualified: &str) -> Diagnostic {
 /// boundary).
 pub fn import_const_is_let(qualified: &str) -> Diagnostic {
     let message = format!(
-        "`{qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+        "`{qualified}` is a {KEYWORD_LET} binding and cannot be exported: only {KEYWORD_CONST} bindings cross the module boundary"
     );
     Diagnostic::new(
         "dsl.import.const_is_let",
@@ -676,7 +690,8 @@ pub fn import_const_forward_failed(reason: &anyhow::Error) -> Diagnostic {
 /// the flow kind (`BREAK`/`CONTINUE`), the 1-based step number, and
 /// the importing path.
 pub fn import_flow_crosses_boundary(flow: &str, step: usize, path: &str) -> Diagnostic {
-    let message = format!("step {step}: {flow} cannot cross import boundary (in IMPORT `{path}`)");
+    let message =
+        format!("step {step}: {flow} cannot cross import boundary (in {KEYWORD_IMPORT} `{path}`)");
     Diagnostic::new(
         "dsl.import.flow_crosses_boundary",
         message,
@@ -771,7 +786,7 @@ pub fn func_optional_before_required(param: &str, func: &str) -> Diagnostic {
 /// Omission fills an empty MAP, so the declaration fails naming the
 /// parameter and function.
 pub fn func_optional_without_map(param: &str, func: &str) -> Diagnostic {
-    let message = format!("param '{param}' of '{func}' is optional without a MAP type");
+    let message = format!("param '{param}' of '{func}' is optional without a {MAP_TYPE_NAME} type");
     Diagnostic::new(
         "dsl.func.optional_without_map",
         message,
@@ -798,8 +813,9 @@ pub fn func_ambiguous_alias(
 /// `EXPORT` naming no defined script function and no known host
 /// function.
 pub fn func_export_unknown(name: &str) -> Diagnostic {
-    let message =
-        format!("EXPORT `{name}` matches no defined script function or known host function");
+    let message = format!(
+        "{KEYWORD_EXPORT} `{name}` matches no defined script function or known host function"
+    );
     Diagnostic::new(
         "dsl.func.export_unknown",
         message,
@@ -1424,6 +1440,75 @@ pub fn eval_dispatch_failed(reason: &anyhow::Error) -> Diagnostic {
     )
 }
 
+/// Pipe content peek behind a pipe assertion. Takes the underlying
+/// failure verbatim: it already names the handle and the cause, so
+/// no wrapper is added.
+pub fn eval_pipe_assertion_read_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("step pipe assertion cannot read pipe: {reason_text}");
+    Diagnostic::new(
+        "dsl.eval.pipe_assertion_read_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// `WITH_IO` block reaching the leaf pipeline. Parameterless: the
+/// parser expands every block before execution, so arrival here is an
+/// internal invariant, never a script spelling.
+pub fn eval_with_io_unexpanded() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.with_io_unexpanded",
+        format!("{KEYWORD_WITH_IO} block should have been expanded during parsing"),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `ASYNC` scope observing cancellation. Parameterless: the wording
+/// names the surface; no operand varies.
+pub fn eval_async_cancelled() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.async_cancelled",
+        format!("{KEYWORD_ASYNC} task cancelled"),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Background task exiting nonzero. Takes the named task id when the
+/// task is named (`None` for anonymous pipeline handles) and the
+/// platform exit status; the two surfaces share one key. The status
+/// rendering stays platform-native, so tests pin the prefix only.
+pub fn eval_async_exit_status(task: Option<u64>, status: &std::process::ExitStatus) -> Diagnostic {
+    let status_text = format!("{status}");
+    let message = match task {
+        Some(id) => format!("named {KEYWORD_ASYNC} task {id} exited with status {status_text}"),
+        None => format!("{KEYWORD_ASYNC} process exited with status {status_text}"),
+    };
+    let task_text = task.map(|id| id.to_string());
+    let mut fields: Vec<(&str, &str)> = Vec::with_capacity(2);
+    if let Some(task) = task_text.as_deref() {
+        fields.push(("task", task));
+    }
+    fields.push(("status", &status_text));
+    Diagnostic::new(
+        "dsl.eval.async_exit_status",
+        message,
+        Diagnostic::make_fields(&fields),
+    )
+}
+
+/// Runtime flow word crossing a `REMOTE` boundary. Takes the 1-based
+/// step number and the word; mirrors the static async/func/block
+/// family, with the runtime article preserved verbatim.
+pub fn eval_flow_crosses_remote(step: usize, word: &str) -> Diagnostic {
+    let message = format!("step {step}: {word} cannot cross a {KEYWORD_REMOTE} boundary");
+    Diagnostic::new(
+        "dsl.eval.flow_crosses_remote",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("flow", word)]),
+    )
+}
+
 /// `int`-typed argument whose resolution failed. Takes the underlying
 /// failure verbatim: its message already names the argument and the
 /// cause, so no wrapper is added.
@@ -1483,7 +1568,7 @@ pub fn coerce_type_mismatch(ctx: &str, expected: &TypeTag, value: &super::Value)
 /// `Debug` rendering lives here.
 pub fn coerce_string_to_pipe(s: &str) -> Diagnostic {
     let message = format!(
-        "TypeMismatch: expected {PIPE_TYPE_NAME}, got {STRING_TYPE_NAME} ({s:?}); declare LET $x: {PIPE_TYPE_NAME} and pass $x"
+        "TypeMismatch: expected {PIPE_TYPE_NAME}, got {STRING_TYPE_NAME} ({s:?}); declare {KEYWORD_LET} $x: {PIPE_TYPE_NAME} and pass $x"
     );
     Diagnostic::new(
         "dsl.coerce.string_to_pipe",
@@ -1497,7 +1582,7 @@ pub fn coerce_string_to_pipe(s: &str) -> Diagnostic {
 /// and the operands ride the enclosing call.
 pub fn coerce_pipe_to_string() -> Diagnostic {
     let message = format!(
-        "coercion: TypeMismatch: expected {STRING_TYPE_NAME}, got {PIPE_TYPE_NAME}: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: {STRING_TYPE_NAME} = ... instead."
+        "coercion: TypeMismatch: expected {STRING_TYPE_NAME}, got {PIPE_TYPE_NAME}: pipes carry streams between steps, not text. Capture the producing step's output with {KEYWORD_LET} $var: {STRING_TYPE_NAME} = ... instead."
     );
     Diagnostic::new(
         "dsl.coerce.pipe_to_string",
@@ -1598,8 +1683,9 @@ pub fn eval_const_mutation(what: &str) -> Diagnostic {
 /// the expected declaration shape (`TYPE` for mutation,
 /// `LIST<...>` for append); quoting lives here.
 pub fn eval_undeclared_declare(key: &str, expected: &str) -> Diagnostic {
-    let message =
-        format!("undeclared variable ${key}: declare it first with LET ${key}: {expected} = ...");
+    let message = format!(
+        "undeclared variable ${key}: declare it first with {KEYWORD_LET} ${key}: {expected} = ..."
+    );
     Diagnostic::new(
         "dsl.eval.undeclared_declare",
         message,
@@ -1621,7 +1707,8 @@ pub fn eval_undeclared(key: &str) -> Diagnostic {
 /// `LIST_APPEND` on a non-LIST binding. Takes the key and the actual
 /// type name; quoting lives here.
 pub fn eval_list_not_list(key: &str, actual: &str) -> Diagnostic {
-    let message = format!("LIST_APPEND ${key}: variable is {actual}, not LIST");
+    let message =
+        format!("{KEYWORD_LIST_APPEND} ${key}: variable is {actual}, not {LIST_TYPE_NAME}");
     Diagnostic::new(
         "dsl.eval.list_not_list",
         message,
@@ -1632,7 +1719,7 @@ pub fn eval_list_not_list(key: &str, actual: &str) -> Diagnostic {
 /// `LIST_APPEND` on a binding whose value is not a list buffer.
 /// Takes the key; quoting lives here.
 pub fn eval_list_value_not_list(key: &str) -> Diagnostic {
-    let message = format!("LIST_APPEND ${key}: variable is not a LIST value");
+    let message = format!("{KEYWORD_LIST_APPEND} ${key}: variable is not a {LIST_TYPE_NAME} value");
     Diagnostic::new(
         "dsl.eval.list_value_not_list",
         message,
@@ -1770,7 +1857,7 @@ pub fn eval_template_placeholder_miss(text: &str) -> Diagnostic {
 /// underlying failure.
 pub fn std_pipe_read_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
     let reason_text = format!("{reason:#}");
-    let message = format!("{func} cannot read PIPE input: {reason_text}");
+    let message = format!("{func} cannot read {PIPE_TYPE_NAME} input: {reason_text}");
     Diagnostic::new(
         "dsl.std.pipe_read_failed",
         message,
@@ -1782,7 +1869,7 @@ pub fn std_pipe_read_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
 /// underlying failure.
 pub fn std_pipe_create_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
     let reason_text = format!("{reason:#}");
-    let message = format!("{func} cannot create PIPE output: {reason_text}");
+    let message = format!("{func} cannot create {PIPE_TYPE_NAME} output: {reason_text}");
     Diagnostic::new(
         "dsl.std.pipe_create_failed",
         message,
@@ -1830,7 +1917,9 @@ pub fn std_pipe_writer_lock_poisoned(func: &str) -> Diagnostic {
 pub fn std_pipe_handle_spent() -> Diagnostic {
     Diagnostic::new(
         "dsl.std.pipe_handle_spent",
-        "OS pipe handle has already been consumed by another binding; declare a fresh LET $x: PIPE for a new session".to_string(),
+        format!(
+            "OS pipe handle has already been consumed by another binding; declare a fresh {KEYWORD_LET} $x: {PIPE_TYPE_NAME} for a new session"
+        ),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -1838,7 +1927,7 @@ pub fn std_pipe_handle_spent() -> Diagnostic {
 /// Host pipe accessor handed a non-PIPE word. Takes the invoking
 /// function and the offending type; quoting lives here.
 pub fn std_pipe_needs_pipe(func: &str, actual: &str) -> Diagnostic {
-    let message = format!("host {func} needs a PIPE value, got {actual}");
+    let message = format!("host {func} needs a {PIPE_TYPE_NAME} value, got {actual}");
     Diagnostic::new(
         "dsl.std.pipe_needs_pipe",
         message,
@@ -1875,7 +1964,7 @@ pub fn std_assert_lock_poisoned(lock: &str) -> Diagnostic {
 /// this stays a separate key to hold the wording byte-identical.
 pub fn std_pipe_chunk_read_failed(func: &str, reason: &std::io::Error) -> Diagnostic {
     let reason_text = format!("{reason}");
-    let message = format!("{func} cannot read PIPE input: {reason_text}");
+    let message = format!("{func} cannot read {PIPE_TYPE_NAME} input: {reason_text}");
     Diagnostic::new(
         "dsl.std.pipe_chunk_read_failed",
         message,
@@ -1887,7 +1976,7 @@ pub fn std_pipe_chunk_read_failed(func: &str, reason: &std::io::Error) -> Diagno
 /// the offending bytes carry no displayable detail, so no reason
 /// field rides along.
 pub fn std_pipe_input_not_utf8(func: &str) -> Diagnostic {
-    let message = format!("{func} PIPE input is not valid UTF-8");
+    let message = format!("{func} {PIPE_TYPE_NAME} input is not valid UTF-8");
     Diagnostic::new(
         "dsl.std.pipe_input_not_utf8",
         message,
@@ -1899,7 +1988,7 @@ pub fn std_pipe_input_not_utf8(func: &str) -> Diagnostic {
 /// invoking function and the underlying I/O failure.
 pub fn std_pipe_spill_failed(func: &str, reason: &std::io::Error) -> Diagnostic {
     let reason_text = format!("{reason}");
-    let message = format!("{func} PIPE input exceeds the spill backlog: {reason_text}");
+    let message = format!("{func} {PIPE_TYPE_NAME} input exceeds the spill backlog: {reason_text}");
     Diagnostic::new(
         "dsl.std.pipe_spill_failed",
         message,
@@ -1911,7 +2000,7 @@ pub fn std_pipe_spill_failed(func: &str, reason: &std::io::Error) -> Diagnostic 
 /// underlying I/O failure; `write_all` and `flush` share this key.
 pub fn std_pipe_write_failed(func: &str, reason: &std::io::Error) -> Diagnostic {
     let reason_text = format!("{reason}");
-    let message = format!("{func} cannot write PIPE output: {reason_text}");
+    let message = format!("{func} cannot write {PIPE_TYPE_NAME} output: {reason_text}");
     Diagnostic::new(
         "dsl.std.pipe_write_failed",
         message,
@@ -2562,7 +2651,7 @@ pub fn std_text_needs_ordered_range(func: &str, from: i64, to: i64) -> Diagnosti
 /// Takes the invoking function.
 pub fn std_pipe_needs_step_io(func: &str) -> Diagnostic {
     let message = format!(
-        "{func} on PIPE input needs step IO, unavailable to placeholder calls; pass a STRING there"
+        "{func} on {PIPE_TYPE_NAME} input needs step IO, unavailable to placeholder calls; pass a {STRING_TYPE_NAME} there"
     );
     Diagnostic::new(
         "dsl.std.pipe_needs_step_io",
@@ -2574,7 +2663,9 @@ pub fn std_pipe_needs_step_io(func: &str) -> Diagnostic {
 /// `HANDLE` typed JSON decode on a non-object. Takes the offending
 /// JSON value; `Display` rendering lives here.
 pub fn json_handle_needs_object(other: &serde_json::Value) -> Diagnostic {
-    let message = format!("HANDLE argument must be an object like {{\"task_id\": 7}}, got {other}");
+    let message = format!(
+        "{HANDLE_TYPE_NAME} argument must be an object like {{\"task_id\": 7}}, got {other}"
+    );
     Diagnostic::new(
         "dsl.json.handle_needs_object",
         message,
@@ -2587,7 +2678,9 @@ pub fn json_handle_needs_object(other: &serde_json::Value) -> Diagnostic {
 pub fn json_handle_exact_shape() -> Diagnostic {
     Diagnostic::new(
         "dsl.json.handle_exact_shape",
-        "HANDLE argument must be exactly {\"task_id\": N} with no other keys".to_string(),
+        format!(
+            "{HANDLE_TYPE_NAME} argument must be exactly {{\"task_id\": N}} with no other keys"
+        ),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -2597,7 +2690,7 @@ pub fn json_handle_exact_shape() -> Diagnostic {
 pub fn json_handle_task_id_positive() -> Diagnostic {
     Diagnostic::new(
         "dsl.json.handle_task_id_positive",
-        "HANDLE argument `task_id` must be a positive integer".to_string(),
+        format!("{HANDLE_TYPE_NAME} argument `task_id` must be a positive integer"),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -2605,7 +2698,7 @@ pub fn json_handle_task_id_positive() -> Diagnostic {
 /// Typed JSON encode of a non-handle as `HANDLE`. Takes the type name;
 /// quoting lives here.
 pub fn json_handle_encode_needs_handle(actual: &str) -> Diagnostic {
-    let message = format!("cannot encode {actual} as HANDLE; expected a task handle");
+    let message = format!("cannot encode {actual} as {HANDLE_TYPE_NAME}; expected a task handle");
     Diagnostic::new(
         "dsl.json.handle_encode_needs_handle",
         message,
@@ -2616,7 +2709,7 @@ pub fn json_handle_encode_needs_handle(actual: &str) -> Diagnostic {
 /// IMPORT naming a file outside the static import closure. Takes the
 /// path; the closure wording lives here.
 pub fn import_not_in_closure(path: &str) -> Diagnostic {
-    let message = format!("IMPORT `{path}` cannot be read: not in the import closure");
+    let message = format!("{KEYWORD_IMPORT} `{path}` cannot be read: not in the import closure");
     Diagnostic::new(
         "dsl.import.not_in_closure",
         message,
@@ -2627,7 +2720,7 @@ pub fn import_not_in_closure(path: &str) -> Diagnostic {
 /// IMPORT `EXPORT TYPE` naming no top-level `TYPE` in that file.
 pub fn import_export_type_mismatch(path: &str, name: &str) -> Diagnostic {
     let message = format!(
-        "IMPORT `{path}` EXPORT TYPE `{name}` does not match any top-level TYPE in that file"
+        "{KEYWORD_IMPORT} `{path}` {KEYWORD_EXPORT} {KEYWORD_TYPE} `{name}` does not match any top-level {KEYWORD_TYPE} in that file"
     );
     Diagnostic::new(
         "dsl.import.export_type_mismatch",
@@ -2789,7 +2882,7 @@ pub fn check_duplicate_func(key: &str, display: &str) -> Diagnostic {
 /// key; quoting lives here.
 pub fn check_redeclare_const(step: usize, key: &str) -> Diagnostic {
     let message = format!(
-        "step {step}: redeclaration error: `{key}` is a CONST binding and cannot be redeclared; CONST and LET share one namespace"
+        "step {step}: redeclaration error: `{key}` is a {KEYWORD_CONST} binding and cannot be redeclared; {KEYWORD_CONST} and {KEYWORD_LET} share one namespace"
     );
     Diagnostic::new(
         "dsl.check.redeclare_const",
@@ -2816,7 +2909,7 @@ pub fn check_redeclare_let(step: usize, key: &str) -> Diagnostic {
 /// name; quoting lives here.
 pub fn check_undeclared_env(pos: &str, label: &str, prefix: &str, name: &str) -> Diagnostic {
     let message = format!(
-        "{pos} in {label}: uses undeclared environment variable `{prefix}{name}`: declare it first with ENV or INHERIT_ENV"
+        "{pos} in {label}: uses undeclared environment variable `{prefix}{name}`: declare it first with {KEYWORD_ENV} or {KEYWORD_INHERIT_ENV}"
     );
     Diagnostic::new(
         "dsl.check.undeclared_env",
@@ -3086,7 +3179,7 @@ pub fn check_duplicate_map_key(key: &str) -> Diagnostic {
 /// Static `VOID` block bound to a variable. Takes the 1-based step
 /// number and the variable; quoting lives here.
 pub fn check_void_block_bind(step: usize, var: &str) -> Diagnostic {
-    let message = format!("step {step}: VOID block has no value to bind to `${var}`");
+    let message = format!("step {step}: {VOID_TYPE_NAME} block has no value to bind to `${var}`");
     Diagnostic::new(
         "dsl.check.void_block_bind",
         message,
@@ -3124,7 +3217,8 @@ pub fn check_capture_mismatch(
 /// task variable, and the actual tag; rendering lives here.
 pub fn check_await_not_handle(step: usize, task_var: &str, actual: &TypeTag) -> Diagnostic {
     let a = render_structural(actual);
-    let message = format!("step {step}: AWAIT `${task_var}` is {a}, not HANDLE");
+    let message =
+        format!("step {step}: {KEYWORD_AWAIT} `${task_var}` is {a}, not {HANDLE_TYPE_NAME}");
     Diagnostic::new(
         "dsl.check.await_not_handle",
         message,
@@ -3140,7 +3234,7 @@ pub fn check_await_not_handle(step: usize, task_var: &str, actual: &TypeTag) -> 
 /// the 1-based step number and both variables.
 pub fn check_await_void_payload(step: usize, task_var: &str, out_var: &str) -> Diagnostic {
     let message = format!(
-        "step {step}: AWAIT `${task_var}` is HANDLE<VOID>: no value to bind to `${out_var}`; use bare AWAIT for join"
+        "step {step}: {KEYWORD_AWAIT} `${task_var}` is {HANDLE_TYPE_NAME}<{VOID_TYPE_NAME}>: no value to bind to `${out_var}`; use bare {KEYWORD_AWAIT} for join"
     );
     Diagnostic::new(
         "dsl.check.await_void_payload",
@@ -3164,8 +3258,9 @@ pub fn check_await_yield_mismatch(
 ) -> Diagnostic {
     let p = render_structural(payload);
     let t = render_structural(tag);
-    let message =
-        format!("step {step}: AWAIT `${task_var}` yields {p} but `${out_var}` declares {t}");
+    let message = format!(
+        "step {step}: {KEYWORD_AWAIT} `${task_var}` yields {p} but `${out_var}` declares {t}"
+    );
     Diagnostic::new(
         "dsl.check.await_yield_mismatch",
         message,
@@ -3184,7 +3279,7 @@ pub fn check_await_yield_mismatch(
 pub fn check_async_not_handle(step: usize, var: &str, tag: &TypeTag) -> Diagnostic {
     let t = render_structural(tag);
     let message = format!(
-        "step {step}: ASYNC `${var}` declares {t}, not HANDLE; every ASYNC position is HANDLE-headed"
+        "step {step}: {KEYWORD_ASYNC} `${var}` declares {t}, not {HANDLE_TYPE_NAME}; every {KEYWORD_ASYNC} position is {HANDLE_TYPE_NAME}-headed"
     );
     Diagnostic::new(
         "dsl.check.async_not_handle",
@@ -3198,7 +3293,7 @@ pub fn check_async_not_handle(step: usize, var: &str, tag: &TypeTag) -> Diagnost
 pub fn check_async_bare_return(step: usize, var: &str, tag: &TypeTag) -> Diagnostic {
     let t = render_structural(tag);
     let message = format!(
-        "step {step}: ASYNC `${var}` declares {t} but task has a bare RETURN; bare RETURN is only a void exit"
+        "step {step}: {KEYWORD_ASYNC} `${var}` declares {t} but task has a bare {KEYWORD_RETURN}; bare {KEYWORD_RETURN} is only a void exit"
     );
     Diagnostic::new(
         "dsl.check.async_bare_return",
@@ -3211,7 +3306,9 @@ pub fn check_async_bare_return(step: usize, var: &str, tag: &TypeTag) -> Diagnos
 /// step number, the return line, and the yielded tag.
 pub fn check_async_void_yield(step: usize, line: usize, ty: &TypeTag) -> Diagnostic {
     let t = render_structural(ty);
-    let message = format!("step {step}: HANDLE<VOID> task RETURN at line {line} yields {t}");
+    let message = format!(
+        "step {step}: {HANDLE_TYPE_NAME}<{VOID_TYPE_NAME}> task {KEYWORD_RETURN} at line {line} yields {t}"
+    );
     Diagnostic::new(
         "dsl.check.async_void_yield",
         message,
@@ -3227,7 +3324,9 @@ pub fn check_async_void_yield(step: usize, line: usize, ty: &TypeTag) -> Diagnos
 /// Takes the 1-based step number, the variable, and the tag.
 pub fn check_async_no_return(step: usize, var: &str, tag: &TypeTag) -> Diagnostic {
     let t = render_structural(tag);
-    let message = format!("step {step}: ASYNC `${var}` declares {t} but task has no value RETURN");
+    let message = format!(
+        "step {step}: {KEYWORD_ASYNC} `${var}` declares {t} but task has no value {KEYWORD_RETURN}"
+    );
     Diagnostic::new(
         "dsl.check.async_no_return",
         message,
@@ -3248,7 +3347,7 @@ pub fn check_async_return_mismatch(
     let t = render_structural(tag);
     let y = render_structural(ty);
     let message = format!(
-        "step {step}: ASYNC `${var}` declares {t} but task RETURN at line {line} yields {y}"
+        "step {step}: {KEYWORD_ASYNC} `${var}` declares {t} but task {KEYWORD_RETURN} at line {line} yields {y}"
     );
     Diagnostic::new(
         "dsl.check.async_return_mismatch",
@@ -3266,7 +3365,9 @@ pub fn check_async_return_mismatch(
 /// Static `RETURN` outside any function, task, or block. Takes the
 /// 1-based step number.
 pub fn check_return_outside(step: usize) -> Diagnostic {
-    let message = format!("step {step}: RETURN outside function, ASYNC task, or LET block");
+    let message = format!(
+        "step {step}: {KEYWORD_RETURN} outside function, {KEYWORD_ASYNC} task, or {KEYWORD_LET} block"
+    );
     Diagnostic::new(
         "dsl.check.return_outside",
         message,
@@ -3277,7 +3378,7 @@ pub fn check_return_outside(step: usize) -> Diagnostic {
 /// Static `RETURN` crossing an `ASYNC` statement boundary. Takes the
 /// 1-based step number.
 pub fn check_return_crosses_async(step: usize) -> Diagnostic {
-    let message = format!("step {step}: RETURN cannot cross ASYNC boundary");
+    let message = format!("step {step}: {KEYWORD_RETURN} cannot cross {KEYWORD_ASYNC} boundary");
     Diagnostic::new(
         "dsl.check.return_crosses_async",
         message,
@@ -3289,7 +3390,7 @@ pub fn check_return_crosses_async(step: usize) -> Diagnostic {
 /// number and the key; quoting lives here.
 pub fn check_undeclared_set(step: usize, key: &str) -> Diagnostic {
     let message = format!(
-        "step {step}: undeclared variable `${key}`: declare it first with LET `${key}`: TYPE = ..."
+        "step {step}: undeclared variable `${key}`: declare it first with {KEYWORD_LET} `${key}`: {KEYWORD_TYPE} = ..."
     );
     Diagnostic::new(
         "dsl.check.undeclared_set",
@@ -3301,8 +3402,9 @@ pub fn check_undeclared_set(step: usize, key: &str) -> Diagnostic {
 /// Static mutation of a `CONST` binding. Takes the 1-based step number
 /// and the key; quoting lives here.
 pub fn check_mutate_const(step: usize, key: &str) -> Diagnostic {
-    let message =
-        format!("step {step}: cannot mutate CONST `{key}`: CONST bindings are deeply immutable");
+    let message = format!(
+        "step {step}: cannot mutate {KEYWORD_CONST} `{key}`: {KEYWORD_CONST} bindings are deeply immutable"
+    );
     Diagnostic::new(
         "dsl.check.mutate_const",
         message,
@@ -3313,7 +3415,7 @@ pub fn check_mutate_const(step: usize, key: &str) -> Diagnostic {
 /// Static isolated allowlist outside `ISOLATED`. Takes the 1-based
 /// step number.
 pub fn check_isolated_allowlist(step: usize) -> Diagnostic {
-    let message = format!("step {step}: isolated allowlist outside ISOLATED");
+    let message = format!("step {step}: isolated allowlist outside {KEYWORD_ISOLATED}");
     Diagnostic::new(
         "dsl.check.isolated_allowlist",
         message,
@@ -3324,7 +3426,7 @@ pub fn check_isolated_allowlist(step: usize) -> Diagnostic {
 /// Static `REMOTE` use of a variable unknown outside. Takes the target
 /// and the key; quoting lives here.
 pub fn check_remote_unknown_var(target: &str, key: &str) -> Diagnostic {
-    let message = format!("REMOTE `{target}` uses unknown variable `${key}`");
+    let message = format!("{KEYWORD_REMOTE} `{target}` uses unknown variable `${key}`");
     Diagnostic::new(
         "dsl.check.remote_unknown_var",
         message,
@@ -3336,7 +3438,7 @@ pub fn check_remote_unknown_var(target: &str, key: &str) -> Diagnostic {
 /// Takes the step position, scope label, target, and name.
 pub fn check_remote_undeclared_env(pos: &str, label: &str, target: &str, name: &str) -> Diagnostic {
     let message = format!(
-        "{pos} in {label}: REMOTE `{target}` ships undeclared environment variable `env:{name}`: declare it first with ENV or INHERIT_ENV"
+        "{pos} in {label}: {KEYWORD_REMOTE} `{target}` ships undeclared environment variable `env:{name}`: declare it first with {KEYWORD_ENV} or {KEYWORD_INHERIT_ENV}"
     );
     Diagnostic::new(
         "dsl.check.remote_undeclared_env",
@@ -3354,7 +3456,9 @@ pub fn check_remote_undeclared_env(pos: &str, label: &str, target: &str, name: &
 /// the list variable, and the actual tag.
 pub fn check_list_not_list(step: usize, list: &str, actual: &TypeTag) -> Diagnostic {
     let a = render_structural(actual);
-    let message = format!("step {step}: LIST_APPEND `${list}`: variable is {a}, not LIST");
+    let message = format!(
+        "step {step}: {KEYWORD_LIST_APPEND} `${list}`: variable is {a}, not {LIST_TYPE_NAME}"
+    );
     Diagnostic::new(
         "dsl.check.list_not_list",
         message,
@@ -3365,7 +3469,9 @@ pub fn check_list_not_list(step: usize, list: &str, actual: &TypeTag) -> Diagnos
 /// Static `LIST_APPEND` of a `VOID` item. Takes the 1-based step
 /// number and the list variable.
 pub fn check_list_void_push(step: usize, list: &str) -> Diagnostic {
-    let message = format!("step {step}: LIST_APPEND `${list}`: VOID has no value to push");
+    let message = format!(
+        "step {step}: {KEYWORD_LIST_APPEND} `${list}`: {VOID_TYPE_NAME} has no value to push"
+    );
     Diagnostic::new(
         "dsl.check.list_void_push",
         message,
@@ -3376,7 +3482,7 @@ pub fn check_list_void_push(step: usize, list: &str) -> Diagnostic {
 /// Static pipe binding to a non-`PIPE`. Takes the 1-based step number
 /// and the actual tag name.
 pub fn check_pipe_mismatch(step: usize, actual: &str) -> Diagnostic {
-    let message = format!("step {step}: TypeMismatch: expected `PIPE`, got `{actual}`");
+    let message = format!("step {step}: TypeMismatch: expected `{PIPE_TYPE_NAME}`, got `{actual}`");
     Diagnostic::new(
         "dsl.check.pipe_mismatch",
         message,
@@ -3409,7 +3515,7 @@ pub fn check_record_unknown_field(ctx: &str, name: &str) -> Diagnostic {
 /// Static `BREAK` outside any loop or `SWITCH`. Takes the 1-based
 /// step number.
 pub fn check_break_outside_switch(step: usize) -> Diagnostic {
-    let message = format!("step {step}: BREAK outside loop or SWITCH");
+    let message = format!("step {step}: {KEYWORD_BREAK} outside loop or {KEYWORD_SWITCH}");
     Diagnostic::new(
         "dsl.check.break_outside_switch",
         message,
@@ -3457,7 +3563,7 @@ pub fn check_flow_crosses_block(step: usize, word: &str) -> Diagnostic {
 /// Static flow word crossing an `ASYNC` boundary. Takes the 1-based
 /// step number and the word.
 pub fn check_flow_crosses_async(step: usize, word: &str) -> Diagnostic {
-    let message = format!("step {step}: {word} cannot cross ASYNC boundary");
+    let message = format!("step {step}: {word} cannot cross {KEYWORD_ASYNC} boundary");
     Diagnostic::new(
         "dsl.check.flow_crosses_async",
         message,
@@ -3468,7 +3574,7 @@ pub fn check_flow_crosses_async(step: usize, word: &str) -> Diagnostic {
 /// Static `VOID` argument where a value is required. Takes the
 /// context; the `VOID` wording lives here.
 pub fn check_arg_void(ctx: &str) -> Diagnostic {
-    let message = format!("{ctx}: VOID has no value to pass");
+    let message = format!("{ctx}: {VOID_TYPE_NAME} has no value to pass");
     Diagnostic::new(
         "dsl.check.arg_void",
         message,
@@ -3481,7 +3587,7 @@ pub fn check_arg_void(ctx: &str) -> Diagnostic {
 pub fn check_any_into_concrete(ctx: &str, expected: &TypeTag) -> Diagnostic {
     let exp = render_structural(expected);
     let message = format!(
-        "{ctx}: untyped ANY value flows into `{exp}` parameter; bind through LET `$x`: `{exp}` first"
+        "{ctx}: untyped ANY value flows into `{exp}` parameter; bind through {KEYWORD_LET} `$x`: `{exp}` first"
     );
     Diagnostic::new(
         "dsl.check.any_into_concrete",
@@ -3494,8 +3600,9 @@ pub fn check_any_into_concrete(ctx: &str, expected: &TypeTag) -> Diagnostic {
 /// function key and the declared tag.
 pub fn check_async_decl_not_handle(key: &str, declared: &TypeTag) -> Diagnostic {
     let d = render_structural(declared);
-    let message =
-        format!("function `{key}` declares {d}, but ASYNC FUNC must declare HANDLE or HANDLE<T>");
+    let message = format!(
+        "function `{key}` declares {d}, but {KEYWORD_ASYNC} {KEYWORD_FUNC} must declare {HANDLE_TYPE_NAME} or {HANDLE_TYPE_NAME}<T>"
+    );
     Diagnostic::new(
         "dsl.check.async_decl_not_handle",
         message,
@@ -3507,8 +3614,9 @@ pub fn check_async_decl_not_handle(key: &str, declared: &TypeTag) -> Diagnostic 
 /// Takes the function key and the declared tag.
 pub fn check_func_fallthrough(key: &str, declared: &TypeTag) -> Diagnostic {
     let d = render_structural(declared);
-    let message =
-        format!("function `{key}` declares {d} but may fall through with no RETURN on some path");
+    let message = format!(
+        "function `{key}` declares {d} but may fall through with no {KEYWORD_RETURN} on some path"
+    );
     Diagnostic::new(
         "dsl.check.func_fallthrough",
         message,
@@ -3520,7 +3628,7 @@ pub fn check_func_fallthrough(key: &str, declared: &TypeTag) -> Diagnostic {
 /// key and the declared tag.
 pub fn check_func_no_return(key: &str, declared: &TypeTag) -> Diagnostic {
     let d = render_structural(declared);
-    let message = format!("function `{key}` declares {d} but has no RETURN on any path");
+    let message = format!("function `{key}` declares {d} but has no {KEYWORD_RETURN} on any path");
     Diagnostic::new(
         "dsl.check.func_no_return",
         message,
@@ -3533,7 +3641,7 @@ pub fn check_func_no_return(key: &str, declared: &TypeTag) -> Diagnostic {
 pub fn check_func_bare_return(key: &str, declared: &TypeTag) -> Diagnostic {
     let d = render_structural(declared);
     let message = format!(
-        "function `{key}` declares {d} but has a bare RETURN on some path; bare RETURN is only a void exit"
+        "function `{key}` declares {d} but has a bare {KEYWORD_RETURN} on some path; bare {KEYWORD_RETURN} is only a void exit"
     );
     Diagnostic::new(
         "dsl.check.func_bare_return",
@@ -3546,7 +3654,9 @@ pub fn check_func_bare_return(key: &str, declared: &TypeTag) -> Diagnostic {
 /// key, the return line, and the yielded tag.
 pub fn check_func_void_yield(key: &str, line: usize, ty: &TypeTag) -> Diagnostic {
     let t = render_structural(ty);
-    let message = format!("function `{key}` declares VOID but RETURN at line {line} yields {t}");
+    let message = format!(
+        "function `{key}` declares {VOID_TYPE_NAME} but {KEYWORD_RETURN} at line {line} yields {t}"
+    );
     Diagnostic::new(
         "dsl.check.func_void_yield",
         message,
@@ -3562,7 +3672,8 @@ pub fn check_func_void_yield(key: &str, line: usize, ty: &TypeTag) -> Diagnostic
 /// function key and the declared tag.
 pub fn check_func_no_value_return(key: &str, declared: &TypeTag) -> Diagnostic {
     let d = render_structural(declared);
-    let message = format!("function `{key}` declares {d} but has no value RETURN on any path");
+    let message =
+        format!("function `{key}` declares {d} but has no value {KEYWORD_RETURN} on any path");
     Diagnostic::new(
         "dsl.check.func_no_value_return",
         message,
@@ -3581,7 +3692,8 @@ pub fn check_func_return_mismatch(
 ) -> Diagnostic {
     let d = render_structural(declared);
     let t = render_structural(ty);
-    let message = format!("function `{key}` declares {d} but RETURN at line {line} yields {t}");
+    let message =
+        format!("function `{key}` declares {d} but {KEYWORD_RETURN} at line {line} yields {t}");
     Diagnostic::new(
         "dsl.check.func_return_mismatch",
         message,
@@ -3609,8 +3721,9 @@ pub fn check_unknown_function(name: &str, hint: &str) -> Diagnostic {
 /// Static `CONST` read with no import alias exporting the name. Takes
 /// the step position, the qualified name, and the alias.
 pub fn check_const_no_alias_at(pos: &str, qualified: &str, alias: &str) -> Diagnostic {
-    let message =
-        format!("{pos}: unknown CONST `{qualified}`: no import alias `{alias}` exports that name");
+    let message = format!(
+        "{pos}: unknown {KEYWORD_CONST} `{qualified}`: no import alias `{alias}` exports that name"
+    );
     Diagnostic::new(
         "dsl.check.const_no_alias_at",
         message,
@@ -3629,7 +3742,11 @@ pub fn check_const_ambiguous_at(
 ) -> Diagnostic {
     let message = format!(
         "{pos}: {}",
-        super::native::ambiguous_alias_message(alias, name, files).replacen("function", "CONST", 1)
+        super::native::ambiguous_alias_message(alias, name, files).replacen(
+            "function",
+            KEYWORD_CONST,
+            1
+        )
     );
     Diagnostic::new(
         "dsl.check.const_ambiguous_at",
@@ -3642,7 +3759,7 @@ pub fn check_const_ambiguous_at(
 /// the qualified name.
 pub fn check_const_is_let_at(pos: &str, qualified: &str) -> Diagnostic {
     let message = format!(
-        "{pos}: `{qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+        "{pos}: `{qualified}` is a {KEYWORD_LET} binding and cannot be exported: only {KEYWORD_CONST} bindings cross the module boundary"
     );
     Diagnostic::new(
         "dsl.check.const_is_let_at",
@@ -3654,7 +3771,7 @@ pub fn check_const_is_let_at(pos: &str, qualified: &str) -> Diagnostic {
 /// Static unknown `CONST` with a resolution hint. Takes the step
 /// position, the qualified name, and the hint.
 pub fn check_const_hinted_at(pos: &str, qualified: &str, hint: &str) -> Diagnostic {
-    let message = format!("{pos}: unknown CONST `{qualified}`: {hint}");
+    let message = format!("{pos}: unknown {KEYWORD_CONST} `{qualified}`: {hint}");
     Diagnostic::new(
         "dsl.check.const_hinted_at",
         message,
@@ -3761,7 +3878,7 @@ pub fn check_call_arg_allowed(pat: &str, allowed: &[&str], text: &str) -> Diagno
 /// Static `VOID` in arithmetic. Takes the location prefix (possibly
 /// empty in RPN contexts).
 pub fn check_void_in_arithmetic(prefix: &str) -> Diagnostic {
-    let message = format!("{prefix}VOID has no value in arithmetic");
+    let message = format!("{prefix}{VOID_TYPE_NAME} has no value in arithmetic");
     Diagnostic::new(
         "dsl.check.void_in_arithmetic",
         message,
@@ -3781,7 +3898,7 @@ pub fn check_arithmetic_type(prefix: &str) -> Diagnostic {
 
 /// Static `VOID` under unary negation. Takes the location prefix.
 pub fn check_void_to_negate(prefix: &str) -> Diagnostic {
-    let message = format!("{prefix}VOID has no value to negate");
+    let message = format!("{prefix}{VOID_TYPE_NAME} has no value to negate");
     Diagnostic::new(
         "dsl.check.void_to_negate",
         message,
@@ -3803,7 +3920,7 @@ pub fn check_negate_type(prefix: &str, actual: &str) -> Diagnostic {
 /// Static `VOID` in an ordering comparison. Takes the location
 /// prefix.
 pub fn check_void_to_compare(prefix: &str) -> Diagnostic {
-    let message = format!("{prefix}VOID has no value to compare");
+    let message = format!("{prefix}{VOID_TYPE_NAME} has no value to compare");
     Diagnostic::new(
         "dsl.check.void_to_compare",
         message,
@@ -3844,7 +3961,7 @@ pub fn check_rpn_leftover(count: usize) -> Diagnostic {
 /// Static block falling through with no `RETURN` on some path. Takes
 /// the step position.
 pub fn check_block_fallthrough(pos: &str) -> Diagnostic {
-    let message = format!("{pos}: block may fall through with no RETURN on some path");
+    let message = format!("{pos}: block may fall through with no {KEYWORD_RETURN} on some path");
     Diagnostic::new(
         "dsl.check.block_fallthrough",
         message,
@@ -3879,6 +3996,13 @@ mod tests {
     fn regex_err_sample() -> regex::Error {
         let pattern = "[".to_owned();
         regex::Regex::new(&pattern).unwrap_err()
+    }
+
+    /// An `ExitStatus` sample built through the shared test helper:
+    /// the status rendering is platform-native, so tests pin the
+    /// prefix only, never the full text.
+    fn exit_status_sample() -> std::process::ExitStatus {
+        oxdock_sys_test_utils::exit_status_from_code(1)
     }
 
     #[test]
@@ -4118,6 +4242,11 @@ mod tests {
             eval_expected_int("x").key(),
             eval_int_arg_resolve(&anyhow::anyhow!("x")).key(),
             eval_dispatch_failed(&anyhow::anyhow!("x")).key(),
+            eval_pipe_assertion_read_failed(&anyhow::anyhow!("x")).key(),
+            eval_with_io_unexpanded().key(),
+            eval_async_cancelled().key(),
+            eval_flow_crosses_remote(1, "BREAK").key(),
+            eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
             coerce_type_mismatch(
@@ -4419,6 +4548,29 @@ mod tests {
         assert_eq!(
             eval_dispatch_failed(&anyhow::anyhow!("boom")).message(),
             "boom"
+        );
+        assert_eq!(
+            eval_pipe_assertion_read_failed(&anyhow::anyhow!("boom")).message(),
+            "step pipe assertion cannot read pipe: boom"
+        );
+        assert_eq!(
+            eval_with_io_unexpanded().message(),
+            "WITH_IO block should have been expanded during parsing"
+        );
+        assert_eq!(eval_async_cancelled().message(), "ASYNC task cancelled");
+        assert_eq!(
+            eval_flow_crosses_remote(3, "BREAK").message(),
+            "step 3: BREAK cannot cross a REMOTE boundary"
+        );
+        assert!(
+            eval_async_exit_status(None, &exit_status_sample())
+                .message()
+                .starts_with("ASYNC process exited with status ")
+        );
+        assert!(
+            eval_async_exit_status(Some(7), &exit_status_sample())
+                .message()
+                .starts_with("named ASYNC task 7 exited with status ")
         );
         assert_eq!(
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).message(),

@@ -94,15 +94,16 @@ use crate::commands::{
 };
 use crate::constants::{
     INJECT_PREFIX, INJECT_SUFFIX, KEYWORD_AS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
-    KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_DEFAULT, KEYWORD_ELSE,
-    KEYWORD_ENV, KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FROM,
-    KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT,
-    KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SWITCH,
-    KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR,
-    VAR_SIGIL_CHAR, qualify, sigil_qualified, sigil_var,
+    KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_DEFAULT, KEYWORD_ECHO,
+    KEYWORD_ELSE, KEYWORD_ENV, KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR,
+    KEYWORD_FROM, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV,
+    KEYWORD_INSPECT, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN,
+    KEYWORD_SWITCH, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO,
+    MODULE_SEPARATOR, VAR_SIGIL_CHAR, qualify, sigil_qualified, sigil_var,
 };
 use crate::diagnostics as dsl_diag;
 use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
+use crate::tag::{HANDLE_TYPE_NAME, INT_TYPE_NAME, STRING_TYPE_NAME};
 use oxdock_diagnostics::Diagnostic;
 
 use crate::resolve::resolve_call_name;
@@ -492,7 +493,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
                     diagnostic: None,
                     hint: None,
                     stmt: *stmt_idx,
-                    msg: "WITH_IO block must be followed by '{'".to_string(),
+                    msg: format!("{KEYWORD_WITH_IO} block must be followed by '{{'"),
                     line: pending_line,
                     col: pending_col,
                     kind: None,
@@ -561,7 +562,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
                     diagnostic: None,
                     hint: None,
                     stmt: *stmt_idx,
-                    msg: "previous WITH_IO block is still waiting for '{'".to_string(),
+                    msg: format!("previous {KEYWORD_WITH_IO} block is still waiting for '{{'"),
                     line,
                     col: start_col,
                     kind: None,
@@ -924,7 +925,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
             diagnostic: None,
             hint: None,
             stmt: stmt_idx,
-            msg: "WITH_IO block must be followed by '{'".to_string(),
+            msg: format!("{KEYWORD_WITH_IO} block must be followed by '{{'"),
             line: pending_line,
             col: pending_col,
             kind: None,
@@ -1456,7 +1457,9 @@ fn try_lone_call_expr(
                     diagnostic: None,
                     hint: None,
                     stmt,
-                    msg: "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
+                    msg: format!(
+                        "{KEYWORD_INSPECT} requires exactly one argument: {KEYWORD_INSPECT}($var)"
+                    ),
                     line: 0,
                     col: 0,
                     kind: None,
@@ -1469,7 +1472,7 @@ fn try_lone_call_expr(
                 diagnostic: None,
                 hint: None,
                 stmt,
-                msg: format!("INSPECT requires a $variable argument, found {arg:?}"),
+                msg: format!("{KEYWORD_INSPECT} requires a $variable argument, found {arg:?}"),
                 line: 0,
                 col: 0,
                 kind: None,
@@ -2900,7 +2903,9 @@ fn parse_expr_call(
                 diagnostic: None,
                 hint: None,
                 stmt,
-                msg: "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
+                msg: format!(
+                    "{KEYWORD_INSPECT} requires exactly one argument: {KEYWORD_INSPECT}($var)"
+                ),
                 line: 0,
                 col: 0,
                 kind: None,
@@ -2913,7 +2918,7 @@ fn parse_expr_call(
             diagnostic: None,
             hint: None,
             stmt,
-            msg: format!("INSPECT requires a $variable argument, found {arg:?}"),
+            msg: format!("{KEYWORD_INSPECT} requires a $variable argument, found {arg:?}"),
             line: 0,
             col: 0,
             kind: None,
@@ -3495,7 +3500,7 @@ fn parse_single_inner(
                 diagnostic: None,
                 hint: None,
                 stmt,
-                msg: "RUN [...] requires a gap after RUN".to_string(),
+                msg: format!("{KEYWORD_RUN} [...] requires a gap after {KEYWORD_RUN}"),
                 line: 0,
                 col: 0,
                 kind: None,
@@ -4617,7 +4622,9 @@ fn parse_case_values(
                 stmt,
                 line: 0,
                 col: 0,
-                msg: "SWITCH CASE requires a value or condition before '{'".to_string(),
+                msg: format!(
+                    "{KEYWORD_SWITCH} {KEYWORD_CASE} requires a value or condition before '{{'"
+                ),
                 kind: None,
             });
         }
@@ -4666,16 +4673,16 @@ fn parse_switch_body(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Switc
         let word = match &inner[p].kind {
             TokKind::Word(w) => w.clone(),
             _ => {
-                return Err(err(
-                    "SWITCH body must hold CASE or DEFAULT arms, e.g. `SWITCH $cmd { CASE \"a\" { ECHO yes } DEFAULT { ECHO no } }`".to_string(),
-                ));
+                return Err(err(format!(
+                    "{KEYWORD_SWITCH} body must hold {KEYWORD_CASE} or {KEYWORD_DEFAULT} arms, e.g. `{KEYWORD_SWITCH} $cmd {{ {KEYWORD_CASE} \"a\" {{ {KEYWORD_ECHO} yes }} {KEYWORD_DEFAULT} {{ {KEYWORD_ECHO} no }} }}`"
+                )));
             }
         };
         if word == KEYWORD_CASE {
             if default_body.is_some() {
-                return Err(err(
-                    "SWITCH DEFAULT must be the last arm; no CASE may follow it".to_string(),
-                ));
+                return Err(err(format!(
+                    "{KEYWORD_SWITCH} {KEYWORD_DEFAULT} must be the last arm; no {KEYWORD_CASE} may follow it"
+                )));
             }
             let (values, used) = parse_case_values(&inner[p + 1..], stmt, ctx)?;
             p += 1 + used;
@@ -4704,7 +4711,9 @@ fn parse_switch_body(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Switc
             p += 1;
         } else if word == KEYWORD_DEFAULT {
             if default_body.is_some() {
-                return Err(err("SWITCH allows only one DEFAULT arm".to_string()));
+                return Err(err(format!(
+                    "{KEYWORD_SWITCH} allows only one {KEYWORD_DEFAULT} arm"
+                )));
             }
             p += 1;
             let mut bcur = Cursor::expr(&inner[p..], stmt);
@@ -4730,15 +4739,15 @@ fn parse_switch_body(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Switc
             default_body = Some(parse_body_steps(&arm_inner, stmt, ctx, false)?);
             p += 1;
         } else {
-            return Err(err(
-                "SWITCH body must hold CASE or DEFAULT arms, e.g. `SWITCH $cmd { CASE \"a\" { ECHO yes } DEFAULT { ECHO no } }`".to_string(),
-            ));
+            return Err(err(format!(
+                "{KEYWORD_SWITCH} body must hold {KEYWORD_CASE} or {KEYWORD_DEFAULT} arms, e.g. `{KEYWORD_SWITCH} $cmd {{ {KEYWORD_CASE} \"a\" {{ {KEYWORD_ECHO} yes }} {KEYWORD_DEFAULT} {{ {KEYWORD_ECHO} no }} }}`"
+            )));
         }
     }
     if cases.is_empty() && default_body.is_none() {
-        return Err(err(
-            "SWITCH needs at least one CASE or DEFAULT arm".to_string()
-        ));
+        return Err(err(format!(
+            "{KEYWORD_SWITCH} needs at least one {KEYWORD_CASE} or {KEYWORD_DEFAULT} arm"
+        )));
     }
     Ok((cases, default_body))
 }
@@ -4959,7 +4968,7 @@ fn parse_for_at(
                 diagnostic: None,
                 hint: None,
                 stmt,
-                msg: "FOR requires one or two variables".to_string(),
+                msg: format!("{KEYWORD_FOR} requires one or two variables"),
                 line: 0,
                 col: 0,
                 kind: Some(ParseErrorKind::Validation {
@@ -4976,7 +4985,9 @@ fn parse_for_at(
             diagnostic: None,
             hint: None,
             stmt,
-            msg: format!("FOR key variable must be INT or STRING, got {kt}"),
+            msg: format!(
+                "{KEYWORD_FOR} key variable must be {INT_TYPE_NAME} or {STRING_TYPE_NAME}, got {kt}"
+            ),
             line: 0,
             col: 0,
             kind: Some(ParseErrorKind::Validation {
@@ -5188,8 +5199,9 @@ fn parse_func_header(
             "{keyword} {def_name} requires a return type : TYPE after ':'"
         ));
     };
-    let return_type = render_type_region(&toks[p + 1..ret_end], stmt)
-        .map_err(|_| format!("{keyword} {def_name} requires a return type : TYPE after ':'"))?;
+    let return_type = render_type_region(&toks[p + 1..ret_end], stmt).map_err(|_| {
+        format!("{keyword} {def_name} requires a return type : {KEYWORD_TYPE} after ':'")
+    })?;
     let return_type = crate::canonicalize_spelling(&return_type);
     p = ret_end;
     // Block at any gap (never a template); missing blocks miss to
@@ -5683,7 +5695,9 @@ fn parse_single_file_import(
                     .iter()
                     .any(|k| matches!(k, StepKind::ImportFuncs { .. }))
             {
-                "IMPORT here takes a single file import (IMPORT [\"<path>\" AS <ALIAS>]); modules and function harvests stay at statement level".to_string()
+                format!(
+                    "{KEYWORD_IMPORT} here takes a single file import ({KEYWORD_IMPORT} [\"<path>\" AS <ALIAS>]); modules and function harvests stay at statement level"
+                )
             } else {
                 "IMPORT here takes a single file import (IMPORT [\"<path>\" AS <ALIAS>])"
                     .to_string()
@@ -5738,13 +5752,13 @@ fn parse_export_name(
             return Ok(None);
         }
         if require_sigil {
-            return Err(fail(
-                "EXPORT CONST requires `$`: write EXPORT CONST $NAME (never bare)".to_string(),
-            ));
+            return Err(fail(format!(
+                "{KEYWORD_EXPORT} {KEYWORD_CONST} requires `$`: write {KEYWORD_EXPORT} {KEYWORD_CONST} $NAME (never bare)"
+            )));
         } else {
-            return Err(fail(
-                "EXPORT FUNC and EXPORT TYPE names never take `$`: write EXPORT FOO".to_string(),
-            ));
+            return Err(fail(format!(
+                "{KEYWORD_EXPORT} {KEYWORD_FUNC} and {KEYWORD_EXPORT} {KEYWORD_TYPE} names never take `$`: write {KEYWORD_EXPORT} FOO"
+            )));
         }
     }
     let head = match toks.get(pos + offset).map(|t| &t.kind) {
@@ -6000,7 +6014,7 @@ fn validate_import_alias(alias: &str, ctx: &ParseCtx, guarded: bool) -> Result<S
     }
     let flags = ctx.import_guard_flags(alias);
     if !flags.is_empty() && (!guarded || flags.iter().any(|g| !g)) {
-        return Err(format!("duplicate IMPORT alias `{alias}`"));
+        return Err(format!("duplicate {KEYWORD_IMPORT} alias `{alias}`"));
     }
     ctx.import_into_frame(std::slice::from_ref(&alias.to_string()), guarded);
     Ok(alias.to_string())
@@ -6009,10 +6023,12 @@ fn validate_import_alias(alias: &str, ctx: &ParseCtx, guarded: bool) -> Result<S
 /// Validate an `IMPORT` path: hard errors, never shape misses.
 fn validate_import_path(path: &str) -> Result<String, String> {
     if path.is_empty() {
-        return Err("IMPORT path must not be empty".to_string());
+        return Err(format!("{KEYWORD_IMPORT} path must not be empty"));
     }
     if path.contains("{{") {
-        return Err("IMPORT path must be a literal string (no {{ }} templates)".to_string());
+        return Err(format!(
+            "{KEYWORD_IMPORT} path must be a literal string (no {{{{ }}}} templates)"
+        ));
     }
     if path.contains("://") {
         return Err(
@@ -6075,7 +6091,9 @@ fn validate_from_import(
         out_type_names.push(name.clone());
     }
     if out_func_names.is_empty() && out_type_names.is_empty() {
-        return Err("IMPORT harvest needs at least one function or type name".to_string());
+        return Err(format!(
+            "{KEYWORD_IMPORT} harvest needs at least one function or type name"
+        ));
     }
     if let Some(alias) = alias {
         let alias = validate_import_alias(alias, ctx, guarded)?;
@@ -6521,7 +6539,9 @@ fn parse_remote_single(
     let body = parse_body_steps(&inner, stmt, ctx, false)?;
     p += 1;
     if body.is_empty() {
-        return Err(fail("REMOTE requires a non-empty braced block".to_string()));
+        return Err(fail(format!(
+            "{KEYWORD_REMOTE} requires a non-empty braced block"
+        )));
     }
     if crate::commands::contains_remote_block(&body) {
         return Err(fail(format!(
@@ -6532,9 +6552,9 @@ fn parse_remote_single(
         .iter()
         .any(|s| crate::commands::contains_inherit_env(&s.kind))
     {
-        return Err(fail(
-            "INHERIT_ENV cannot appear inside a REMOTE block: the guest inherits its own process environment".to_string(),
-        ));
+        return Err(fail(format!(
+            "{KEYWORD_INHERIT_ENV} cannot appear inside a {KEYWORD_REMOTE} block: the guest inherits its own process environment"
+        )));
     }
     // Outer-function containment (same rule as the shared remote
     // validators): body calls resolving to visible
@@ -7416,7 +7436,7 @@ fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
                     diagnostic: None,
                     hint: None,
                     stmt,
-                    msg: "malformed type in LET".to_string(),
+                    msg: format!("malformed type in {KEYWORD_LET}"),
                     line: 0,
                     col: 0,
                     kind: None,
@@ -7429,7 +7449,9 @@ fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
             diagnostic: None,
             hint: None,
             stmt,
-            msg: "LET requires explicit type: LET $var: TYPE = <expr>".to_string(),
+            msg: format!(
+                "{KEYWORD_LET} requires explicit type: {KEYWORD_LET} $var: {KEYWORD_TYPE} = <expr>"
+            ),
             line: 0,
             col: 0,
             kind: None,
@@ -7541,7 +7563,7 @@ fn parse_binding_body(
             }
             Some(TokKind::Word(_)) => {
                 return Err(
-                    cur.err("CONST requires `$`: write CONST $NAME: TYPE = ... (never bare)")
+                    cur.err(format!("{KEYWORD_CONST} requires `$`: write {KEYWORD_CONST} $NAME: {KEYWORD_TYPE} = ... (never bare)"))
                 );
             }
             _ => return Ok(None),
@@ -7566,7 +7588,9 @@ fn parse_binding_body(
             diagnostic: None,
             hint: None,
             stmt,
-            msg: format!("{kw} requires explicit types: {kw} {head_example}: TYPE = <expr>"),
+            msg: format!(
+                "{kw} requires explicit types: {kw} {head_example}: {KEYWORD_TYPE} = <expr>"
+            ),
             line: 0,
             col: 0,
             kind: Some(ParseErrorKind::InvalidSyntax {
@@ -7614,7 +7638,9 @@ fn validate_const_name(ctx: &ParseCtx, cur: &Cursor, name: &str) -> Result<(), T
     // Single gate for the declaration spelling: uppercase plus
     // freedom from reserved words (see [`crate::constants`]).
     if !crate::constants::is_const_name(name) {
-        return Err(cur.err(format!("CONST names must be UPPERCASE: got `{name}`")));
+        return Err(cur.err(format!(
+            "{KEYWORD_CONST} names must be UPPERCASE: got `{name}`"
+        )));
     }
     if crate::commands::is_reserved_const_name(name) {
         return Err(cur.err(format!(
@@ -7920,7 +7946,7 @@ fn try_let_with_io_rhs(
                         body.into_iter()
                             .next()
                             .ok_or_else(|| {
-                                fail("LET $var: HANDLE<T> = ASYNC requires a body".to_string())
+                                fail(format!("{KEYWORD_LET} $var: {HANDLE_TYPE_NAME}<T> = {KEYWORD_ASYNC} requires a body"))
                             })?
                             .kind,
                     ),
@@ -8041,7 +8067,7 @@ fn parse_let_async_rhs(
             diagnostic: None,
             hint: None,
             stmt,
-            msg: "binding $var: HANDLE<T> = ASYNC requires a body".to_string(),
+            msg: format!("binding $var: {HANDLE_TYPE_NAME}<T> = {KEYWORD_ASYNC} requires a body"),
             line: 0,
             col: 0,
             kind: None,
@@ -8075,7 +8101,7 @@ fn parse_let_async_rhs(
             diagnostic: None,
             hint: None,
             stmt,
-            msg: "binding $var: HANDLE<T> = ASYNC requires a body".to_string(),
+            msg: format!("binding $var: {HANDLE_TYPE_NAME}<T> = {KEYWORD_ASYNC} requires a body"),
             line: 0,
             col: 0,
             kind: None,
@@ -8586,7 +8612,7 @@ fn parse_elements(
                         diagnostic: None,
                         hint: None,
                         stmt,
-                        msg: "IMPORT cannot be guarded".to_string(),
+                        msg: format!("{KEYWORD_IMPORT} cannot be guarded"),
                         line: 0,
                         col: 0,
                         kind: None,
@@ -8825,7 +8851,7 @@ fn parse_element_at(
                 diagnostic: None,
                 hint: None,
                 stmt,
-                msg: "EXPORT is only allowed at the top level".to_string(),
+                msg: format!("{KEYWORD_EXPORT} is only allowed at the top level"),
                 line: 0,
                 col: 0,
                 kind: None,
@@ -8836,7 +8862,7 @@ fn parse_element_at(
                 diagnostic: None,
                 hint: None,
                 stmt,
-                msg: "EXPORT cannot be guarded".to_string(),
+                msg: format!("{KEYWORD_EXPORT} cannot be guarded"),
                 line: 0,
                 col: 0,
                 kind: None,
@@ -8934,7 +8960,7 @@ fn parse_element_at(
                 diagnostic: None,
                 hint: None,
                 stmt,
-                msg: "TYPE must appear at top level".to_string(),
+                msg: format!("{KEYWORD_TYPE} must appear at top level"),
                 line: 0,
                 col: 0,
                 kind: None,
@@ -8945,7 +8971,7 @@ fn parse_element_at(
                 diagnostic: None,
                 hint: None,
                 stmt,
-                msg: "TYPE cannot be guarded".to_string(),
+                msg: format!("{KEYWORD_TYPE} cannot be guarded"),
                 line: 0,
                 col: 0,
                 kind: None,
@@ -9067,7 +9093,7 @@ fn parse_with_io_element(
                 diagnostic: None,
                 hint: None,
                 stmt,
-                msg: "WITH_IO block must contain at least one command".to_string(),
+                msg: format!("{KEYWORD_WITH_IO} block must contain at least one command"),
                 line: 0,
                 col: 0,
                 kind: None,
@@ -9128,7 +9154,7 @@ fn parse_with_io_element(
             diagnostic: None,
             hint: None,
             stmt,
-            msg: "WITH_IO block must be followed by '{'".to_string(),
+            msg: format!("{KEYWORD_WITH_IO} block must be followed by '{{'"),
             line: 0,
             col: 0,
             kind: None,
@@ -9236,7 +9262,7 @@ fn parse_inner_command(
                 diagnostic: None,
                 hint: None,
                 stmt,
-                msg: "RUN [...] requires a gap after RUN".to_string(),
+                msg: format!("{KEYWORD_RUN} [...] requires a gap after {KEYWORD_RUN}"),
                 line: 0,
                 col: 0,
                 kind: None,
@@ -9359,7 +9385,9 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
                             diagnostic: None,
                             hint: None,
                             stmt: out.len(),
-                            msg: "INHERIT_ENV must appear before any other commands".to_string(),
+                            msg: format!(
+                                "{KEYWORD_INHERIT_ENV} must appear before any other commands"
+                            ),
                             line: 0,
                             col: 0,
                             kind: None,
@@ -9372,7 +9400,9 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
                             diagnostic: None,
                             hint: None,
                             stmt: out.len(),
-                            msg: "INHERIT_ENV cannot be nested inside other commands".to_string(),
+                            msg: format!(
+                                "{KEYWORD_INHERIT_ENV} cannot be nested inside other commands"
+                            ),
                             line: 0,
                             col: 0,
                             kind: None,
@@ -9738,7 +9768,7 @@ impl Exports {
             .iter()
             .any(|list| list.iter().any(|e| crate::base_name(e) == base));
         if clash {
-            return Err(format!("duplicate EXPORT `{name}`"));
+            return Err(format!("duplicate {KEYWORD_EXPORT} `{name}`"));
         }
         match kind {
             ExportKind::Func => self.funcs.push(name),

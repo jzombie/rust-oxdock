@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 
 use super::command::format_duration;
+use super::tag::FLOAT_TYPE_NAME;
 use super::value::Value;
 
 /// Canonical DSL string escaping: the exact inverse of the runtime string
@@ -93,7 +94,7 @@ pub fn render_dsl_literal(value: &Value) -> Result<String> {
 /// Non-finite values have no literal form and bail loudly.
 fn render_float(raw: f64) -> Result<String> {
     if !raw.is_finite() {
-        bail!("non-finite FLOAT has no DSL literal form");
+        bail!("non-finite {FLOAT_TYPE_NAME} has no DSL literal form");
     }
     let mut text = format!("{raw}");
     if !text.contains('.') {

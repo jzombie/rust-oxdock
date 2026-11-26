@@ -13,9 +13,18 @@ use oxdock_fs::PolicyPath;
 use oxdock_fs::command_path;
 use oxdock_fs::to_forward_slashes;
 use oxdock_parser::constants::KEYWORD_RUN;
-use oxdock_parser::constants::{KEYWORD_CONST, KEYWORD_LET};
+use oxdock_parser::constants::{
+    KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASYNC, KEYWORD_AWAIT,
+    KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
+    KEYWORD_EXPAND, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET,
+    KEYWORD_LIST_APPEND, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE,
+    KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SYMLINK,
+    KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WORKDIR,
+    KEYWORD_WRITE,
+};
 use oxdock_parser::{
-    Arg, Command, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value,
+    Arg, Command, Expr, IoBinding, IoStream, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME,
+    PipeTarget, SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Step, StepKind, TypeTag, Value,
     WorkspaceTarget, render_structural, sigil_var,
 };
 use oxdock_process::{
@@ -43,14 +52,14 @@ fn top_level_flow(flow: Flow) -> Result<()> {
     match flow {
         Flow::Done => Ok(()),
         Flow::Break { idx } => {
-            bail!("step {}: BREAK outside loop", idx + 1);
+            bail!("step {}: {KEYWORD_BREAK} outside loop", idx + 1);
         }
         Flow::Continue { idx } => {
-            bail!("step {}: CONTINUE outside loop", idx + 1);
+            bail!("step {}: {KEYWORD_CONTINUE} outside loop", idx + 1);
         }
         Flow::Return { idx, .. } => {
             bail!(
-                "step {}: RETURN outside function, ASYNC task, or LET block",
+                "step {}: {KEYWORD_RETURN} outside function, {KEYWORD_ASYNC} task, or {KEYWORD_LET} block",
                 idx + 1
             );
         }
@@ -134,7 +143,7 @@ pub(super) fn workdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) ->
         .state
         .fs
         .resolve_workdir(&cx.state.cwd, path)
-        .with_context(|| format!("WORKDIR {}", path))?;
+        .with_context(|| format!("{KEYWORD_WORKDIR} {}", path))?;
     Ok(())
 }
 
@@ -256,7 +265,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
     {
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            bail!("RUN {} interrupted by cancellation", cmd);
+            bail!("{KEYWORD_RUN} {} interrupted by cancellation", cmd);
         }
     }
 
@@ -264,12 +273,12 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
     let mut handle = match cx
         .process
         .spawn_command(&ctx, cmd, options)
-        .with_context(|| format!("RUN {}", cmd))?
+        .with_context(|| format!("{KEYWORD_RUN} {}", cmd))?
     {
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),
         CommandResult::Captured(_) => {
-            bail!("RUN {} unexpectedly captured output", cmd)
+            bail!("{KEYWORD_RUN} {} unexpectedly captured output", cmd)
         }
     };
 
@@ -291,7 +300,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
             let _ = handle.kill();
-            bail!("RUN {} interrupted by cancellation", cmd);
+            bail!("{KEYWORD_RUN} {} interrupted by cancellation", cmd);
         }
     }
 
@@ -311,7 +320,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
 
     let status = status?;
     if !status.success() {
-        bail!("RUN {} exited with status {}", cmd, status);
+        bail!("{KEYWORD_RUN} {} exited with status {}", cmd, status);
     }
     Ok(())
 }
@@ -382,7 +391,7 @@ pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[Strin
     {
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            bail!("RUN {argv:?} interrupted by cancellation");
+            bail!("{KEYWORD_RUN} {argv:?} interrupted by cancellation");
         }
     }
 
@@ -390,12 +399,12 @@ pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[Strin
     let mut handle = match cx
         .process
         .spawn_argv(&ctx, argv, options)
-        .with_context(|| format!("RUN {argv:?}"))?
+        .with_context(|| format!("{KEYWORD_RUN} {argv:?}"))?
     {
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),
         CommandResult::Captured(_) => {
-            bail!("RUN {argv:?} unexpectedly captured output",)
+            bail!("{KEYWORD_RUN} {argv:?} unexpectedly captured output",)
         }
     };
 
@@ -414,7 +423,7 @@ pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[Strin
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
             let _ = handle.kill();
-            bail!("RUN {argv:?} interrupted by cancellation");
+            bail!("{KEYWORD_RUN} {argv:?} interrupted by cancellation");
         }
     }
 
@@ -434,7 +443,7 @@ pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[Strin
 
     let status = status?;
     if !status.success() {
-        bail!("RUN {argv:?} exited with status {}", status);
+        bail!("{KEYWORD_RUN} {argv:?} exited with status {}", status);
     }
     Ok(())
 }
@@ -466,11 +475,11 @@ fn run_pty<P: ProcessManager>(
 ) -> Result<()> {
     use std::sync::atomic::Ordering;
     if argv.is_empty() {
-        bail!("RUN {what} needs at least a program");
+        bail!("{KEYWORD_RUN} {what} needs at least a program");
     }
     // Same pre-spawn cancellation refusal as [`run`].
     if cx.state.cancel_token.load(Ordering::SeqCst) {
-        bail!("RUN {what} interrupted by cancellation");
+        bail!("{KEYWORD_RUN} {what} interrupted by cancellation");
     }
     if std::env::var(PROCESS_DEBUG_ENV_VAR).is_ok() {
         eprintln!("DEBUG: step RUN {what} under tty {tty:?}");
@@ -515,7 +524,7 @@ fn run_pty<P: ProcessManager>(
         #[cfg(not(miri))]
         CommandStdin::OsPipe(_) => {
             bail!(
-                "WITH_IO [tty] stdin cannot arrive on a live OS pipe; bind a script pipe with stdin=$var"
+                "{KEYWORD_WITH_IO} [tty] stdin cannot arrive on a live OS pipe; bind a script pipe with stdin=$var"
             )
         }
     };
@@ -529,7 +538,7 @@ fn run_pty<P: ProcessManager>(
         #[cfg(not(miri))]
         Some(StreamHandle::Os(_)) => {
             bail!(
-                "WITH_IO [tty] stdout cannot arrive on a live OS pipe; bind a script pipe with stdout=$var"
+                "{KEYWORD_WITH_IO} [tty] stdout cannot arrive on a live OS pipe; bind a script pipe with stdout=$var"
             )
         }
     };
@@ -554,19 +563,19 @@ fn run_pty<P: ProcessManager>(
         on_output_drained: None,
         func: KEYWORD_RUN,
     })
-    .with_context(|| format!("RUN {what}"))?;
+    .with_context(|| format!("{KEYWORD_RUN} {what}"))?;
     // Pipe EOF rides the writer drops like any `RUN`: the supervisor
     // returns only after the output worker finished, so every byte is
     // already in the sink before the code below runs.
     match outcome {
         PtyOutcome::Completed(code) => {
             if code != 0 {
-                bail!("RUN {what} exited with status {code}");
+                bail!("{KEYWORD_RUN} {what} exited with status {code}");
             }
             Ok(())
         }
         PtyOutcome::Cancelled => {
-            bail!("RUN {what} interrupted by cancellation");
+            bail!("{KEYWORD_RUN} {what} interrupted by cancellation");
         }
     }
 }
@@ -612,7 +621,7 @@ pub(super) fn resolve_run_exec_argv<P: ProcessManager>(
         }
     }
     if out.is_empty() {
-        bail!("RUN exec form requires at least one argument");
+        bail!("{KEYWORD_RUN} exec form requires at least one argument");
     }
     Ok(out)
 }
@@ -638,17 +647,17 @@ fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
         // A pipe in argv position is always a bug: a child process
         // cannot receive a handle as an argument string.
         anyhow::bail!(
-            "cannot pass PIPE as a command argument: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: STRING = ... instead."
+            "cannot pass {PIPE_TYPE_NAME} as a command argument: pipes carry streams between steps, not text. Capture the producing step's output with {KEYWORD_LET} $var: {STRING_TYPE_NAME} = ... instead."
         );
     }
     if val.as_semaphore().is_some() {
         anyhow::bail!(
-            "cannot pass SEMAPHORE as a command argument: semaphores coordinate task access between steps, not text."
+            "cannot pass {SEMAPHORE_TYPE_NAME} as a command argument: semaphores coordinate task access between steps, not text."
         );
     }
     if val.as_permit().is_some() {
         anyhow::bail!(
-            "cannot pass PERMIT as a command argument: permits grant scoped task access, not text."
+            "cannot pass {PERMIT_TYPE_NAME} as a command argument: permits grant scoped task access, not text."
         );
     }
     if let Some(d) = val.as_duration() {
@@ -666,10 +675,10 @@ fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
         return Ok(());
     }
     if val.as_map().is_some() {
-        bail!("RUN exec form element must be a string, got map");
+        bail!("{KEYWORD_RUN} exec form element must be a string, got map");
     }
     if let Some(id) = val.as_handle() {
-        bail!("RUN exec form element must be a string, got task handle task#{id}");
+        bail!("{KEYWORD_RUN} exec form element must be a string, got task handle task#{id}");
     }
     // Every other type stringifies through its descriptor rendering
     // (host values through their `Display`).
@@ -719,7 +728,7 @@ pub(crate) fn sleep<P: ProcessManager>(
     let start = Instant::now();
     loop {
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            bail!("SLEEP interrupted by cancellation");
+            bail!("{KEYWORD_SLEEP} interrupted by cancellation");
         }
         let elapsed = start.elapsed();
         if elapsed >= *duration {
@@ -753,22 +762,22 @@ pub(super) fn copy<P: ProcessManager>(
         cx.state
             .fs
             .resolve_copy_source_from_target(copy_source_root(target), from)
-            .with_context(|| format!("COPY {} {}", from, to))?
+            .with_context(|| format!("{KEYWORD_COPY} {} {}", from, to))?
     } else {
         cx.state
             .fs
             .resolve_copy_source(from)
-            .with_context(|| format!("COPY {} {}", from, to))?
+            .with_context(|| format!("{KEYWORD_COPY} {} {}", from, to))?
     };
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| format!("COPY {} {}", from, to))?;
+        .with_context(|| format!("{KEYWORD_COPY} {} {}", from, to))?;
     let to_abs = place_file_in_dir(cx.state.fs.as_ref(), &from_abs, to, &to_abs)
-        .with_context(|| format!("COPY {} {}", from, to))?;
+        .with_context(|| format!("{KEYWORD_COPY} {} {}", from, to))?;
     copy_entry(cx.state.fs.as_ref(), &from_abs, &to_abs)
-        .with_context(|| format!("COPY {} {}", from, to))?;
+        .with_context(|| format!("{KEYWORD_COPY} {} {}", from, to))?;
     Ok(())
 }
 
@@ -796,10 +805,18 @@ fn place_file_in_dir(
         .as_path()
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
-        .with_context(|| format!("COPY source has no file name: {}", from_abs.display()))?;
-    to_abs
-        .join(&base)
-        .with_context(|| format!("COPY destination escapes root: {}", to_abs.display()))
+        .with_context(|| {
+            format!(
+                "{KEYWORD_COPY} source has no file name: {}",
+                from_abs.display()
+            )
+        })?;
+    to_abs.join(&base).with_context(|| {
+        format!(
+            "{KEYWORD_COPY} destination escapes root: {}",
+            to_abs.display()
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -814,11 +831,11 @@ pub(super) fn copy_git<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| format!("COPY_GIT {} {} {}", rev, from, to))?;
+        .with_context(|| format!("{KEYWORD_COPY_GIT} {} {} {}", rev, from, to))?;
     cx.state
         .fs
         .copy_from_git(rev, from, &to_abs, include_dirty)
-        .with_context(|| format!("COPY_GIT {} {} {}", rev, from, to))?;
+        .with_context(|| format!("{KEYWORD_COPY_GIT} {} {} {}", rev, from, to))?;
     Ok(())
 }
 
@@ -908,7 +925,7 @@ fn collect_archive_tree(
     src: &str,
     dst: &str,
 ) -> Result<ArchiveTree> {
-    let tag = format!("ARCHIVE {src} {dst}");
+    let tag = format!("{KEYWORD_ARCHIVE} {src} {dst}");
     match fs.entry_kind(src_abs).with_context(|| tag.clone())? {
         EntryKind::File => {
             let base = src_abs
@@ -1023,7 +1040,7 @@ pub(super) fn archive<P: ProcessManager>(
     dst: &str,
     raw: bool,
 ) -> Result<()> {
-    let tag = format!("ARCHIVE {src} {dst}");
+    let tag = format!("{KEYWORD_ARCHIVE} {src} {dst}");
     let src_abs = resolve_archive_src(cx, src, &tag)?;
     let dst_abs = cx
         .state
@@ -1091,7 +1108,7 @@ pub(super) fn unarchive<P: ProcessManager>(
     dst: &str,
     max_bytes: Option<&str>,
 ) -> Result<()> {
-    let tag = format!("UNARCHIVE {src} {dst}");
+    let tag = format!("{KEYWORD_UNARCHIVE} {src} {dst}");
     let cap = match max_bytes {
         Some(raw) => oxdock_parser::command::parse_byte_count(raw)
             .with_context(|| format!("{tag}: --max-bytes {raw:?}"))?,
@@ -1251,17 +1268,17 @@ pub(super) fn symlink<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| format!("SYMLINK {} {}", from, to))?;
+        .with_context(|| format!("{KEYWORD_SYMLINK} {} {}", from, to))?;
     let from_abs = if let Some(target) = from_workspace {
         cx.state
             .fs
             .resolve_copy_source_from_target(copy_source_root(target), from)
-            .with_context(|| format!("SYMLINK {} {}", from, to))?
+            .with_context(|| format!("{KEYWORD_SYMLINK} {} {}", from, to))?
     } else {
         cx.state
             .fs
             .resolve_copy_source(from)
-            .with_context(|| format!("SYMLINK {} {}", from, to))?
+            .with_context(|| format!("{KEYWORD_SYMLINK} {} {}", from, to))?
     };
     // `ln -s` destination semantics: a directory destination (existing,
     // or named with a trailing slash) receives the link under the
@@ -1270,19 +1287,19 @@ pub(super) fn symlink<P: ProcessManager>(
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .with_context(|| format!("SYMLINK {} {}", from, to))?
+            .with_context(|| format!("{KEYWORD_SYMLINK} {} {}", from, to))?
     } else if matches!(cx.state.fs.entry_kind(&to_abs), Ok(EntryKind::Dir)) {
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .with_context(|| format!("SYMLINK {} {}", from, to))?
+            .with_context(|| format!("{KEYWORD_SYMLINK} {} {}", from, to))?
     } else {
         to_abs
     };
     cx.state
         .fs
         .symlink(&from_abs, &to_abs)
-        .with_context(|| format!("SYMLINK {} {}", from, to))?;
+        .with_context(|| format!("{KEYWORD_SYMLINK} {} {}", from, to))?;
     Ok(())
 }
 
@@ -1293,7 +1310,7 @@ fn link_base_name(from_abs: &GuardedPath, from: &str) -> Result<String> {
         .as_path()
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
-        .with_context(|| format!("SYMLINK source has no file name: {from}"))
+        .with_context(|| format!("{KEYWORD_SYMLINK} source has no file name: {from}"))
 }
 
 pub(super) fn mkdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> Result<()> {
@@ -1301,7 +1318,7 @@ pub(super) fn mkdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> R
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("MKDIR {}", path))?;
+        .with_context(|| format!("{KEYWORD_MKDIR} {}", path))?;
     cx.state
         .fs
         .create_dir_all(&target)
@@ -1314,11 +1331,11 @@ pub(super) fn set_executable<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("SET_EXECUTABLE {path}"))?;
+        .with_context(|| format!("{KEYWORD_SET_EXECUTABLE} {path}"))?;
     cx.state
         .fs
         .set_executable(&target)
-        .with_context(|| format!("SET_EXECUTABLE {path}"))?;
+        .with_context(|| format!("{KEYWORD_SET_EXECUTABLE} {path}"))?;
     Ok(())
 }
 
@@ -1362,7 +1379,7 @@ pub(super) fn read<P: ProcessManager>(
             .state
             .fs
             .resolve_read(&cx.state.cwd, path)
-            .with_context(|| format!("READ {}", path))?;
+            .with_context(|| format!("{KEYWORD_READ} {}", path))?;
         let mut reader = cx
             .state
             .fs
@@ -1383,14 +1400,16 @@ pub(super) fn read<P: ProcessManager>(
         })?;
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-            bail!("READ requires stdin (use WITH_IO [stdin=...] READ)");
+            bail!(
+                "{KEYWORD_READ} requires stdin (use {KEYWORD_WITH_IO} [stdin=...] {KEYWORD_READ})"
+            );
         };
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
             let n = {
                 let mut guard = input_stream
                     .lock()
-                    .map_err(|_| anyhow!("failed to lock stdin for READ"))?;
+                    .map_err(|_| anyhow!("failed to lock stdin for {KEYWORD_READ}"))?;
                 guard.read(&mut buf).context("failed to read from stdin")?
             };
             if n == 0 {
@@ -1408,7 +1427,9 @@ pub(super) fn read<P: ProcessManager>(
 
 pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -> Result<()> {
     let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-        bail!("READ_LINE requires stdin (use WITH_IO [stdin=...] READ_LINE $var)");
+        bail!(
+            "{KEYWORD_READ_LINE} requires stdin (use {KEYWORD_WITH_IO} [stdin=...] {KEYWORD_READ_LINE} $var)"
+        );
     };
     let clean_var = var.trim_start_matches('$').to_string();
     let mut buf = Vec::new();
@@ -1417,7 +1438,7 @@ pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -
         let n = {
             let mut guard = input_stream
                 .lock()
-                .map_err(|_| anyhow!("failed to lock stdin for READ_LINE"))?;
+                .map_err(|_| anyhow!("failed to lock stdin for {KEYWORD_READ_LINE}"))?;
             guard.read(&mut byte).context("failed to read from stdin")?
         };
         if n == 0 {
@@ -1428,7 +1449,8 @@ pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -
             break;
         }
     }
-    let line = String::from_utf8(buf).context("READ_LINE received non-UTF8 bytes")?;
+    let line = String::from_utf8(buf)
+        .with_context(|| format!("{KEYWORD_READ_LINE} received non-UTF8 bytes"))?;
     let line = line
         .strip_suffix("\r\n")
         .or_else(|| line.strip_suffix('\n'))
@@ -1526,7 +1548,7 @@ pub(super) fn write<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("WRITE {}", path))?;
+        .with_context(|| format!("{KEYWORD_WRITE} {}", path))?;
     cx.state
         .fs
         .ensure_parent_dir(&target)
@@ -1539,13 +1561,13 @@ pub(super) fn write<P: ProcessManager>(
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
             bail!(
-                "WRITE {} requires stdin (use WITH_IO [stdin=...] WRITE)",
+                "{KEYWORD_WRITE} {} requires stdin (use {KEYWORD_WITH_IO} [stdin=...] {KEYWORD_WRITE})",
                 path
             );
         };
         let mut guard = input_stream
             .lock()
-            .map_err(|_| anyhow!("failed to lock stdin for WRITE"))?;
+            .map_err(|_| anyhow!("failed to lock stdin for {KEYWORD_WRITE}"))?;
         let mut writer = cx
             .state
             .fs
@@ -1555,7 +1577,7 @@ pub(super) fn write<P: ProcessManager>(
         loop {
             let n = guard
                 .read(&mut buf)
-                .context("failed to read from stdin for WRITE")?;
+                .with_context(|| format!("failed to read from stdin for {KEYWORD_WRITE}"))?;
             if n == 0 {
                 break;
             }
@@ -1577,7 +1599,7 @@ pub(super) fn append<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("APPEND {}", path))?;
+        .with_context(|| format!("{KEYWORD_APPEND} {}", path))?;
     cx.state
         .fs
         .ensure_parent_dir(&target)
@@ -1590,13 +1612,13 @@ pub(super) fn append<P: ProcessManager>(
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
             bail!(
-                "APPEND {} requires stdin (use WITH_IO [stdin=...] APPEND)",
+                "{KEYWORD_APPEND} {} requires stdin (use {KEYWORD_WITH_IO} [stdin=...] {KEYWORD_APPEND})",
                 path
             );
         };
         let mut guard = input_stream
             .lock()
-            .map_err(|_| anyhow!("failed to lock stdin for APPEND"))?;
+            .map_err(|_| anyhow!("failed to lock stdin for {KEYWORD_APPEND}"))?;
         let mut writer = cx
             .state
             .fs
@@ -1606,7 +1628,7 @@ pub(super) fn append<P: ProcessManager>(
         loop {
             let n = guard
                 .read(&mut buf)
-                .context("failed to read from stdin for APPEND")?;
+                .with_context(|| format!("failed to read from stdin for {KEYWORD_APPEND}"))?;
             if n == 0 {
                 break;
             }
@@ -1657,7 +1679,7 @@ pub(super) fn replace<P: ProcessManager>(
                 .state
                 .fs
                 .resolve_read(&cx.state.cwd, path)
-                .with_context(|| format!("EXPAND {}", path))?;
+                .with_context(|| format!("{KEYWORD_EXPAND} {}", path))?;
             let mut reader = cx
                 .state
                 .fs
@@ -1684,7 +1706,7 @@ pub(super) fn replace<P: ProcessManager>(
             };
             let mut guard = input_stream
                 .lock()
-                .map_err(|_| anyhow!("failed to lock stdin for EXPAND"))?;
+                .map_err(|_| anyhow!("failed to lock stdin for {KEYWORD_EXPAND}"))?;
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
                 let n = guard.read(&mut buf).context("failed to read from stdin")?;
@@ -2060,7 +2082,7 @@ pub(crate) fn with_io_block<P: ProcessManager>(
     _idx: usize,
     _bindings: &[IoBinding],
 ) -> Result<()> {
-    bail!("WITH_IO block should have been expanded during parsing")
+    bail!("{KEYWORD_WITH_IO} block should have been expanded during parsing")
 }
 
 /// True when the wrapped command is a lone `RUN`: the only consumer or
@@ -2142,7 +2164,7 @@ fn tty_request(bindings: &[IoBinding], cmd: &StepKind) -> Result<Option<TtyReque
     if !tty {
         if rows.is_some() || cols.is_some() {
             bail!(
-                "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size"
+                "{KEYWORD_WITH_IO} [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size"
             );
         }
         return Ok(None);
@@ -2152,13 +2174,13 @@ fn tty_request(bindings: &[IoBinding], cmd: &StepKind) -> Result<Option<TtyReque
         .any(|b| matches!(b.stream, IoStream::Stderr))
     {
         bail!(
-            "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex"
+            "{KEYWORD_WITH_IO} [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex"
         );
     }
     match cmd {
         StepKind::Run(_) | StepKind::RunExec { .. } => Ok(Some(TtyRequest { rows, cols })),
         _ => bail!(
-            "WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it",
+            "{KEYWORD_WITH_IO} [tty] only wraps a {KEYWORD_RUN} step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it",
         ),
     }
 }
@@ -2229,7 +2251,7 @@ fn resolve_io_streams<P: ProcessManager>(
         match binding.stream {
             IoStream::Stdin => {
                 if seen_stdin {
-                    bail!("WITH_IO declared stdin more than once");
+                    bail!("{KEYWORD_WITH_IO} declared stdin more than once");
                 }
                 seen_stdin = true;
                 next_expose_stdin = true;
@@ -2245,7 +2267,7 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Stdout => {
                 if seen_stdout {
-                    bail!("WITH_IO declared stdout more than once");
+                    bail!("{KEYWORD_WITH_IO} declared stdout more than once");
                 }
                 seen_stdout = true;
                 (step_stdout, out_pipe) = if let Some(target) = &binding.pipe {
@@ -2260,7 +2282,7 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Stderr => {
                 if seen_stderr {
-                    bail!("WITH_IO declared stderr more than once");
+                    bail!("{KEYWORD_WITH_IO} declared stderr more than once");
                 }
                 seen_stderr = true;
                 step_stderr = if let Some(target) = &binding.pipe {
@@ -2274,19 +2296,19 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Tty => {
                 if seen_tty {
-                    bail!("WITH_IO declared tty more than once");
+                    bail!("{KEYWORD_WITH_IO} declared tty more than once");
                 }
                 seen_tty = true;
             }
             IoStream::Rows(_) => {
                 if seen_rows {
-                    bail!("WITH_IO declared rows more than once");
+                    bail!("{KEYWORD_WITH_IO} declared rows more than once");
                 }
                 seen_rows = true;
             }
             IoStream::Cols(_) => {
                 if seen_cols {
-                    bail!("WITH_IO declared cols more than once");
+                    bail!("{KEYWORD_WITH_IO} declared cols more than once");
                 }
                 seen_cols = true;
             }
@@ -2316,7 +2338,7 @@ fn resolve_pipe_handle<P: ProcessManager>(
         Some((kind, value)) if matches!(kind, TypeTag::Pipe) => {
             let Some(handle) = value.as_pipe_handle() else {
                 bail!(
-                    "TypeMismatch: expected PIPE, got {} ({:?})",
+                    "TypeMismatch: expected {PIPE_TYPE_NAME}, got {} ({:?})",
                     kind.name(),
                     value
                 );
@@ -2325,7 +2347,7 @@ fn resolve_pipe_handle<P: ProcessManager>(
         }
         Some((kind, value)) => {
             bail!(
-                "TypeMismatch: expected PIPE, got {} ({:?})",
+                "TypeMismatch: expected {PIPE_TYPE_NAME}, got {} ({:?})",
                 kind.name(),
                 value
             );
@@ -2493,7 +2515,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
     }
     if let Some(map) = iterable.as_map() {
         let key_name = key_var.ok_or_else(|| {
-            anyhow!("FOR loop over Map requires key and value bindings: FOR $k: STRING, $v: TYPE IN $map")
+            anyhow!("{KEYWORD_FOR} loop over Map requires key and value bindings: {KEYWORD_FOR} $k: {STRING_TYPE_NAME}, $v: {KEYWORD_TYPE} IN $map")
         })?;
         let clean_key_var = key_name.trim_start_matches('$').to_string();
         let mut keys: Vec<_> = map.keys().cloned().collect();
@@ -2506,7 +2528,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
         };
         if !matches!(kt, TypeTag::String) {
             anyhow::bail!(
-                "FOR loop over MAP requires a STRING key variable, got {}",
+                "{KEYWORD_FOR} loop over {MAP_TYPE_NAME} requires a {STRING_TYPE_NAME} key variable, got {}",
                 kt.name(),
             );
         }
@@ -2551,7 +2573,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
         return Ok(Flow::Done);
     }
     bail!(
-        "FOR loop requires a List or Map iterable, found {:?}",
+        "{KEYWORD_FOR} loop requires a List or Map iterable, found {:?}",
         iterable
     )
 }
@@ -2762,7 +2784,7 @@ pub(crate) fn gate_call<P: ProcessManager>(
     // Global recursion check.
     if cx.state.call_depth >= MAX_CALL_DEPTH {
         bail!(
-            "recursion depth limit exceeded in FUNC {}",
+            "recursion depth limit exceeded in {KEYWORD_FUNC} {}",
             super::base_name(name)
         );
     }
@@ -2997,13 +3019,13 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
                     Flow::Return { value, .. } => Ok(value),
                     Flow::Break { idx } => {
                         bail!(
-                            "step {}: BREAK cannot cross function boundary (in {name}())",
+                            "step {}: {KEYWORD_BREAK} cannot cross function boundary (in {name}())",
                             idx + 1
                         );
                     }
                     Flow::Continue { idx } => {
                         bail!(
-                            "step {}: CONTINUE cannot cross function boundary (in {name}())",
+                            "step {}: {KEYWORD_CONTINUE} cannot cross function boundary (in {name}())",
                             idx + 1
                         );
                     }
@@ -3086,10 +3108,16 @@ pub(crate) fn block_value<P: ProcessManager>(
             Flow::Done => Ok(Value::string(String::new())),
             Flow::Return { value, .. } => Ok(value),
             Flow::Break { idx } => {
-                bail!("step {}: BREAK cannot cross block boundary", idx + 1)
+                bail!(
+                    "step {}: {KEYWORD_BREAK} cannot cross block boundary",
+                    idx + 1
+                )
             }
             Flow::Continue { idx } => {
-                bail!("step {}: CONTINUE cannot cross block boundary", idx + 1)
+                bail!(
+                    "step {}: {KEYWORD_CONTINUE} cannot cross block boundary",
+                    idx + 1
+                )
             }
         }
     })();
@@ -3127,7 +3155,7 @@ pub(crate) fn while_loop<P: ProcessManager>(
     use std::sync::atomic::Ordering;
     loop {
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            bail!("ASYNC task cancelled");
+            bail!("{KEYWORD_ASYNC} task cancelled");
         }
         let val = super::args::evaluate_expr(cond, cx)?;
         if !super::args::is_truthy(&val)? {
@@ -3233,7 +3261,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                 .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
             {
                 bail!(
-                    "{kw} capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
+                    "{kw} capture cannot use {KEYWORD_WITH_IO} [stdout=$var]; the capture binds the {KEYWORD_RETURN} value"
                 );
             }
             let guard = arm_deadline(cx, deadline);
@@ -3282,7 +3310,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                 .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
             {
                 bail!(
-                    "{kw} capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
+                    "{kw} capture cannot use {KEYWORD_WITH_IO} [stdout=$var]; the capture binds the {KEYWORD_RETURN} value"
                 );
             }
             let guard = arm_deadline(cx, deadline);
@@ -3342,17 +3370,20 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     match flow {
         Flow::Done => {}
         Flow::Break { idx } => {
-            bail!("step {}: BREAK outside loop (cannot be captured)", idx + 1);
+            bail!(
+                "step {}: {KEYWORD_BREAK} outside loop (cannot be captured)",
+                idx + 1
+            );
         }
         Flow::Continue { idx } => {
             bail!(
-                "step {}: CONTINUE outside loop (cannot be captured)",
+                "step {}: {KEYWORD_CONTINUE} outside loop (cannot be captured)",
                 idx + 1
             );
         }
         Flow::Return { idx, .. } => {
             bail!(
-                "step {}: RETURN outside function (cannot be captured)",
+                "step {}: {KEYWORD_RETURN} outside function (cannot be captured)",
                 idx + 1
             );
         }
@@ -3782,13 +3813,22 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
         match flow {
             Flow::Done => Ok(()),
             Flow::Break { idx } => {
-                anyhow::bail!("step {}: BREAK cannot cross ASYNC boundary", idx + 1);
+                anyhow::bail!(
+                    "step {}: {KEYWORD_BREAK} cannot cross {KEYWORD_ASYNC} boundary",
+                    idx + 1
+                );
             }
             Flow::Continue { idx } => {
-                anyhow::bail!("step {}: CONTINUE cannot cross ASYNC boundary", idx + 1);
+                anyhow::bail!(
+                    "step {}: {KEYWORD_CONTINUE} cannot cross {KEYWORD_ASYNC} boundary",
+                    idx + 1
+                );
             }
             Flow::Return { idx, .. } => {
-                anyhow::bail!("step {}: RETURN cannot cross ASYNC boundary", idx + 1);
+                anyhow::bail!(
+                    "step {}: {KEYWORD_RETURN} cannot cross {KEYWORD_ASYNC} boundary",
+                    idx + 1
+                );
             }
         }
     });
@@ -3980,16 +4020,16 @@ pub(super) fn install<P: ProcessManager>(
         .state
         .fs
         .resolve_read(&cx.state.cwd, from)
-        .with_context(|| format!("INSTALL {from} {to}"))?;
+        .with_context(|| format!("{KEYWORD_INSTALL} {from} {to}"))?;
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| format!("INSTALL {from} {to}"))?;
+        .with_context(|| format!("{KEYWORD_INSTALL} {from} {to}"))?;
     cx.state
         .fs
         .install_file_atomic(&from_abs, &to_abs, EXECUTABLE_MODE)
-        .with_context(|| format!("INSTALL {from} {to}"))?;
+        .with_context(|| format!("{KEYWORD_INSTALL} {from} {to}"))?;
     Ok(())
 }
 
@@ -4093,7 +4133,7 @@ pub(super) fn prompt<P: ProcessManager>(
                 return Ok(());
             }
             None => {
-                bail!("PROMPT {message}: non-TTY stdin has no answer and no default",);
+                bail!("{KEYWORD_PROMPT} {message}: non-TTY stdin has no answer and no default",);
             }
         }
     }
@@ -4102,16 +4142,16 @@ pub(super) fn prompt<P: ProcessManager>(
         use std::io::Write;
         let mut err = std::io::stderr().lock();
         err.write_all(rendered.as_bytes())
-            .with_context(|| format!("PROMPT {message}: failed to write prompt"))?;
+            .with_context(|| format!("{KEYWORD_PROMPT} {message}: failed to write prompt"))?;
         err.flush()
-            .with_context(|| format!("PROMPT {message}: failed to flush prompt"))?;
+            .with_context(|| format!("{KEYWORD_PROMPT} {message}: failed to flush prompt"))?;
     }
     let mut line = String::new();
     let n = std::io::stdin()
         .read_line(&mut line)
-        .with_context(|| format!("PROMPT {message}: failed reading stdin"))?;
+        .with_context(|| format!("{KEYWORD_PROMPT} {message}: failed reading stdin"))?;
     if n == 0 && line.is_empty() {
-        bail!("PROMPT {message}: EOF on stdin before any input",);
+        bail!("{KEYWORD_PROMPT} {message}: EOF on stdin before any input",);
     }
     let trimmed = line
         .strip_suffix("\r\n")
@@ -4131,11 +4171,11 @@ fn bind_prompt_var<P: ProcessManager>(
     if cx.state.get_var_typed(clean_var).is_some() {
         cx.state
             .mutate_var(clean_var, text)
-            .with_context(|| format!("PROMPT ${clean_var}"))?;
+            .with_context(|| format!("{KEYWORD_PROMPT} ${clean_var}"))?;
     } else {
         cx.state
             .declare_var(clean_var.to_string(), TypeTag::String, text)
-            .with_context(|| format!("PROMPT ${clean_var}"))?;
+            .with_context(|| format!("{KEYWORD_PROMPT} ${clean_var}"))?;
     }
     Ok(())
 }
@@ -4171,7 +4211,7 @@ pub(super) fn push_into<P: ProcessManager>(
 ) -> Result<()> {
     cx.state
         .push_into_list(var, item)
-        .with_context(|| format!("LIST_APPEND ${var}"))
+        .with_context(|| format!("{KEYWORD_LIST_APPEND} ${var}"))
 }
 
 pub(crate) fn dispatch_push_into_step<P: ProcessManager>(
@@ -4230,7 +4270,7 @@ pub(super) fn append_line<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("APPEND_LINE {path}"))?;
+        .with_context(|| format!("{KEYWORD_APPEND_LINE} {path}"))?;
     cx.state
         .fs
         .ensure_parent_dir(&target)
@@ -4258,7 +4298,7 @@ pub(super) fn remove<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cwd, path)
-        .with_context(|| format!("REMOVE {path}"))?;
+        .with_context(|| format!("{KEYWORD_REMOVE} {path}"))?;
     // Root and working-directory deletion guard: removing the cwd (or any
     // of its ancestors), the workspace root, or the effective root (`/`
     // under `WORKSPACE SYSTEM`) would destroy the execution context or
@@ -4277,7 +4317,7 @@ pub(super) fn remove<P: ProcessManager>(
         || Some(&target) == cx.state.fs.workspace_root()
         || target == *cx.state.fs.root()
     {
-        bail!("REMOVE {path}: cannot remove working directory or workspace root",);
+        bail!("{KEYWORD_REMOVE} {path}: cannot remove working directory or workspace root",);
     }
     // Lexical link probe: canonical resolution routes through the
     // final link, so a link would otherwise read as its target and the
@@ -4286,32 +4326,32 @@ pub(super) fn remove<P: ProcessManager>(
         .state
         .fs
         .remove_link_if_symlink(&cwd, path)
-        .with_context(|| format!("REMOVE {path}"))?
+        .with_context(|| format!("{KEYWORD_REMOVE} {path}"))?
     {
         return Ok(());
     }
     match cx.state.fs.entry_kind_no_follow(&target) {
-        Err(_) => bail!("REMOVE {path}: no such file or directory"),
+        Err(_) => bail!("{KEYWORD_REMOVE} {path}: no such file or directory"),
         Ok(EntryKind::File) => {
             cx.state
                 .fs
                 .remove_file(&target)
-                .with_context(|| format!("REMOVE {path}"))?;
+                .with_context(|| format!("{KEYWORD_REMOVE} {path}"))?;
             Ok(())
         }
         // A link reaching here appeared between the probe and the
         // resolve: fail closed rather than touch its target.
-        Ok(EntryKind::Symlink) => bail!("REMOVE {path}: link changed during removal",),
+        Ok(EntryKind::Symlink) => bail!("{KEYWORD_REMOVE} {path}: link changed during removal",),
         Ok(EntryKind::Dir) => {
             if recursive {
                 cx.state
                     .fs
                     .remove_dir_all(&target)
-                    .with_context(|| format!("REMOVE {path}"))?;
+                    .with_context(|| format!("{KEYWORD_REMOVE} {path}"))?;
                 Ok(())
             } else {
                 cx.state.fs.remove_empty_dir(&target).with_context(|| {
-                    format!("REMOVE {path}: directory not empty (use --recursive)",)
+                    format!("{KEYWORD_REMOVE} {path}: directory not empty (use --recursive)",)
                 })?;
                 Ok(())
             }
@@ -4701,7 +4741,7 @@ pub(crate) fn dispatch_break<P: ProcessManager>(
     let StepKind::Break = step else {
         unreachable!()
     };
-    bail!("BREAK outside loop");
+    bail!("{KEYWORD_BREAK} outside loop");
 }
 
 pub(crate) fn dispatch_continue<P: ProcessManager>(
@@ -4711,7 +4751,7 @@ pub(crate) fn dispatch_continue<P: ProcessManager>(
     let StepKind::Continue = step else {
         unreachable!()
     };
-    bail!("CONTINUE outside loop");
+    bail!("{KEYWORD_CONTINUE} outside loop");
 }
 
 // ── AWAIT / AssignAsync handlers ─────────────────────────────────────────
@@ -4848,7 +4888,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
         let mut child_process = forked_process;
         let entry = entry_rx
             .recv()
-            .map_err(|_| anyhow::anyhow!("ASYNC task entry unavailable"))?;
+            .map_err(|_| anyhow::anyhow!("{KEYWORD_ASYNC} task entry unavailable"))?;
         let flow = super::steps::execute_steps(
             &mut child_state,
             &mut child_process,
@@ -4864,10 +4904,16 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
         match flow {
             Flow::Done => Ok(()),
             Flow::Break { idx } => {
-                anyhow::bail!("step {}: BREAK cannot cross ASYNC boundary", idx + 1);
+                anyhow::bail!(
+                    "step {}: {KEYWORD_BREAK} cannot cross {KEYWORD_ASYNC} boundary",
+                    idx + 1
+                );
             }
             Flow::Continue { idx } => {
-                anyhow::bail!("step {}: CONTINUE cannot cross ASYNC boundary", idx + 1);
+                anyhow::bail!(
+                    "step {}: {KEYWORD_CONTINUE} cannot cross {KEYWORD_ASYNC} boundary",
+                    idx + 1
+                );
             }
             Flow::Return { value, .. } => {
                 // Only an explicit `RETURN` publishes a task value;
@@ -4982,7 +5028,7 @@ fn await_task_entry(
                 drop(guard);
                 // Teardown barrier: never outrun the killer's join.
                 entry.wait_reaped();
-                bail!("AWAIT task '${var}' was cancelled");
+                bail!("{KEYWORD_AWAIT} task '${var}' was cancelled");
             }
             TaskPhase::Completed | TaskPhase::Awaiting => {
                 bail!("task handle for '${var}' was not found or has already been awaited");
@@ -5059,19 +5105,19 @@ fn await_task_entry(
             }
             Decision::Cancelled => {
                 entry.wait_reaped();
-                bail!("AWAIT task '${var}' was cancelled");
+                bail!("{KEYWORD_AWAIT} task '${var}' was cancelled");
             }
             Decision::KillOnTimeout => {
                 if let Some(mut handle) = timeout_kill {
                     let _ = handle.kill();
                 }
                 entry.finish_teardown();
-                bail!("AWAIT task '${var}' interrupted by TIMEOUT");
+                bail!("{KEYWORD_AWAIT} task '${var}' interrupted by {KEYWORD_TIMEOUT}");
             }
             Decision::Done(status) => {
                 entry.finish_teardown();
                 if !status.success() {
-                    bail!("AWAIT task '${var}' failed with status {status}");
+                    bail!("{KEYWORD_AWAIT} task '${var}' failed with status {status}");
                 }
                 return Ok(status);
             }
@@ -5109,7 +5155,7 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
             let label = sigil_var(&member);
             let Some(task_id) = item.as_handle() else {
                 bail!(
-                    "AWAIT '{label}' is not a task handle, got {}",
+                    "{KEYWORD_AWAIT} '{label}' is not a task handle, got {}",
                     item.type_name()
                 );
             };
@@ -5158,7 +5204,7 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
     }
     if returns_value {
         anyhow::bail!(
-            "{kw} ${out_var} = AWAIT ${task_var} fell off the end without RETURN: the task body can return a value on some path but this run produced none"
+            "{kw} ${out_var} = {KEYWORD_AWAIT} ${task_var} fell off the end without {KEYWORD_RETURN}: the task body can return a value on some path but this run produced none"
         );
     }
     let tag = cx.state.resolve_tag(&out_type)?;
@@ -5198,7 +5244,7 @@ pub(crate) fn dispatch_cancel<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_,
         named.get(&task_id).cloned()
     };
     let Some(entry) = entry else {
-        bail!("CANCEL: task '${var}' has already been awaited or does not exist");
+        bail!("{KEYWORD_CANCEL}: task '${var}' has already been awaited or does not exist");
     };
 
     // Transition to Cancelled and take the handle under a short lock.
@@ -5206,10 +5252,10 @@ pub(crate) fn dispatch_cancel<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_,
         let mut guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
         match guard.phase {
             TaskPhase::Cancelled => {
-                bail!("CANCEL: task '${var}' was already cancelled");
+                bail!("{KEYWORD_CANCEL}: task '${var}' was already cancelled");
             }
             TaskPhase::Completed => {
-                bail!("CANCEL: task '${var}' has already been awaited or does not exist");
+                bail!("{KEYWORD_CANCEL}: task '${var}' has already been awaited or does not exist");
             }
             TaskPhase::Running | TaskPhase::Awaiting => {
                 guard.phase = TaskPhase::Cancelled;
@@ -5427,13 +5473,15 @@ fn disarm_deadline<T, P: ProcessManager>(
     match result {
         Ok(value) => {
             if guard.fired.load(Ordering::SeqCst) {
-                bail!("TIMEOUT after {} — deadline exceeded", budget);
+                bail!("{KEYWORD_TIMEOUT} after {} — deadline exceeded", budget);
             }
             Ok(value)
         }
         Err(err) => {
             if guard.fired.load(Ordering::SeqCst) {
-                Err(err).with_context(|| format!("TIMEOUT after {} — deadline exceeded", budget))
+                Err(err).with_context(|| {
+                    format!("{KEYWORD_TIMEOUT} after {} — deadline exceeded", budget)
+                })
             } else {
                 Err(err)
             }
@@ -5543,7 +5591,7 @@ pub(crate) fn isolated<P: ProcessManager>(cx: &mut StepCtx<'_, P>, body: &[Step]
     // Inner steps number from the block, not the script: name the
     // boundary so `step 1: RUN ...` inside ISOLATED never reads as the
     // script's first step.
-    result.with_context(|| "inside ISOLATED block".to_string())
+    result.with_context(|| format!("inside {KEYWORD_ISOLATED} block"))
 }
 
 /// Resolve a block allowlist against the enclosing `ISOLATED` snapshot
@@ -5557,7 +5605,7 @@ pub(crate) fn isolated_inherit_env<P: ProcessManager>(
     keys: &[String],
 ) -> Result<()> {
     let Some(snapshot) = cx.state.isolated_stack.last().cloned() else {
-        bail!("isolated allowlist outside ISOLATED");
+        bail!("isolated allowlist outside {KEYWORD_ISOLATED}");
     };
     let envs = Arc::make_mut(&mut cx.state.envs);
     for key in keys {

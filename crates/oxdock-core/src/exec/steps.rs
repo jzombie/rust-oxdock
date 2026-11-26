@@ -4,10 +4,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::GuardedPath;
-use oxdock_parser::{Arg, AssertTarget, Command, Step, StepKind, Value, guard_option_allows};
+use oxdock_parser::{
+    Arg, AssertTarget, Command, KEYWORD_BREAK, KEYWORD_CONTINUE, KEYWORD_RETURN, Step, StepKind,
+    Value, guard_option_allows,
+};
 use oxdock_process::{BackgroundHandle, CommandStdin, ProcessManager, SharedInput, SharedOutput};
 
 /// Create an ExitStatus from a raw exit code. Cross-platform.
@@ -24,6 +27,7 @@ fn exit_status_from_code(code: i32) -> ExitStatus {
     }
 }
 
+use super::diagnostics as step_diag;
 use super::handlers;
 use super::io::{ExactCapture, SlidingWindow, StreamHandle};
 use super::native::PureTable;
@@ -267,15 +271,14 @@ pub(super) enum ResolvedAssertTarget {
 pub(super) fn resolve_assert_target<P: ProcessManager>(
     target: &AssertTarget,
     cx: &mut StepCtx<'_, P>,
-) -> Result<ResolvedAssertTarget> {
+) -> DiagnosticResult<ResolvedAssertTarget> {
     match target {
         AssertTarget::Value(arg) => {
             let value = super::args::evaluate_assert_operand(arg, cx)?;
             if let Some(handle) = value.as_pipe_handle() {
-                let bytes =
-                    cx.state.io.peek_pipe_content(&handle).map_err(|e| {
-                        anyhow::anyhow!("step pipe assertion cannot read pipe: {e}")
-                    })?;
+                let bytes = cx.state.io.peek_pipe_content(&handle).map_err(|e| {
+                    step_diag::eval_pipe_assertion_read_failed(&anyhow::Error::from(e))
+                })?;
                 return Ok(ResolvedAssertTarget::Pipe(bytes));
             }
             Ok(ResolvedAssertTarget::Value(value))
@@ -1039,9 +1042,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let target = resolve_assert_target(haystack, &mut cx)?;
             handlers::assert_contains(&mut cx, generation, idx, &target, needle)
         }
-        StepKind::WithIoBlock { .. } => {
-            bail!("WITH_IO block should have been expanded during parsing")
-        }
+        StepKind::WithIoBlock { .. } => Err(step_diag::eval_with_io_unexpanded().into()),
         StepKind::Exit(code) => {
             let code = super::args::resolve_arg_as_int(code, &mut cx)?;
             handlers::exit(&mut cx, code)
@@ -1155,7 +1156,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
     for (idx, step) in steps.iter().enumerate() {
         // Check for cancellation before each step
         if state.cancel_token.load(Ordering::SeqCst) {
-            bail!("ASYNC task cancelled");
+            return Err(step_diag::eval_async_cancelled().into());
         }
         if step.scope_enter > 0 {
             for _ in 0..step.scope_enter {
@@ -1298,7 +1299,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
             // hang the reaper forever. Flows into the shared fail-fast
             // teardown below.
             if failed_status.is_none() && state.cancel_token.load(Ordering::SeqCst) {
-                failed_status = Some(anyhow::anyhow!("ASYNC task cancelled"));
+                failed_status = Some(step_diag::eval_async_cancelled().into());
             }
 
             // 1. Poll anonymous background handles. Handles below the
@@ -1314,7 +1315,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                     Ok(Some(status)) => {
                         if !status.success() && failed_status.is_none() {
                             failed_status =
-                                Some(anyhow::anyhow!("ASYNC process exited with status {status}"));
+                                Some(step_diag::eval_async_exit_status(None, &status).into());
                             break;
                         }
                         state.bg_children.swap_remove(i);
@@ -1363,9 +1364,13 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                             if status.success() {
                                                 Poll::CompletedOk
                                             } else {
-                                                Poll::CompletedErr(anyhow::anyhow!(
-                                                    "named ASYNC task {id} exited with status {status}"
-                                                ))
+                                                Poll::CompletedErr(
+                                                    step_diag::eval_async_exit_status(
+                                                        Some(*id),
+                                                        &status,
+                                                    )
+                                                    .into(),
+                                                )
                                             }
                                         }
                                         Ok(None) => Poll::Pending,
@@ -1478,7 +1483,10 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
     Ok(Flow::Done)
 }
 
-fn restore_scopes<P: ProcessManager>(state: &mut ExecState<P>, count: usize) -> Result<()> {
+fn restore_scopes<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    count: usize,
+) -> DiagnosticResult<()> {
     for _ in 0..count {
         state.pop_scope()?;
     }
@@ -1518,13 +1526,13 @@ pub(super) fn execute_scoped_remote_body<P: ProcessManager>(
     match flow {
         Flow::Done => Ok(()),
         Flow::Break { idx } => {
-            bail!("step {}: BREAK cannot cross a REMOTE boundary", idx + 1);
+            Err(step_diag::eval_flow_crosses_remote(idx + 1, KEYWORD_BREAK).into())
         }
         Flow::Continue { idx } => {
-            bail!("step {}: CONTINUE cannot cross a REMOTE boundary", idx + 1);
+            Err(step_diag::eval_flow_crosses_remote(idx + 1, KEYWORD_CONTINUE).into())
         }
         Flow::Return { idx, .. } => {
-            bail!("step {}: RETURN cannot cross a REMOTE boundary", idx + 1);
+            Err(step_diag::eval_flow_crosses_remote(idx + 1, KEYWORD_RETURN).into())
         }
     }
 }

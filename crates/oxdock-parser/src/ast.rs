@@ -11,8 +11,8 @@ use crate::constants::{
     KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
     KEYWORD_DEFAULT, KEYWORD_ECHO, KEYWORD_ELSE, KEYWORD_ENV, KEYWORD_EXIT, KEYWORD_EXPAND,
     KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT,
-    KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET,
-    KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ,
+    KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_INSTALL, KEYWORD_ISOLATED,
+    KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ,
     KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN,
     KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TIMEOUT,
     KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WHILE, KEYWORD_WITH_IO, KEYWORD_WORKDIR,
@@ -1340,7 +1340,7 @@ impl fmt::Display for Expr {
                 write!(f, ")")
             }
             Expr::Inspect { name } => {
-                write!(f, "INSPECT(${})", name)
+                write!(f, "{KEYWORD_INSPECT}(${})", name)
             }
             Expr::List(items) => {
                 write!(f, "[")?;
@@ -1461,7 +1461,7 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
                 stack.push(format!("{}({})", name, args.join(", ")));
             }
             MathOp::Inspect { name } => {
-                stack.push(format!("INSPECT({VAR_SIGIL}{})", name));
+                stack.push(format!("{KEYWORD_INSPECT}({VAR_SIGIL}{})", name));
             }
             MathOp::Neg => {
                 let inner = stack.pop().unwrap_or_else(|| "<underflow>".to_string());

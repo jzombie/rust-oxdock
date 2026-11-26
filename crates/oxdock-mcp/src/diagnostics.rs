@@ -6,6 +6,7 @@
 //! Call sites pass structured data only, never `format!` strings.
 
 use oxdock_diagnostics::Diagnostic;
+use oxdock_parser::KEYWORD_EXPORT;
 
 /// Structured field keys. Single spelling for the whole module:
 /// constructors reference these, never literals, so a key rename is
@@ -127,7 +128,9 @@ pub fn export_status_name_reserved(name: &str) -> Diagnostic {
 pub fn export_no_entries() -> Diagnostic {
     Diagnostic::new(
         "mcp.export.no_entries",
-        "no EXPORT entries: add `EXPORT [NAME, ...]` to expose MCP tools".to_string(),
+        format!(
+            "no {KEYWORD_EXPORT} entries: add `{KEYWORD_EXPORT} [NAME, ...]` to expose MCP tools"
+        ),
         Diagnostic::make_fields(&[]),
     )
 }

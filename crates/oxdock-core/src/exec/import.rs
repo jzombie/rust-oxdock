@@ -19,7 +19,8 @@ use super::diagnostics as import_diag;
 use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::{GuardedPath, WorkspaceFs};
 use oxdock_parser::{
-    ExportKind, Exports, MODULE_SEPARATOR, ModuleTable, Step, StepKind, Value, qualify,
+    ExportKind, Exports, KEYWORD_CONST, KEYWORD_FUNC, KEYWORD_TYPE, MODULE_SEPARATOR, ModuleTable,
+    Step, StepKind, Value, qualify,
 };
 use oxdock_process::ProcessManager;
 
@@ -405,7 +406,7 @@ pub(crate) fn gate_harvested_name(
     let (exported, kind, noun, defined) = match kind {
         ExportKind::Func => (
             &exports.funcs,
-            "FUNC",
+            KEYWORD_FUNC,
             "function",
             steps.iter().any(|step| {
                 matches!(&step.kind, StepKind::FuncDef { name: def, .. } if def.as_str() == name)
@@ -413,8 +414,8 @@ pub(crate) fn gate_harvested_name(
         ),
         ExportKind::Type => (
             &exports.types,
-            "TYPE",
-            "TYPE",
+            KEYWORD_TYPE,
+            KEYWORD_TYPE,
             steps.iter().any(|step| {
                 matches!(&step.kind, StepKind::TypeAlias { name: alias, .. } if alias.as_str() == name)
             }),
@@ -423,7 +424,7 @@ pub(crate) fn gate_harvested_name(
         // expressions through the forward chase, never as harvest
         // requests. The arm exists so callers never restate the kind
         // split; the export scan still applies if one ever arrives.
-        ExportKind::Const => (&exports.consts, "CONST", "CONST", true),
+        ExportKind::Const => (&exports.consts, KEYWORD_CONST, KEYWORD_CONST, true),
     };
     if !exported.iter().any(|e| e == name) {
         return Err(import_diag::import_missing_export(path, kind, name));

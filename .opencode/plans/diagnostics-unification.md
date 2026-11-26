@@ -1810,6 +1810,73 @@ transport, so this phase is mechanical:
    preservation plus the verbatim fallback.
    Core 410 plus integration 629 green;
    clippy and fmt clean.
+   Step helper-cluster bulk step 2026-11-26:
+   five new dsl.eval.* ctors in
+   exec/diagnostics.rs with key plus wording
+   pins (pipe_assertion_read_failed verbatim
+   passthrough, with_io_unexpanded
+   parameterless, async_cancelled
+   parameterless, async_exit_status with
+   task Option<u64> plus platform
+   ExitStatus, flow_crosses_remote with step
+   plus word). Two signatures flip in
+   exec/steps.rs (resolve_assert_target,
+   restore_scopes) to DiagnosticResult; the
+   WITH_IO arm plus ASYNC cancelled plus
+   reaper plus named-task plus REMOTE
+   crossing arms re-key through the new
+   ctors with anyhow::Error::new inner wraps
+   where the ctor takes &anyhow::Error. The
+   three REMOTE call-site words ride
+   KEYWORD_BREAK/CONTINUE/RETURN (constants
+   sweep, bytes identical). Clippy
+   needless_return shed on the three REMOTE
+   tails. Core 410 plus integration 629
+   green; clippy and fmt clean.
+   Constants sweep bulk step 2026-11-26 (per
+   user whole-codebase direction): every
+   user-facing message template outside
+   oxdock-fs interpolates the shared
+   KEYWORD_*/FUNC_*/*_TYPE_NAME constants
+   instead of restating spellings; bytes
+   stay identical (constants render the
+   same text) and pinning tests hold.
+   Touched: core exec/diagnostics.rs (95
+   templates plus VOID import),
+   steps/import/state/static_check
+   call-site kinds and spellings,
+   handlers/remote/mod/native message
+   sites, exit.rs Display, parser
+   diagnostics/commands/command/tag/
+   literal/ast/parser messages and
+   renderers, mcp plus process plus net
+   plus ssh plus markdown diagnostics,
+   net remote/session.rs contexts.
+   Mechanical guards: plain "..."
+   .to_string() sites become format! with
+   brace escaping; .context("...") sites
+   become .with_context(|| format!(...));
+   eprintln DEBUG, option specs,
+   #[oxdock_*] attrs, docs:/summary:/
+   syntax:/description: (all &'static
+   str, uninterpolatable), internal
+   .expect(...) panics, test pins and
+   scripts, and plugin registry names
+   (no shared FUNC_ owner) stay literal.
+   with_io_syntax/with_io_bindings become
+   fns (concat! rejects const refs).
+   Deliberate exception: oxdock-fs keeps
+   literals (adding oxdock-parser there is
+   a dependency cycle: parser -> pipe ->
+   fs). Pre-existing failures unchanged
+   (ssh escaping_key_path plus
+   non_map_serve_options fail on clean
+   tree; snapshot_hash_parity green after
+   the sweep). Core 410 plus integration
+   629, parser 267 plus 303, net 38,
+   process 121, fs 71 green; clippy at
+   baseline, fmt clean on all touched
+   files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

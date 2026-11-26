@@ -76,6 +76,7 @@ use oxdock_fs::{
     GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs, reserve_cargo_scratch,
 };
 use oxdock_parser::Step;
+use oxdock_parser::{KEYWORD_ASYNC, KEYWORD_BREAK, KEYWORD_CONTINUE, KEYWORD_LET, KEYWORD_RETURN};
 use oxdock_process::{
     BuiltinEnv, DefaultProcessManager, ProcessManager, SharedInput, SharedOutput,
     default_process_manager,
@@ -653,17 +654,17 @@ fn finish_run<P: ProcessManager>(
             Ok((state.fs.concretize_cwd(&state.cwd), state.fs, bindings))
         }
         self::steps::Flow::Break { idx } => {
-            anyhow::bail!("step {}: BREAK outside loop", idx + 1)
+            anyhow::bail!("step {}: {KEYWORD_BREAK} outside loop", idx + 1)
         }
         self::steps::Flow::Continue { idx } => {
-            anyhow::bail!("step {}: CONTINUE outside loop", idx + 1)
+            anyhow::bail!("step {}: {KEYWORD_CONTINUE} outside loop", idx + 1)
         }
         self::steps::Flow::Return { idx, .. } => {
             // Values only cross a boundary: a function call, an ASYNC
             // task, or an inline LET block. With none enclosing, the
             // pipeline top rejects it like any other escaped flow.
             anyhow::bail!(
-                "step {}: RETURN outside function, ASYNC task, or LET block",
+                "step {}: {KEYWORD_RETURN} outside function, {KEYWORD_ASYNC} task, or {KEYWORD_LET} block",
                 idx + 1
             )
         }

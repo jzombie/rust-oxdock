@@ -18,6 +18,10 @@ use crate::constants::{
     KEYWORD_SLEEP, KEYWORD_SYMLINK, KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO,
     KEYWORD_WORKDIR, KEYWORD_WORKSPACE, KEYWORD_WRITE, SCRIPT_MODULE_NAME,
 };
+use crate::tag::{
+    BOOL_TYPE_NAME, FLOAT_TYPE_NAME, HANDLE_TYPE_NAME, INT_TYPE_NAME, LIST_TYPE_NAME,
+    STRING_TYPE_NAME,
+};
 
 /// Structured field keys. Single spelling for the whole module:
 /// constructors reference these, never literals, so a key rename is
@@ -154,7 +158,7 @@ pub fn spelling_unterminated_string(got: &str) -> Diagnostic {
 /// Expected a default literal.
 pub fn spelling_expected_literal(got: &str) -> Diagnostic {
     let message = format!(
-        "expected default literal (INT, FLOAT, BOOL, or quoted STRING) in type spelling, found {got:?}"
+        "expected default literal ({INT_TYPE_NAME}, {FLOAT_TYPE_NAME}, {BOOL_TYPE_NAME}, or quoted {STRING_TYPE_NAME}) in type spelling, found {got:?}"
     );
     Diagnostic::new(
         "dsl.spelling.expected_literal",
@@ -683,7 +687,7 @@ pub fn let_capture_async() -> Diagnostic {
     Diagnostic::new(
         "dsl.structural.let_capture_async",
         format!(
-            "{KEYWORD_LET} capture cannot run {KEYWORD_ASYNC}/{KEYWORD_AWAIT}/{KEYWORD_CANCEL} inline; use {KEYWORD_LET} $t: HANDLE<T> = {KEYWORD_ASYNC} ... then {KEYWORD_LET} $o: STRING = {KEYWORD_AWAIT} $t"
+            "{KEYWORD_LET} capture cannot run {KEYWORD_ASYNC}/{KEYWORD_AWAIT}/{KEYWORD_CANCEL} inline; use {KEYWORD_LET} $t: {HANDLE_TYPE_NAME}<T> = {KEYWORD_ASYNC} ... then {KEYWORD_LET} $o: {STRING_TYPE_NAME} = {KEYWORD_AWAIT} $t"
         ),
         Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
@@ -935,7 +939,7 @@ pub fn list_append_requires_list() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.list_append_requires_list",
         format!(
-            "{KEYWORD_LIST_APPEND} requires a LIST variable (e.g. {KEYWORD_LIST_APPEND} $items $x)"
+            "{KEYWORD_LIST_APPEND} requires a {LIST_TYPE_NAME} variable (e.g. {KEYWORD_LIST_APPEND} $items $x)"
         ),
         Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_LIST_APPEND)]),
     )

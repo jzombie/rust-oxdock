@@ -9,6 +9,7 @@
 //! and function labels ride as structured fields with rendering here.
 
 use oxdock_diagnostics::Diagnostic;
+use oxdock_parser::{HANDLE_TYPE_NAME, KEYWORD_ASYNC, KEYWORD_LET};
 
 /// Structured field keys. Single spelling for the whole module:
 /// constructors reference these, never literals, so a key rename is
@@ -350,8 +351,9 @@ pub fn dequeue_server_closed(func: &str) -> Diagnostic {
 pub fn dequeue_requires_async() -> Diagnostic {
     Diagnostic::new(
         "ssh.dequeue.requires_async",
-        "SSH_DEQUEUE requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC { SSH_DEQUEUE($server.server) }"
-            .to_string(),
+        format!(
+            "SSH_DEQUEUE requires {KEYWORD_ASYNC}: wrap it as {KEYWORD_LET} $t: {HANDLE_TYPE_NAME}<T> = {KEYWORD_ASYNC} {{ SSH_DEQUEUE($server.server) }}"
+        ),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -361,8 +363,9 @@ pub fn dequeue_requires_async() -> Diagnostic {
 pub fn accept_requires_async() -> Diagnostic {
     Diagnostic::new(
         "ssh.accept.requires_async",
-        "SSH_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC { SSH_ACCEPT($server, $in, $out) }"
-            .to_string(),
+        format!(
+            "SSH_ACCEPT requires {KEYWORD_ASYNC}: wrap it as {KEYWORD_LET} $t: {HANDLE_TYPE_NAME}<T> = {KEYWORD_ASYNC} {{ SSH_ACCEPT($server, $in, $out) }}"
+        ),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -372,7 +375,9 @@ pub fn accept_requires_async() -> Diagnostic {
 pub fn pump_channel_requires_async() -> Diagnostic {
     Diagnostic::new(
         "ssh.pump_channel.requires_async",
-        "SSH_PUMP_CHANNEL requires ASYNC: pump it in its own task after SSH_DEQUEUE".to_string(),
+        format!(
+            "SSH_PUMP_CHANNEL requires {KEYWORD_ASYNC}: pump it in its own task after SSH_DEQUEUE"
+        ),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -382,7 +387,9 @@ pub fn pump_channel_requires_async() -> Diagnostic {
 pub fn connect_requires_async() -> Diagnostic {
     Diagnostic::new(
         "ssh.connect.requires_async",
-        "SSH_CONNECT requires ASYNC: run it in its own task beside the SSH_PUMP tasks".to_string(),
+        format!(
+            "SSH_CONNECT requires {KEYWORD_ASYNC}: run it in its own task beside the SSH_PUMP tasks"
+        ),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -411,8 +418,9 @@ pub fn connect_username_empty() -> Diagnostic {
 pub fn pty_run_requires_async() -> Diagnostic {
     Diagnostic::new(
         "ssh.pty_run.requires_async",
-        "SSH_PTY_RUN requires ASYNC: run it in its own task beside the session pump task"
-            .to_string(),
+        format!(
+            "SSH_PTY_RUN requires {KEYWORD_ASYNC}: run it in its own task beside the session pump task"
+        ),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -421,7 +429,9 @@ pub fn pty_run_requires_async() -> Diagnostic {
 pub fn run_requires_async() -> Diagnostic {
     Diagnostic::new(
         "ssh.run.requires_async",
-        "SSH_RUN requires ASYNC: run it in its own task beside the session pump task".to_string(),
+        format!(
+            "SSH_RUN requires {KEYWORD_ASYNC}: run it in its own task beside the session pump task"
+        ),
         Diagnostic::make_fields(&[]),
     )
 }

@@ -86,8 +86,9 @@ use oxdock_parser::template::{
     PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
 };
 use oxdock_parser::{
-    CompareOp, ExportKind, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag,
-    Value, base_name, qualify, render_structural, sigil_var, split_qualified,
+    ANY_TYPE_NAME, CompareOp, ExportKind, Expr, GuardExpr, IoBinding, LIST_TYPE_NAME,
+    MAP_TYPE_NAME, MathOp, PipeTarget, Step, StepKind, TypeTag, Value, base_name, qualify,
+    render_structural, sigil_var, split_qualified,
 };
 use oxdock_process::ProcessManager;
 
@@ -5456,9 +5457,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         };
         if matches!(first, TypeTag::Any) || !tags.iter().all(|tag| tags_equal(first, tag)) {
             let join = if tags.iter().all(is_maplike) {
-                Some("LIST<MAP<ANY>>")
+                Some(format!(
+                    "{LIST_TYPE_NAME}<{MAP_TYPE_NAME}<{ANY_TYPE_NAME}>>"
+                ))
             } else if tags.iter().all(is_listlike) {
-                Some("LIST<LIST<ANY>>")
+                Some(format!(
+                    "{LIST_TYPE_NAME}<{LIST_TYPE_NAME}<{ANY_TYPE_NAME}>>"
+                ))
             } else {
                 None
             };
@@ -5467,11 +5472,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             };
             return Ok(self
                 .exec
-                .resolve_tag(spelling)
+                .resolve_tag(&spelling)
                 .map(StaticTy::Ty)
                 .unwrap_or(StaticTy::Ty(TypeTag::List)));
         }
-        let spelling = format!("LIST<{}>", render_structural(first));
+        let spelling = format!("{LIST_TYPE_NAME}<{}>", render_structural(first));
         Ok(self
             .exec
             .resolve_tag(&spelling)
@@ -5502,7 +5507,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         if parts.is_empty() {
             return Ok(StaticTy::Ty(TypeTag::Map));
         }
-        let spelling = format!("MAP<{}>", parts.join(", "));
+        let spelling = format!("{MAP_TYPE_NAME}<{}>", parts.join(", "));
         Ok(self
             .exec
             .resolve_tag(&spelling)

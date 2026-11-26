@@ -306,9 +306,9 @@ impl TypeTag {
 /// kind. Single renderer for `DESCRIBE` and oxdock-render alike.
 pub fn render_structural(tag: &TypeTag) -> String {
     match tag {
-        TypeTag::ListOf(inner) => format!("LIST<{}>", render_structural(inner)),
-        TypeTag::HandleOf(inner) => format!("HANDLE<{}>", render_structural(inner)),
-        TypeTag::MapOf(values) => format!("MAP<{}>", render_structural(values)),
+        TypeTag::ListOf(inner) => format!("{LIST_TYPE_NAME}<{}>", render_structural(inner)),
+        TypeTag::HandleOf(inner) => format!("{HANDLE_TYPE_NAME}<{}>", render_structural(inner)),
+        TypeTag::MapOf(values) => format!("{MAP_TYPE_NAME}<{}>", render_structural(values)),
         TypeTag::Record(fields) => {
             let field_list = fields
                 .iter()
@@ -332,7 +332,7 @@ pub fn render_structural(tag: &TypeTag) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("MAP<{field_list}>")
+            format!("{MAP_TYPE_NAME}<{field_list}>")
         }
         tag => tag.name().to_string(),
     }
@@ -891,18 +891,27 @@ pub fn check_value_at(tag: &TypeTag, value: &Value, path: &str) -> Result<()> {
         TypeTag::Pipe if value.as_pipe_handle().is_some() => Ok(()),
         TypeTag::Handle if value.as_handle().is_some() => Ok(()),
         TypeTag::HandleOf(_) if value.as_handle().is_some() => Ok(()),
-        TypeTag::Void => bail!("{path}: expected VOID, got {}", value.type_name()),
+        TypeTag::Void => bail!(
+            "{path}: expected {VOID_TYPE_NAME}, got {}",
+            value.type_name()
+        ),
         TypeTag::Duration if value.as_duration().is_some() => Ok(()),
         TypeTag::Path if value.as_path().is_some() => Ok(()),
         TypeTag::Semaphore if value.as_semaphore().is_some() => Ok(()),
         TypeTag::Permit if value.as_permit().is_some() => Ok(()),
         TypeTag::List => match value.as_list() {
             Some(_) => Ok(()),
-            None => bail!("{path}: expected LIST, got {}", value.type_name()),
+            None => bail!(
+                "{path}: expected {LIST_TYPE_NAME}, got {}",
+                value.type_name()
+            ),
         },
         TypeTag::Map => match value.as_map() {
             Some(_) => Ok(()),
-            None => bail!("{path}: expected MAP, got {}", value.type_name()),
+            None => bail!(
+                "{path}: expected {MAP_TYPE_NAME}, got {}",
+                value.type_name()
+            ),
         },
         TypeTag::ListOf(element) => match value.as_list() {
             Some(items) => {
@@ -911,7 +920,10 @@ pub fn check_value_at(tag: &TypeTag, value: &Value, path: &str) -> Result<()> {
                 }
                 Ok(())
             }
-            None => bail!("{path}: expected LIST, got {}", value.type_name()),
+            None => bail!(
+                "{path}: expected {LIST_TYPE_NAME}, got {}",
+                value.type_name()
+            ),
         },
         TypeTag::MapOf(values) => match value.as_map() {
             Some(map) => {
@@ -955,7 +967,10 @@ pub fn check_value_at(tag: &TypeTag, value: &Value, path: &str) -> Result<()> {
                 }
                 Ok(())
             }
-            None => bail!("{path}: expected MAP, got {}", value.type_name()),
+            None => bail!(
+                "{path}: expected {MAP_TYPE_NAME}, got {}",
+                value.type_name()
+            ),
         },
         TypeTag::Custom(descriptor) => {
             if value.type_name() == descriptor.name {

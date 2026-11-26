@@ -10,6 +10,10 @@
 
 use oxdock_diagnostics::Diagnostic;
 use oxdock_fs::env as oxdock_env;
+use oxdock_parser::{
+    KEYWORD_INHERIT_ENV, KEYWORD_LET, KEYWORD_RUN, PERMIT_TYPE_NAME, PIPE_TYPE_NAME,
+    SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME,
+};
 
 /// Structured field keys. Single spelling for the whole module:
 /// constructors reference these, never literals, so a key rename is
@@ -249,7 +253,9 @@ pub fn key_path_on_primitive(root: &str, segment: &str) -> Diagnostic {
 pub fn render_pipe() -> Diagnostic {
     Diagnostic::new(
         "proc.expand.render_pipe",
-        "cannot render PIPE as STRING: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: STRING = ... instead.".to_string(),
+        format!(
+            "cannot render {PIPE_TYPE_NAME} as {STRING_TYPE_NAME}: pipes carry streams between steps, not text. Capture the producing step's output with {KEYWORD_LET} $var: {STRING_TYPE_NAME} = ... instead."
+        ),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -259,7 +265,9 @@ pub fn render_pipe() -> Diagnostic {
 pub fn render_semaphore() -> Diagnostic {
     Diagnostic::new(
         "proc.expand.render_semaphore",
-        "cannot render SEMAPHORE as STRING: semaphores coordinate task access between steps, not text.".to_string(),
+        format!(
+            "cannot render {SEMAPHORE_TYPE_NAME} as {STRING_TYPE_NAME}: semaphores coordinate task access between steps, not text."
+        ),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -269,7 +277,9 @@ pub fn render_semaphore() -> Diagnostic {
 pub fn render_permit() -> Diagnostic {
     Diagnostic::new(
         "proc.expand.render_permit",
-        "cannot render PERMIT as STRING: permits grant scoped task access, not text.".to_string(),
+        format!(
+            "cannot render {PERMIT_TYPE_NAME} as {STRING_TYPE_NAME}: permits grant scoped task access, not text."
+        ),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -288,7 +298,7 @@ pub fn run_interpreter_unsupported_miri() -> Diagnostic {
 pub fn run_exec_requires_argv() -> Diagnostic {
     Diagnostic::new(
         "proc.run.exec_requires_argv",
-        "RUN exec form requires at least one argument".to_string(),
+        format!("{KEYWORD_RUN} exec form requires at least one argument"),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -298,7 +308,7 @@ pub fn run_exec_requires_argv() -> Diagnostic {
 pub fn run_exec_requires_program() -> Diagnostic {
     Diagnostic::new(
         "proc.run.exec_requires_program",
-        "RUN exec form requires a non-empty executable".to_string(),
+        format!("{KEYWORD_RUN} exec form requires a non-empty executable"),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -566,7 +576,7 @@ pub fn run_argv_unimplemented(argv: &[String]) -> Diagnostic {
 /// declared env contract, never literals.
 pub fn spawn_requires_path(program: &str) -> Diagnostic {
     let message = format!(
-        "cannot resolve '{program}' without {} in the script environment; declare INHERIT_ENV [{}]",
+        "cannot resolve '{program}' without {} in the script environment; declare {KEYWORD_INHERIT_ENV} [{}]",
         oxdock_env::os::PATH,
         oxdock_env::os::PATH,
     );
@@ -582,7 +592,7 @@ pub fn spawn_requires_path(program: &str) -> Diagnostic {
 /// env contract, never literals.
 pub fn spawn_requires_system_root() -> Diagnostic {
     let message = format!(
-        "Windows process execution requires {} in the script environment; declare INHERIT_ENV [{}]",
+        "Windows process execution requires {} in the script environment; declare {KEYWORD_INHERIT_ENV} [{}]",
         oxdock_env::os::windows::SYSTEM_ROOT,
         oxdock_env::os::windows::SYSTEM_ROOT,
     );

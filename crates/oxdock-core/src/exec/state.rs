@@ -6,7 +6,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use super::diagnostics as state_diag;
 use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs, WorkspaceSelection};
-use oxdock_parser::{Field, GuardExpr, Step, TypeDescriptor, TypeTag, Value, sigil_var};
+use oxdock_parser::{
+    Field, GuardExpr, KEYWORD_TYPE, LIST_TYPE_NAME, Step, TypeDescriptor, TypeTag, Value, sigil_var,
+};
 use oxdock_process::{BackgroundHandle, CancelHub, CommandContext, ProcessManager};
 
 use super::exit::exit_code_of;
@@ -1257,7 +1259,7 @@ impl<P: ProcessManager> ExecState<P> {
             .rev()
             .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
             .or_else(|| self.module_var(key).map(|(k, _)| k.clone()))
-            .ok_or_else(|| state_diag::eval_undeclared_declare(key, "TYPE"))?;
+            .ok_or_else(|| state_diag::eval_undeclared_declare(key, KEYWORD_TYPE))?;
         let coerced = super::args::coerce_value(value, &kind)?;
         for scope in self.var_scopes.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(key) {
@@ -1290,7 +1292,9 @@ impl<P: ProcessManager> ExecState<P> {
             .rev()
             .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
             .or_else(|| self.module_var(key).map(|(k, _)| k.clone()))
-            .ok_or_else(|| state_diag::eval_undeclared_declare(key, "LIST<...>"))?;
+            .ok_or_else(|| {
+                state_diag::eval_undeclared_declare(key, &format!("{LIST_TYPE_NAME}<...>"))
+            })?;
         let element = match kind {
             TypeTag::List => None,
             TypeTag::ListOf(element) => Some(element.as_ref().clone()),

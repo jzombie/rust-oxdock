@@ -12,6 +12,7 @@
 //! the invoker or option as a structured field.
 
 use oxdock_diagnostics::Diagnostic;
+use oxdock_parser::{HANDLE_TYPE_NAME, KEYWORD_ASYNC, KEYWORD_LET, KEYWORD_REMOTE};
 
 use crate::validate::{EndpointKey, VirtualEndpoint};
 
@@ -558,8 +559,9 @@ pub fn listen_protocol_qualified(bind: &str) -> Diagnostic {
 pub fn accept_requires_async() -> Diagnostic {
     Diagnostic::new(
         "net.func.accept_requires_async",
-        "NET_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC { NET_ACCEPT($l, $in, $out, {}) }"
-            .to_string(),
+        format!(
+            "NET_ACCEPT requires {KEYWORD_ASYNC}: wrap it as {KEYWORD_LET} $t: {HANDLE_TYPE_NAME}<T> = {KEYWORD_ASYNC} {{ NET_ACCEPT($l, $in, $out, {{}}) }}"
+        ),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -601,8 +603,9 @@ pub fn accept_failed(err: &std::io::Error) -> Diagnostic {
 pub fn connect_requires_async() -> Diagnostic {
     Diagnostic::new(
         "net.func.connect_requires_async",
-        "NET_CONNECT requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC { NET_CONNECT($target, $in, $out, {}) }"
-            .to_string(),
+        format!(
+            "NET_CONNECT requires {KEYWORD_ASYNC}: wrap it as {KEYWORD_LET} $t: {HANDLE_TYPE_NAME}<T> = {KEYWORD_ASYNC} {{ NET_CONNECT($target, $in, $out, {{}}) }}"
+        ),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -648,7 +651,7 @@ pub fn fetch_option_exceeds_u32(option: &str, value: u64) -> Diagnostic {
 pub fn remote_transport_command_empty() -> Diagnostic {
     Diagnostic::new(
         "net.remote.transport_command_empty",
-        "REMOTE transport command is empty".to_string(),
+        format!("{KEYWORD_REMOTE} transport command is empty"),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -657,14 +660,14 @@ pub fn remote_transport_command_empty() -> Diagnostic {
 pub fn remote_block_cancelled() -> Diagnostic {
     Diagnostic::new(
         "net.remote.block_cancelled",
-        "REMOTE block cancelled".to_string(),
+        format!("{KEYWORD_REMOTE} block cancelled"),
         Diagnostic::make_fields(&[]),
     )
 }
 
 /// Unknown response tag. Takes the tag byte; rendering lives here.
 pub fn remote_unknown_response_tag(tag: u8) -> Diagnostic {
-    let message = format!("REMOTE target sent unknown response tag {tag}");
+    let message = format!("{KEYWORD_REMOTE} target sent unknown response tag {tag}");
     Diagnostic::new(
         "net.remote.unknown_response_tag",
         message,
@@ -677,7 +680,7 @@ pub fn remote_unknown_response_tag(tag: u8) -> Diagnostic {
 pub fn remote_result_no_staged_tarball() -> Diagnostic {
     Diagnostic::new(
         "net.remote.result_no_staged_tarball",
-        "REMOTE result arrived with no staged tarball".to_string(),
+        format!("{KEYWORD_REMOTE} result arrived with no staged tarball"),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -686,7 +689,8 @@ pub fn remote_result_no_staged_tarball() -> Diagnostic {
 /// reason (defaulting inside); rendering lives here.
 pub fn remote_handshake_rejected(target: &str, reason: Option<&str>) -> Diagnostic {
     let reason_text = reason.unwrap_or("no reason given");
-    let message = format!("REMOTE target '{target}' rejected the handshake: {reason_text}");
+    let message =
+        format!("{KEYWORD_REMOTE} target '{target}' rejected the handshake: {reason_text}");
     Diagnostic::new(
         "net.remote.handshake_rejected",
         message,
@@ -698,7 +702,7 @@ pub fn remote_handshake_rejected(target: &str, reason: Option<&str>) -> Diagnost
 /// rendering lives here.
 pub fn remote_proto_digest_mismatch(target: &str, host: &str, guest: &str) -> Diagnostic {
     let message = format!(
-        "REMOTE target '{target}' protocol digest mismatch (host {host} guest {guest}): rebuild and reinstall matching oxdock on the guest"
+        "{KEYWORD_REMOTE} target '{target}' protocol digest mismatch (host {host} guest {guest}): rebuild and reinstall matching oxdock on the guest"
     );
     Diagnostic::new(
         "net.remote.proto_digest_mismatch",
@@ -715,7 +719,7 @@ pub fn remote_proto_digest_mismatch(target: &str, host: &str, guest: &str) -> Di
 /// rendering lives here.
 pub fn remote_language_mismatch(target: &str, host: &str, guest: &str) -> Diagnostic {
     let message = format!(
-        "REMOTE target '{target}' language surface mismatch (host {host} guest {guest}): rebuild and reinstall matching oxdock on the guest"
+        "{KEYWORD_REMOTE} target '{target}' language surface mismatch (host {host} guest {guest}): rebuild and reinstall matching oxdock on the guest"
     );
     Diagnostic::new(
         "net.remote.language_mismatch",
@@ -732,7 +736,7 @@ pub fn remote_language_mismatch(target: &str, host: &str, guest: &str) -> Diagno
 /// renders inline.
 pub fn remote_response_failed(err: &anyhow::Error) -> Diagnostic {
     let err_text = format!("{err:#}");
-    let message = format!("REMOTE response failed: {err_text}");
+    let message = format!("{KEYWORD_REMOTE} response failed: {err_text}");
     Diagnostic::new(
         "net.remote.response_failed",
         message,
@@ -742,7 +746,7 @@ pub fn remote_response_failed(err: &anyhow::Error) -> Diagnostic {
 
 /// Exec with no result frame. Takes the target; rendering lives here.
 pub fn remote_no_result_frame(target: &str) -> Diagnostic {
-    let message = format!("REMOTE target '{target}' sent no result frame");
+    let message = format!("{KEYWORD_REMOTE} target '{target}' sent no result frame");
     Diagnostic::new(
         "net.remote.no_result_frame",
         message,
@@ -754,7 +758,7 @@ pub fn remote_no_result_frame(target: &str) -> Diagnostic {
 /// reason (defaulting inside); rendering lives here.
 pub fn remote_target_failed(target: &str, reason: Option<&str>) -> Diagnostic {
     let reason_text = reason.unwrap_or("no reason given");
-    let message = format!("REMOTE target '{target}' failed: {reason_text}");
+    let message = format!("{KEYWORD_REMOTE} target '{target}' failed: {reason_text}");
     Diagnostic::new(
         "net.remote.target_failed",
         message,
@@ -765,7 +769,7 @@ pub fn remote_target_failed(target: &str, reason: Option<&str>) -> Diagnostic {
 /// Script integrity mismatch. Takes the target; rendering lives here.
 pub fn remote_script_sha_mismatch(target: &str) -> Diagnostic {
     let message = format!(
-        "REMOTE target '{target}' executed different script bytes than shipped (transport corruption)"
+        "{KEYWORD_REMOTE} target '{target}' executed different script bytes than shipped (transport corruption)"
     );
     Diagnostic::new(
         "net.remote.script_sha_mismatch",
@@ -776,7 +780,8 @@ pub fn remote_script_sha_mismatch(target: &str) -> Diagnostic {
 
 /// Stdout integrity mismatch. Takes the target; rendering lives here.
 pub fn remote_stdout_sha_mismatch(target: &str) -> Diagnostic {
-    let message = format!("REMOTE target '{target}' stdout hash mismatch (transport corruption)");
+    let message =
+        format!("{KEYWORD_REMOTE} target '{target}' stdout hash mismatch (transport corruption)");
     Diagnostic::new(
         "net.remote.stdout_sha_mismatch",
         message,
@@ -787,7 +792,7 @@ pub fn remote_stdout_sha_mismatch(target: &str) -> Diagnostic {
 /// Exec with no result tarball. Takes the target; rendering lives
 /// here.
 pub fn remote_no_result_tarball(target: &str) -> Diagnostic {
-    let message = format!("REMOTE target '{target}' sent no result tarball");
+    let message = format!("{KEYWORD_REMOTE} target '{target}' sent no result tarball");
     Diagnostic::new(
         "net.remote.no_result_tarball",
         message,
@@ -798,8 +803,9 @@ pub fn remote_no_result_tarball(target: &str) -> Diagnostic {
 /// Push tarball integrity mismatch. Takes the target; rendering lives
 /// here.
 pub fn remote_push_tarball_sha_mismatch(target: &str) -> Diagnostic {
-    let message =
-        format!("REMOTE target '{target}' push tarball sha256 mismatch (transport corruption)");
+    let message = format!(
+        "{KEYWORD_REMOTE} target '{target}' push tarball sha256 mismatch (transport corruption)"
+    );
     Diagnostic::new(
         "net.remote.push_tarball_sha_mismatch",
         message,
@@ -811,7 +817,7 @@ pub fn remote_push_tarball_sha_mismatch(target: &str) -> Diagnostic {
 /// the path; `Debug` quoting lives here. Shared by dir, file, and
 /// symlink entries: one key, one mode.
 pub fn remote_undeclared_path(target: &str, path: &str) -> Diagnostic {
-    let message = format!("REMOTE target '{target}' returned undeclared path {path:?}");
+    let message = format!("{KEYWORD_REMOTE} target '{target}' returned undeclared path {path:?}");
     Diagnostic::new(
         "net.remote.undeclared_path",
         message,
@@ -836,7 +842,7 @@ pub fn remote_arg_malformed(raw: &str) -> Diagnostic {
 /// lives here.
 pub fn remote_target_invalid(target: &str) -> Diagnostic {
     let message = format!(
-        "invalid --remote target {target:?}: start alphanumeric, then alphanumeric, `_`, or `-`, max 64 chars, never SNAPSHOT, LOCAL, CACHE, SYSTEM, or REMOTE"
+        "invalid --remote target {target:?}: start alphanumeric, then alphanumeric, `_`, or `-`, max 64 chars, never SNAPSHOT, LOCAL, CACHE, SYSTEM, or {KEYWORD_REMOTE}"
     );
     Diagnostic::new(
         "net.remote.target_invalid",

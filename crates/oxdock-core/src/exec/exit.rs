@@ -6,6 +6,8 @@
 
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
+use oxdock_parser::KEYWORD_EXIT;
+
 /// Pipeline exit request carrying the numeric code. Produced by `EXIT`,
 /// re-raised by `REMOTE` when the guest exits, and mapped to the process
 /// exit status by the CLI.
@@ -14,7 +16,7 @@ pub struct ExitRequest(pub i64);
 
 impl Display for ExitRequest {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "EXIT requested with code {}", self.0)
+        write!(f, "{KEYWORD_EXIT} requested with code {}", self.0)
     }
 }
 

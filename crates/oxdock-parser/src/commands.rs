@@ -37,6 +37,7 @@ use crate::constants::{
 };
 use crate::diagnostics as dsl_diag;
 use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
+use crate::tag::{HANDLE_TYPE_NAME, PIPE_TYPE_NAME, STRING_TYPE_NAME, VOID_TYPE_NAME};
 use indoc::indoc;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -483,70 +484,70 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
     match name {
         name if name == KEYWORD_WITH_IO => Some(with_io_hint(&got, received)),
         name if name == KEYWORD_AWAIT => Some(format!(
-            "AWAIT waits for a background task variable, e.g. `LET $t: HANDLE<VOID> = ASYNC ECHO hi` then `AWAIT $t`; got {got}"
+            "{KEYWORD_AWAIT} waits for a background task variable, e.g. `{KEYWORD_LET} $t: {HANDLE_TYPE_NAME}<{VOID_TYPE_NAME}> = {KEYWORD_ASYNC} {KEYWORD_ECHO} hi` then `{KEYWORD_AWAIT} $t`; got {got}"
         )),
         name if name == KEYWORD_CANCEL => Some(format!(
-            "CANCEL stops a background task variable, e.g. `CANCEL $t` (from `LET $t: HANDLE<VOID> = ASYNC ...`); got {got}"
+            "{KEYWORD_CANCEL} stops a background task variable, e.g. `{KEYWORD_CANCEL} $t` (from `{KEYWORD_LET} $t: {HANDLE_TYPE_NAME}<{VOID_TYPE_NAME}> = {KEYWORD_ASYNC} ...`); got {got}"
         )),
         name if name == KEYWORD_ASYNC => Some(format!(
-            "ASYNC runs a command in the background, e.g. `ASYNC RUN ...`, `ASYNC {{ ... }}`, or `LET $t: HANDLE<T> = ASYNC ...`; got {got}"
+            "{KEYWORD_ASYNC} runs a command in the background, e.g. `{KEYWORD_ASYNC} {KEYWORD_RUN} ...`, `{KEYWORD_ASYNC} {{ ... }}`, or `{KEYWORD_LET} $t: {HANDLE_TYPE_NAME}<T> = {KEYWORD_ASYNC} ...`; got {got}"
         )),
         name if name == KEYWORD_FOR => Some(format!(
-            "FOR loops need `FOR $item: TYPE IN <expr> {{ ... }}` (or `FOR $key: STRING, $value: TYPE IN <expr> {{ ... }}`); got {got}"
+            "{KEYWORD_FOR} loops need `{KEYWORD_FOR} $item: {KEYWORD_TYPE} IN <expr> {{ ... }}` (or `{KEYWORD_FOR} $key: {STRING_TYPE_NAME}, $value: {KEYWORD_TYPE} IN <expr> {{ ... }}`); got {got}"
         )),
         name if name == KEYWORD_IF => Some(format!(
-            "IF needs a condition and a block, e.g. `IF true {{ ECHO yes }}`; got {got}"
+            "{KEYWORD_IF} needs a condition and a block, e.g. `{KEYWORD_IF} true {{ {KEYWORD_ECHO} yes }}`; got {got}"
         )),
         name if name == KEYWORD_ELSE => Some(format!(
-            "ELSE must directly follow an `IF ... {{ ... }}` block, e.g. `IF true {{ ECHO yes }} ELSE {{ ECHO no }}`; got {got}"
+            "{KEYWORD_ELSE} must directly follow an `{KEYWORD_IF} ... {{ ... }}` block, e.g. `{KEYWORD_IF} true {{ {KEYWORD_ECHO} yes }} {KEYWORD_ELSE} {{ {KEYWORD_ECHO} no }}`; got {got}"
         )),
         name if name == KEYWORD_SWITCH => Some(format!(
-            "SWITCH needs a value or bare condition list plus braced CASE arms, e.g. `SWITCH $cmd {{ CASE \"a\" {{ ECHO yes }} DEFAULT {{ ECHO no }} }}`; got {got}"
+            "{KEYWORD_SWITCH} needs a value or bare condition list plus braced {KEYWORD_CASE} arms, e.g. `{KEYWORD_SWITCH} $cmd {{ {KEYWORD_CASE} \"a\" {{ {KEYWORD_ECHO} yes }} {KEYWORD_DEFAULT} {{ {KEYWORD_ECHO} no }} }}`; got {got}"
         )),
         name if name == KEYWORD_CASE => Some(format!(
-            "CASE only appears inside a SWITCH body, e.g. `SWITCH $cmd {{ CASE \"a\", \"b\" {{ ECHO yes }} }}`; got {got}"
+            "{KEYWORD_CASE} only appears inside a {KEYWORD_SWITCH} body, e.g. `{KEYWORD_SWITCH} $cmd {{ {KEYWORD_CASE} \"a\", \"b\" {{ {KEYWORD_ECHO} yes }} }}`; got {got}"
         )),
         name if name == KEYWORD_DEFAULT => Some(format!(
-            "DEFAULT only appears inside a SWITCH body, e.g. `SWITCH $cmd {{ CASE \"a\" {{ ECHO yes }} DEFAULT {{ ECHO no }} }}`; got {got}"
+            "{KEYWORD_DEFAULT} only appears inside a {KEYWORD_SWITCH} body, e.g. `{KEYWORD_SWITCH} $cmd {{ {KEYWORD_CASE} \"a\" {{ {KEYWORD_ECHO} yes }} {KEYWORD_DEFAULT} {{ {KEYWORD_ECHO} no }} }}`; got {got}"
         )),
         name if name == KEYWORD_LET => Some(format!(
-            "LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE<T> = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = {{ ... }}` (inline block); got {got}"
+            "{KEYWORD_LET} assigns a variable, e.g. `{KEYWORD_LET} $name: {STRING_TYPE_NAME} = <expr>`, `{KEYWORD_LET} $t: {HANDLE_TYPE_NAME}<T> = {KEYWORD_ASYNC} ...`, `{KEYWORD_LET} $out: {STRING_TYPE_NAME} = <command>` (capture), `{KEYWORD_LET} $out: {STRING_TYPE_NAME} = {KEYWORD_AWAIT} $t`, or `{KEYWORD_LET} $var: {KEYWORD_TYPE} = {{ ... }}` (inline block); got {got}"
         )),
         "SET" => Some(
             "`SET` is not a keyword; mutate a declared variable with `$var = <expr>`, e.g. `$count = 2`".to_string(),
         ),
         name if name == KEYWORD_TIMEOUT => Some(format!(
-            "TIMEOUT needs a duration and a command or block, e.g. `TIMEOUT 30s RUN ...`; got {got}"
+            "{KEYWORD_TIMEOUT} needs a duration and a command or block, e.g. `{KEYWORD_TIMEOUT} 30s {KEYWORD_RUN} ...`; got {got}"
         )),
         name if name == KEYWORD_FAIL => Some(format!(
-            "FAIL needs a message, a code, or a block, e.g. `FAIL \"boom\"`, `FAIL 2 \"boom\"`, or `FAIL \"boom\" {{ ECHO usage }}`; got {got}"
+            "{KEYWORD_FAIL} needs a message, a code, or a block, e.g. `{KEYWORD_FAIL} \"boom\"`, `{KEYWORD_FAIL} 2 \"boom\"`, or `{KEYWORD_FAIL} \"boom\" {{ {KEYWORD_ECHO} usage }}`; got {got}"
         )),
         name if name == KEYWORD_REMOTE => Some(format!(
-            "REMOTE needs a target and a braced block, e.g. `REMOTE prod [$version, env:DEPLOY_ENV] {{ ... }}`; got {got}"
+            "{KEYWORD_REMOTE} needs a target and a braced block, e.g. `{KEYWORD_REMOTE} prod [$version, env:DEPLOY_ENV] {{ ... }}`; got {got}"
         )),
         name if name == KEYWORD_FUNC => Some(format!(
-            "FUNC defines a function, e.g. `FUNC GREET($name: STRING): STRING {{ RETURN $name }}`; got {got}"
+            "{KEYWORD_FUNC} defines a function, e.g. `{KEYWORD_FUNC} GREET($name: {STRING_TYPE_NAME}): {STRING_TYPE_NAME} {{ {KEYWORD_RETURN} $name }}`; got {got}"
         )),
         name if name == KEYWORD_RETURN => Some(format!(
-            "RETURN ends the nearest function, ASYNC task, or inline LET block with a value, e.g. `RETURN $x`; got {got}"
+            "{KEYWORD_RETURN} ends the nearest function, {KEYWORD_ASYNC} task, or inline {KEYWORD_LET} block with a value, e.g. `{KEYWORD_RETURN} $x`; got {got}"
         )),
         name if name == KEYWORD_WHILE => Some(format!(
-            "WHILE needs a Bool condition and a block, e.g. `WHILE !$done {{ ... }}`; got {got}"
+            "{KEYWORD_WHILE} needs a Bool condition and a block, e.g. `{KEYWORD_WHILE} !$done {{ ... }}`; got {got}"
         )),
         name if name == KEYWORD_BREAK => Some(
-            "`BREAK` exits the innermost enclosing FOR/WHILE loop or SWITCH; it must appear inside a loop or SWITCH".to_string(),
+            "`{KEYWORD_BREAK}` exits the innermost enclosing {KEYWORD_FOR}/{KEYWORD_WHILE} loop or {KEYWORD_SWITCH}; it must appear inside a loop or {KEYWORD_SWITCH}".to_string(),
         ),
         name if name == KEYWORD_CONTINUE => Some(
-            "`CONTINUE` skips to the next iteration of the innermost enclosing FOR/WHILE loop; it must appear inside a loop (a SWITCH never captures it)".to_string(),
+            "`{KEYWORD_CONTINUE}` skips to the next iteration of the innermost enclosing {KEYWORD_FOR}/{KEYWORD_WHILE} loop; it must appear inside a loop (a {KEYWORD_SWITCH} never captures it)".to_string(),
         ),
         name if name == KEYWORD_INHERIT_ENV => Some(format!(
-            "INHERIT_ENV takes a key list, e.g. `INHERIT_ENV [HOME, PATH]`; got {got}"
+            "{KEYWORD_INHERIT_ENV} takes a key list, e.g. `{KEYWORD_INHERIT_ENV} [HOME, PATH]`; got {got}"
         )),
         name if name == KEYWORD_IMPORT => Some(format!(
-            "IMPORT brings module functions into bare-call scope, e.g. `IMPORT [STD]` or `IMPORT [STD, MOCK]`; file imports take a quoted path with a mandatory alias, e.g. `IMPORT [\"./lib.oxdock\" AS LIB]`, and brackets mix both across lines, e.g. `IMPORT [STD, \"a.oxdock\" AS A]`; got {got}"
+            "{KEYWORD_IMPORT} brings module functions into bare-call scope, e.g. `{KEYWORD_IMPORT} [STD]` or `{KEYWORD_IMPORT} [STD, MOCK]`; file imports take a quoted path with a mandatory alias, e.g. `{KEYWORD_IMPORT} [\"./lib.oxdock\" AS LIB]`, and brackets mix both across lines, e.g. `{KEYWORD_IMPORT} [STD, \"a.oxdock\" AS A]`; got {got}"
         )),
         name if name == KEYWORD_EXPORT => Some(
-            "EXPORT marks script FUNCs and qualified host functions as tools, e.g. `EXPORT FOO`, `EXPORT [FOO, STD::INT]`"
+            "{KEYWORD_EXPORT} marks script FUNCs and qualified host functions as tools, e.g. `{KEYWORD_EXPORT} FOO`, `{KEYWORD_EXPORT} [FOO, STD::INT]`"
                 .to_string(),
         ),
         _ => None,
@@ -557,13 +558,23 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
 /// binding list (bindings are bare streams, `<stream>=$var`, bare `tty`,
 /// or `rows`/`cols` dimensions).
 fn with_io_hint(got: &str, received: &str) -> String {
-    const SYNTAX: &str =
-        "WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`";
-    const BINDINGS: &str = "bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`); `tty` is a bare flag for RUN steps, with `rows = <int>` / `cols = <int>` geometry (e.g. `[tty, rows=40, cols=100]`)";
+    fn with_io_syntax() -> String {
+        format!(
+            "{KEYWORD_WITH_IO} needs `{KEYWORD_WITH_IO} [bindings] <command>` or `{KEYWORD_WITH_IO} [bindings] {{ <commands> }}`"
+        )
+    }
+    fn with_io_bindings() -> String {
+        format!(
+            "bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a {PIPE_TYPE_NAME}-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`); `tty` is a bare flag for {KEYWORD_RUN} steps, with `rows = <int>` / `cols = <int>` geometry (e.g. `[tty, rows=40, cols=100]`)"
+        )
+    }
     if let Some(after_open) = received.strip_prefix('[') {
         match after_open.split_once(']') {
             None => {
-                return format!("{SYNTAX}: missing closing `]` in the binding list; got {got}");
+                return format!(
+                    "{}: missing closing `]` in the binding list; got {got}",
+                    with_io_syntax()
+                );
             }
             Some((bindings, _)) => {
                 for part in bindings.split(',') {
@@ -583,7 +594,8 @@ fn with_io_hint(got: &str, received: &str) -> String {
                         });
                         if !valid {
                             return format!(
-                                "{SYNTAX}: invalid geometry `{part}`; `rows`/`cols` need a positive integer 1-65535 (e.g. `rows=40`) and require `tty`; got {got}"
+                                "{}: invalid geometry `{part}`; `rows`/`cols` need a positive integer 1-65535 (e.g. `rows=40`) and require `tty`; got {got}",
+                                with_io_syntax()
                             );
                         }
                         continue;
@@ -591,14 +603,16 @@ fn with_io_hint(got: &str, received: &str) -> String {
                     if stream == "tty" {
                         if binding.is_some() {
                             return format!(
-                                "{SYNTAX}: invalid binding `{part}`; `tty` is a bare flag (geometry rides `rows`/`cols`, e.g. `[tty, rows=40]`); got {got}"
+                                "{}: invalid binding `{part}`; `tty` is a bare flag (geometry rides `rows`/`cols`, e.g. `[tty, rows=40]`); got {got}",
+                                with_io_syntax()
                             );
                         }
                         continue;
                     }
                     if !matches!(stream, "stdin" | "stdout" | "stderr") {
                         return format!(
-                            "{SYNTAX}: invalid stream `{stream}`; expected `stdin`, `stdout`, `stderr`, or `tty`; got {got}"
+                            "{}: invalid stream `{stream}`; expected `stdin`, `stdout`, `stderr`, or `tty`; got {got}",
+                            with_io_syntax()
                         );
                     }
                     let valid = match binding {
@@ -610,14 +624,16 @@ fn with_io_hint(got: &str, received: &str) -> String {
                     };
                     if !valid {
                         return format!(
-                            "{SYNTAX}: invalid binding `{part}`; {BINDINGS}; got {got}"
+                            "{}: invalid binding `{part}`; {}; got {got}",
+                            with_io_syntax(),
+                            with_io_bindings()
                         );
                     }
                 }
             }
         }
     }
-    format!("{SYNTAX}; got {got}; {BINDINGS}")
+    format!("{}; got {got}; {}", with_io_syntax(), with_io_bindings())
 }
 
 /// `echo hi` is almost certainly `ECHO hi`: commands are uppercase.

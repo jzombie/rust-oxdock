@@ -1,6 +1,10 @@
 use crate::ast::{Arg, Expr, StepKind};
 use crate::diagnostics as dsl_diag;
 use crate::error::{ParseError, ParseErrorKind, SpanContext};
+use crate::{
+    BOOL_TYPE_NAME, DURATION_TYPE_NAME, INT_TYPE_NAME, KEYWORD_TIMEOUT, LIST_TYPE_NAME,
+    PATH_TYPE_NAME, STRING_TYPE_NAME,
+};
 use anyhow::{Result, anyhow, bail};
 
 /// Metadata for a single command argument.
@@ -53,11 +57,11 @@ impl ArgType {
     /// command syntax.
     pub fn label(&self) -> String {
         match self {
-            ArgType::String => "STRING".to_string(),
-            ArgType::Path => "PATH".to_string(),
-            ArgType::Int => "INT".to_string(),
-            ArgType::Duration => "DURATION".to_string(),
-            ArgType::List => "LIST".to_string(),
+            ArgType::String => STRING_TYPE_NAME.to_string(),
+            ArgType::Path => PATH_TYPE_NAME.to_string(),
+            ArgType::Int => INT_TYPE_NAME.to_string(),
+            ArgType::Duration => DURATION_TYPE_NAME.to_string(),
+            ArgType::List => LIST_TYPE_NAME.to_string(),
             ArgType::Any => "<any>".to_string(),
             ArgType::OneOf(options) => options.join("|"),
             ArgType::Rest(inner) => format!("{}...", inner.label()),
@@ -69,11 +73,11 @@ impl ArgType {
     /// unlinked.
     pub fn anchor(&self) -> Option<String> {
         match self {
-            ArgType::String => Some(crate::value::type_anchor("STRING")),
-            ArgType::Path => Some(crate::value::type_anchor("PATH")),
-            ArgType::Int => Some(crate::value::type_anchor("INT")),
-            ArgType::Duration => Some(crate::value::type_anchor("DURATION")),
-            ArgType::List => Some(crate::value::type_anchor("LIST")),
+            ArgType::String => Some(crate::value::type_anchor(STRING_TYPE_NAME)),
+            ArgType::Path => Some(crate::value::type_anchor(PATH_TYPE_NAME)),
+            ArgType::Int => Some(crate::value::type_anchor(INT_TYPE_NAME)),
+            ArgType::Duration => Some(crate::value::type_anchor(DURATION_TYPE_NAME)),
+            ArgType::List => Some(crate::value::type_anchor(LIST_TYPE_NAME)),
             ArgType::Any => None,
             ArgType::OneOf(_) => None,
             ArgType::Rest(inner) => inner.anchor(),
@@ -375,12 +379,12 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
     };
     let n: u64 = digits
         .parse()
-        .map_err(|_| anyhow!("invalid TIMEOUT duration: {s}"))?;
+        .map_err(|_| anyhow!("invalid {KEYWORD_TIMEOUT} duration: {s}"))?;
     let millis = n
         .checked_mul(unit_ms)
-        .ok_or_else(|| anyhow!("TIMEOUT duration out of range: {s}"))?;
+        .ok_or_else(|| anyhow!("{KEYWORD_TIMEOUT} duration out of range: {s}"))?;
     if millis == 0 {
-        bail!("TIMEOUT duration must be positive, got: {s}");
+        bail!("{KEYWORD_TIMEOUT} duration must be positive, got: {s}");
     }
     Ok(std::time::Duration::from_millis(millis))
 }
@@ -589,9 +593,9 @@ impl FlagValueType {
     /// switch carries no value; `BOOL` names what its presence asserts.
     pub fn label(&self) -> &'static str {
         match self {
-            FlagValueType::Flag => "BOOL",
-            FlagValueType::String => "STRING",
-            FlagValueType::Int => "INT",
+            FlagValueType::Flag => BOOL_TYPE_NAME,
+            FlagValueType::String => STRING_TYPE_NAME,
+            FlagValueType::Int => INT_TYPE_NAME,
         }
     }
 }

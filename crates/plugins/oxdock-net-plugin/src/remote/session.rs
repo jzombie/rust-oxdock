@@ -31,6 +31,7 @@ use muxio_rpc_service_caller::dynamic_channel::{DynamicChannelType, DynamicRecei
 use muxio_sync_rpc_client::RpcSyncClient;
 use oxdock_core::{RemoteRequest, RemoteResponse, RemoteRunner};
 use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
+use oxdock_parser::KEYWORD_REMOTE;
 use oxdock_remote_proto::{channel, methods, types};
 use oxdock_utils::{hex_encode, tar};
 use sha2::Digest;
@@ -102,7 +103,7 @@ impl RemoteRunner for StdioSession {
         let mut full_args: Vec<&str> = argv;
         full_args.push("--remote-serve");
         let (client, transport) = spawn_transport(program, &full_args, &request.envs)
-            .context("REMOTE transport spawn failed")?;
+            .context(format!("{KEYWORD_REMOTE} transport spawn failed"))?;
         let session = MuxioSession::new(client, &request, transport)?;
         session.run(request, fs, &self.config)
     }
@@ -145,7 +146,9 @@ fn spawn_transport(
         .stderr(std::process::Stdio::inherit());
     child.env_clear();
     child.envs(&staged);
-    let mut child = child.spawn().context("REMOTE transport spawn failed")?;
+    let mut child = child
+        .spawn()
+        .context(format!("{KEYWORD_REMOTE} transport spawn failed"))?;
     let stdin: std::process::ChildStdin = child.stdin.take().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::BrokenPipe, "child has no piped stdin")
     })?;
@@ -237,13 +240,15 @@ impl MuxioSession {
             self.client
                 .call_rpc_streaming(request, DynamicChannelType::Unbounded),
         )
-        .context("REMOTE streaming call failed")?;
+        .context(format!("{KEYWORD_REMOTE} streaming call failed"))?;
         write_all(&mut encoder, payload)?;
-        encoder.end_stream().context("REMOTE end_stream failed")?;
+        encoder
+            .end_stream()
+            .context(format!("{KEYWORD_REMOTE} end_stream failed"))?;
         let mut items = Vec::new();
         let mut receiver = receiver;
         while let Some(item) = futures_executor::block_on(receiver.next()) {
-            items.push(item.context("REMOTE response item failed")?);
+            items.push(item.context(format!("{KEYWORD_REMOTE} response item failed"))?);
         }
         Ok(items)
     }
@@ -261,7 +266,7 @@ impl MuxioSession {
             self.client
                 .call_rpc_streaming(request, DynamicChannelType::Unbounded),
         )
-        .context("REMOTE streaming call failed")?;
+        .context(format!("{KEYWORD_REMOTE} streaming call failed"))?;
         Ok((Arc::new(Mutex::new(encoder)), receiver))
     }
 
@@ -405,7 +410,10 @@ impl MuxioSession {
         let mut entries: Vec<(String, u64, Box<dyn Read + Send>)> = Vec::new();
         for (guest_rel, host_path) in &request.fetch_files {
             let len = fs.metadata(host_path).map(|m| m.len()).with_context(|| {
-                format!("REMOTE fetch source unreadable: {}", host_path.display())
+                format!(
+                    "{KEYWORD_REMOTE} fetch source unreadable: {}",
+                    host_path.display()
+                )
             })?;
             entries.push((
                 guest_rel.clone(),
@@ -473,13 +481,14 @@ impl MuxioSession {
             modules: config.modules.clone(),
             module_hash: config.module_hash.clone(),
         };
-        let hello_bytes = serde_json::to_vec(&hello).context("REMOTE hello encode failed")?;
+        let hello_bytes =
+            serde_json::to_vec(&hello).context(format!("{KEYWORD_REMOTE} hello encode failed"))?;
         let mut verdict_bytes = Vec::new();
         for item in self.roundtrip(methods::HANDSHAKE, &hello_bytes)? {
             verdict_bytes.extend_from_slice(&item);
         }
-        let verdict: types::HandshakeVerdict =
-            serde_json::from_slice(&verdict_bytes).context("REMOTE verdict decode failed")?;
+        let verdict: types::HandshakeVerdict = serde_json::from_slice(&verdict_bytes)
+            .context(format!("{KEYWORD_REMOTE} verdict decode failed"))?;
         if !verdict.accepted {
             return Err(anyhow::Error::new(net_diag::remote_handshake_rejected(
                 &request.target,
@@ -507,8 +516,8 @@ impl MuxioSession {
         let (mut fetch_stage, fetch_sha, _fetch_len, mut descriptor) =
             Self::stage_fetch(request, fs, &scratch)?;
         descriptor.sha256.clone_from(&fetch_sha);
-        let descriptor_json =
-            serde_json::to_vec(&descriptor).context("REMOTE fetch descriptor encode failed")?;
+        let descriptor_json = serde_json::to_vec(&descriptor)
+            .context(format!("{KEYWORD_REMOTE} fetch descriptor encode failed"))?;
 
         // Exec call: fetch section, script section, then live stdin.
         let (encoder, receiver) = self.open_stream(methods::EXEC)?;
@@ -541,7 +550,7 @@ impl MuxioSession {
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner())
                     .end_stream()
-                    .context("REMOTE stdin end failed")?;
+                    .context(format!("{KEYWORD_REMOTE} stdin end failed"))?;
             }
         }
 
@@ -586,15 +595,18 @@ impl MuxioSession {
                 &request.target,
             )));
         };
-        let result: types::ExecResult =
-            serde_json::from_slice(&result_json).context("REMOTE result decode failed")?;
+        let result: types::ExecResult = serde_json::from_slice(&result_json)
+            .context(format!("{KEYWORD_REMOTE} result decode failed"))?;
         if !result.ok {
             // Guest EXIT relays its code as a typed request so the host
             // re-raises it as its own EXIT (see `run_remote_block`); every
             // other guest failure keeps the plain message.
             if let Some(code) = result.exit_code {
                 return Err(oxdock_core::ExitRequest(code)).with_context(|| {
-                    format!("REMOTE target '{}' exited with code {code}", request.target)
+                    format!(
+                        "{KEYWORD_REMOTE} target '{}' exited with code {code}",
+                        request.target
+                    )
                 });
             }
             return Err(anyhow::Error::new(net_diag::remote_target_failed(
@@ -695,7 +707,8 @@ struct TransferScratch {
 
 impl TransferScratch {
     fn new() -> Result<Self> {
-        let tempdir = GuardedPath::tempdir().context("REMOTE transfer scratch tempdir failed")?;
+        let tempdir = GuardedPath::tempdir()
+            .context(format!("{KEYWORD_REMOTE} transfer scratch tempdir failed"))?;
         let root = tempdir.as_guarded_path().clone();
         let resolver = PathResolver::new(root.root(), root.root())?;
         Ok(Self {
@@ -740,8 +753,10 @@ fn next_spill_id() -> u64 {
 fn write_all(encoder: &mut Encoder, bytes: &[u8]) -> Result<()> {
     encoder
         .write_bytes(bytes)
-        .context("REMOTE stream write failed")?;
-    encoder.flush().context("REMOTE stream flush failed")?;
+        .context(format!("{KEYWORD_REMOTE} stream write failed"))?;
+    encoder
+        .flush()
+        .context(format!("{KEYWORD_REMOTE} stream flush failed"))?;
     Ok(())
 }
 

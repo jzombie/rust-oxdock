@@ -8,9 +8,10 @@ use oxdock_fs::{GuardedPath, WorkspaceSelection};
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::value::HandleValue;
 use oxdock_parser::{
-    Field, GuardExpr, KEYWORD_INSPECT, MODULE_SEPARATOR, SCRIPT_MODULE_NAME, STD_MODULE_NAME,
-    SemaphoreState, Step, TypeTag, Value, base_name, guards_overlap, qualify, render_structural,
-    split_qualified,
+    Field, GuardExpr, KEYWORD_CONST, KEYWORD_EXPORT, KEYWORD_FROM, KEYWORD_FUNC, KEYWORD_IMPORT,
+    KEYWORD_INSPECT, KEYWORD_LET, KEYWORD_TYPE, MODULE_SEPARATOR, SCRIPT_MODULE_NAME,
+    STD_MODULE_NAME, SemaphoreState, Step, TypeTag, Value, base_name, guards_overlap, qualify,
+    render_structural, split_qualified,
 };
 use oxdock_pipe::PipeHandle;
 use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
@@ -282,7 +283,7 @@ pub(super) fn missing_import_hint<'a>(
                 // invalid escapes inside the quoted suggestion.
                 let path = to_forward_slashes(file);
                 format!(
-                    "file \"{file}\" exports `{base}`: add `[FUNC {base} FROM \"{path}\"]` to an IMPORT"
+                    "file \"{file}\" exports `{base}`: add `[{KEYWORD_FUNC} {base} {KEYWORD_FROM} \"{path}\"]` to an {KEYWORD_IMPORT}"
                 )
             }
         };
@@ -336,10 +337,10 @@ pub(super) fn missing_const_hint<S: ModuleGraphView>(
         .iter()
         .find_map(|file| match view.binding(file, name) {
             BindingPresence::Const => Some(format!(
-                "module holds `{name}` as CONST but does not export it: add `EXPORT CONST ${name}`"
+                "module holds `{name}` as {KEYWORD_CONST} but does not export it: add `{KEYWORD_EXPORT} {KEYWORD_CONST} ${name}`"
             )),
             BindingPresence::Let => Some(format!(
-                "`{name}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+                "`{name}` is a {KEYWORD_LET} binding and cannot be exported: only {KEYWORD_CONST} bindings cross the module boundary"
             )),
             BindingPresence::Absent => None,
         })
@@ -472,7 +473,7 @@ pub(super) enum BrokenDetail {
 impl std::fmt::Display for ForwardError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ForwardError::Unknown { original } => write!(f, "unknown CONST `{original}`"),
+            ForwardError::Unknown { original } => write!(f, "unknown {KEYWORD_CONST} `{original}`"),
             ForwardError::Broken {
                 original,
                 hop,
@@ -481,10 +482,10 @@ impl std::fmt::Display for ForwardError {
                 let base = base_name(hop);
                 let detail = match detail {
                     BrokenDetail::UnexportedConst => format!(
-                        "module holds `{base}` as CONST but does not export it: add `EXPORT CONST ${base}`"
+                        "module holds `{base}` as {KEYWORD_CONST} but does not export it: add `{KEYWORD_EXPORT} {KEYWORD_CONST} ${base}`"
                     ),
                     BrokenDetail::Let => format!(
-                        "`{base}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+                        "`{base}` is a {KEYWORD_LET} binding and cannot be exported: only {KEYWORD_CONST} bindings cross the module boundary"
                     ),
                     BrokenDetail::Absent => {
                         let (forward, _) = split_qualified(hop).unwrap_or(("", base));
@@ -493,21 +494,25 @@ impl std::fmt::Display for ForwardError {
                 };
                 write!(
                     f,
-                    "unknown CONST `{original}`: re-export `{hop}` does not resolve: {detail}"
+                    "unknown {KEYWORD_CONST} `{original}`: re-export `{hop}` does not resolve: {detail}"
                 )
             }
             ForwardError::Split { original, hops } => write!(
                 f,
-                "ambiguous CONST `{original}`: re-exported from {}; export exactly one source",
+                "ambiguous {KEYWORD_CONST} `{original}`: re-exported from {}; export exactly one source",
                 hops.join(" and ")
             ),
             ForwardError::Cycle { chain } => {
-                write!(f, "CONST re-export cycle detected: {}", chain.join(" -> "))
+                write!(
+                    f,
+                    "{KEYWORD_CONST} re-export cycle detected: {}",
+                    chain.join(" -> ")
+                )
             }
             ForwardError::HopAmbiguous { alias, base, files } => write!(
                 f,
                 "{}",
-                ambiguous_alias_message(alias, base, files).replacen("function", "CONST", 1)
+                ambiguous_alias_message(alias, base, files).replacen("function", KEYWORD_CONST, 1)
             ),
         }
     }
@@ -1162,17 +1167,17 @@ pub(super) fn describe_placeholder_miss(
             format!("{qualified}(...)")
         };
         return Some(format!(
-            "placeholder function '{qualified}' is a script function and cannot run in {{{{ }}}}; bind the result first with LET $v = {call} then interpolate {{{{ $v }}}}"
+            "placeholder function '{qualified}' is a script function and cannot run in {{{{ }}}}; bind the result first with {KEYWORD_LET} $v = {call} then interpolate {{{{ $v }}}}"
         ));
     }
     if is_stateful {
         return Some(format!(
-            "placeholder function '{qualified}' is stateful and cannot run in {{{{ }}}}; capture it first with LET then interpolate {{{{ $v }}}}"
+            "placeholder function '{qualified}' is stateful and cannot run in {{{{ }}}}; capture it first with {KEYWORD_LET} then interpolate {{{{ $v }}}}"
         ));
     }
     if alias_known {
         return Some(format!(
-            "placeholder function '{qualified}': no function '{name}' under file alias '{module}'; check the file's EXPORT list and the IMPORT harvest, or bind a known function first with LET then interpolate {{{{ $v }}}}"
+            "placeholder function '{qualified}': no function '{name}' under file alias '{module}'; check the file's {KEYWORD_EXPORT} list and the {KEYWORD_IMPORT} harvest, or bind a known function first with {KEYWORD_LET} then interpolate {{{{ $v }}}}"
         ));
     }
     None
@@ -3417,7 +3422,7 @@ impl<P: ProcessManager> OxDockFn<P> for ParseFlags {
             }
             let mut iter = values.into_iter();
             let args_val = iter.next().expect("arity checked above");
-            let args = string_list_arg(&args_val, "PARSE_FLAGS() argument `$args`")?;
+            let args = string_list_arg(&args_val, "{FUNC_PARSE_FLAGS}() argument `$args`")?;
             let specs = resolve_flags_specs(cx)?;
             let (raw, positionals) = tokenize_raw_args(args)?;
             if !positionals.is_empty() {
@@ -3710,7 +3715,7 @@ fn type_describe<P: ProcessManager>(
         map.insert(
             "docs".to_string(),
             Value::string(format!(
-                "Declared with TYPE {name} = {target}. The alias expands structurally at every declaration."
+                "Declared with {KEYWORD_TYPE} {name} = {target}. The alias expands structurally at every declaration."
             )),
         );
         return Ok(Value::map(map));

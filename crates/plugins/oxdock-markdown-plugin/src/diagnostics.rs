@@ -10,6 +10,9 @@
 //! key.
 
 use oxdock_diagnostics::Diagnostic;
+use oxdock_parser::{
+    BOOL_TYPE_NAME, FLOAT_TYPE_NAME, INT_TYPE_NAME, LIST_TYPE_NAME, MAP_TYPE_NAME, STRING_TYPE_NAME,
+};
 
 /// Structured field keys. Single spelling for the whole module:
 /// constructors reference these, never literals, so a key rename is
@@ -28,7 +31,7 @@ const FIELD_NEEDLE: &str = "needle";
 /// same failure mode, one key.
 pub fn table_unrenderable_type(type_name: &str) -> Diagnostic {
     let message = format!(
-        "MAP_TO_MD_TABLE cannot render {type_name} values; use STRING, INT, FLOAT, BOOL, LIST, or MAP"
+        "MAP_TO_MD_TABLE cannot render {type_name} values; use {STRING_TYPE_NAME}, {INT_TYPE_NAME}, {FLOAT_TYPE_NAME}, {BOOL_TYPE_NAME}, {LIST_TYPE_NAME}, or {MAP_TYPE_NAME}"
     );
     Diagnostic::new(
         "md.table.unrenderable_type",
@@ -54,7 +57,7 @@ pub fn table_non_finite_float(value: f64) -> Diagnostic {
 pub fn table_expects_map_or_list() -> Diagnostic {
     Diagnostic::new(
         "md.table.expects_map_or_list",
-        "MAP_TO_MD_TABLE expects a MAP or a LIST of MAPs".to_string(),
+        format!("MAP_TO_MD_TABLE expects a {MAP_TYPE_NAME} or a {LIST_TYPE_NAME} of MAPs"),
         Diagnostic::make_fields(&[]),
     )
 }

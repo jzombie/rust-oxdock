@@ -25,7 +25,10 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result, bail};
 use oxdock_fs::{EntryKind, GuardedPath};
-use oxdock_parser::{Step, render_dsl_literal, render_quoted, render_structural};
+use oxdock_parser::{
+    KEYWORD_COPY, KEYWORD_ENV, KEYWORD_LET, KEYWORD_REMOTE, KEYWORD_WITH_IO, Step,
+    render_dsl_literal, render_quoted, render_structural,
+};
 use oxdock_pipe::PipeInner;
 use oxdock_process::ProcessManager;
 
@@ -61,7 +64,9 @@ pub(super) fn copy_transfer<P: ProcessManager>(
     to: &oxdock_parser::Arg,
 ) -> Result<()> {
     if !cx.state.io.is_remote_guest() {
-        bail!("COPY --from-host and --to-host execute only inside a remote guest session");
+        bail!(
+            "{KEYWORD_COPY} --from-host and --to-host execute only inside a remote guest session"
+        );
     }
     if to_host {
         // Resolve now, against live scope: the manifest records what ran,
@@ -368,11 +373,11 @@ fn resolve_header<P: ProcessManager>(
     let mut lines = Vec::new();
     for name in vars {
         let Some((decl_type, value)) = cx.state.get_var_typed(name) else {
-            bail!("REMOTE '{target}' uses unknown variable ${name}");
+            bail!("{KEYWORD_REMOTE} '{target}' uses unknown variable ${name}");
         };
         let literal = render_dsl_literal(&value).with_context(|| {
             format!(
-                "cannot pass ${name}: {} into REMOTE '{target}' (pass bytes via WITH_IO, files via the workspace)",
+                "cannot pass ${name}: {} into {KEYWORD_REMOTE} '{target}' (pass bytes via {KEYWORD_WITH_IO}, files via the workspace)",
                 value.type_name()
             )
         })?;
@@ -380,15 +385,15 @@ fn resolve_header<P: ProcessManager>(
         // word: the guest re-parses these lines under the same rules,
         // so a coarse word the guest rejects would break the seal.
         lines.push(format!(
-            "LET ${name}: {} = {literal}",
+            "{KEYWORD_LET} ${name}: {} = {literal}",
             render_structural(&decl_type)
         ));
     }
     for name in env_names {
         let Some(value) = cx.get_env(name) else {
-            bail!("REMOTE '{target}' uses unknown env {name}");
+            bail!("{KEYWORD_REMOTE} '{target}' uses unknown env {name}");
         };
-        lines.push(format!("ENV {name}={}", render_quoted(&value)));
+        lines.push(format!("{KEYWORD_ENV} {name}={}", render_quoted(&value)));
     }
     Ok(lines)
 }
@@ -454,7 +459,7 @@ fn resolve_one_fetch<P: ProcessManager>(
         // actually executes. Unconditional declarations fail fast here.
         Err(_) if !decl.unconditional => return Ok(()),
         Err(_) => {
-            bail!("REMOTE fetch source missing: {}", decl.host_rel);
+            bail!("{KEYWORD_REMOTE} fetch source missing: {}", decl.host_rel);
         }
     };
     // Guest-dest mapping first so directory fan-out anchors correctly.
@@ -481,7 +486,7 @@ fn resolve_one_fetch<P: ProcessManager>(
                     }
                     if files.len() + dirs.len() > MAX_TRANSFER_ENTRIES {
                         bail!(
-                            "REMOTE fetch hit the {MAX_TRANSFER_ENTRIES} entry cap: {} names too many paths",
+                            "{KEYWORD_REMOTE} fetch hit the {MAX_TRANSFER_ENTRIES} entry cap: {} names too many paths",
                             decl.host_rel
                         );
                     }
@@ -497,7 +502,10 @@ fn resolve_one_fetch<P: ProcessManager>(
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
                     .with_context(|| {
-                        format!("REMOTE fetch source has no file name: {}", decl.host_rel)
+                        format!(
+                            "{KEYWORD_REMOTE} fetch source has no file name: {}",
+                            decl.host_rel
+                        )
                     })?;
                 format!("{dest_base}{base}")
             } else {
@@ -506,7 +514,10 @@ fn resolve_one_fetch<P: ProcessManager>(
             files.push((dest, source));
         }
         Err(err) => {
-            bail!("REMOTE fetch source missing: {} ({err:#})", decl.host_rel);
+            bail!(
+                "{KEYWORD_REMOTE} fetch source missing: {} ({err:#})",
+                decl.host_rel
+            );
         }
     }
     Ok(())
@@ -635,7 +646,7 @@ pub(super) fn run_remote_block<P: ProcessManager>(
     }
     let runner = cx.state.io.remote_runner(target).ok_or_else(|| {
         anyhow::anyhow!(
-            "REMOTE '{target}' has no registered session (bind it with --remote {target}=\"<command>\")"
+            "{KEYWORD_REMOTE} '{target}' has no registered session (bind it with --remote {target}=\"<command>\")"
         )
     })?;
     let mut script_text = resolve_header(cx, target, vars, env_names)?.join("\n");
@@ -708,10 +719,12 @@ pub(super) fn run_remote_block<P: ProcessManager>(
         // transport-failed wrapper.
         Err(err) => match super::exit::exit_code_of(&err) {
             Some(code) => {
-                return Err(err.context(format!("REMOTE '{target}' exited with code {code}")));
+                return Err(err.context(format!(
+                    "{KEYWORD_REMOTE} '{target}' exited with code {code}"
+                )));
             }
             None => {
-                return Err(err.context(format!("REMOTE '{target}' transport failed")));
+                return Err(err.context(format!("{KEYWORD_REMOTE} '{target}' transport failed")));
             }
         },
     };
@@ -738,7 +751,9 @@ pub fn apply_push_symlink(
     target: &str,
 ) -> Result<()> {
     let dst = root.join(rel).map_err(|err| {
-        anyhow::anyhow!("REMOTE push symlink destination {rel:?} escapes the workspace: {err:#}")
+        anyhow::anyhow!(
+            "{KEYWORD_REMOTE} push symlink destination {rel:?} escapes the workspace: {err:#}"
+        )
     })?;
     // Join-then-guard is the whole verdict: `GuardedPath::join`
     // normalizes `..` lexically and rejects escapes, so chains like
@@ -746,21 +761,27 @@ pub fn apply_push_symlink(
     // hand-rolled depth counter.
     let src = if target.starts_with('/') {
         root.join(target).map_err(|err| {
-            anyhow::anyhow!("REMOTE push symlink {rel:?} points outside the workspace: {err:#}")
+            anyhow::anyhow!(
+                "{KEYWORD_REMOTE} push symlink {rel:?} points outside the workspace: {err:#}"
+            )
         })?
     } else if let Some(parent) = rel.rfind('/') {
         root.join(&format!("{}/{target}", &rel[..parent]))
             .map_err(|err| {
-                anyhow::anyhow!("REMOTE push symlink {rel:?} points outside the workspace: {err:#}")
+                anyhow::anyhow!(
+                    "{KEYWORD_REMOTE} push symlink {rel:?} points outside the workspace: {err:#}"
+                )
             })?
     } else {
         root.join(target).map_err(|err| {
-            anyhow::anyhow!("REMOTE push symlink {rel:?} points outside the workspace: {err:#}")
+            anyhow::anyhow!(
+                "{KEYWORD_REMOTE} push symlink {rel:?} points outside the workspace: {err:#}"
+            )
         })?
     };
     match fs.entry_kind_no_follow(&dst) {
         Ok(EntryKind::Dir) => {
-            bail!("REMOTE sync-back cannot replace directory {rel:?} with a symlink");
+            bail!("{KEYWORD_REMOTE} sync-back cannot replace directory {rel:?} with a symlink");
         }
         Ok(_) => {
             fs.remove_file(&dst)?;
