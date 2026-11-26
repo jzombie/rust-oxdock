@@ -1869,7 +1869,7 @@ fn non_map_serve_options_bails() {
     )
     .expect_err("non-map options must fail");
     assert!(err.to_string().contains("TypeMismatch"), "{err:#}");
-    assert!(err.to_string().contains("expected MAP"), "{err:#}");
+    assert!(err.to_string().contains("expected `MAP`"), "{err:#}");
 }
 
 #[test]

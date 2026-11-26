@@ -2658,6 +2658,25 @@ transport, so this phase is mechanical:
    entirely. ssh lib 13 plus invalid_host_key pin plus parser
    267+303 plus core lib 410 plus integration 629 green; ssh
    clippy zero, fmt clean on both touched files.
+   ssh types bulk 2026-11-27 (types.rs only, no new ctors):
+   send_exit_status plus take_pump_ends flip to
+   DiagnosticResult; four pre-wrapped anyhow::Error::new sites
+   drop the wrap (match-arm tails stay semicolon-free).
+   Callers in funcs.rs hold via blanket From; the two
+   let-discard reporters are unaffected. keys.rs is_io_kind
+   stays anyhow by design (oxdock-fs write_private_file
+   boundary returns anyhow; fs keeps anyhow deliberately).
+   ssh lib 13 plus parser 267+303 plus core lib 410 plus
+   core integration 629 green; ssh integration 68 green after
+   fixing one stale assertion: non_map_serve_options_bails
+   asserted the pre-unification wording "expected MAP", but
+   903489ab (static-check bulk) canonically re-worded
+   dsl.check.exact_mismatch to backtick both sides
+   ("expected `MAP`, got `STRING`"); verified the test passes
+   on the pre-branch base (28613aaa) and fails on branch HEAD
+   only for that backtick, then updated the assertion to the
+   canonical bytes. Not environment-related. ssh clippy
+   zero, fmt clean, anyhow import drops from types.rs.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
