@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::errors;
 use muxio_core::rpc::rpc_internals::RpcStreamEvent;
@@ -103,7 +103,8 @@ struct FetchStage {
 
 impl FetchStage {
     fn new() -> Result<Self> {
-        let dir = GuardedPath::tempdir().context("serve transfer tempdir failed")?;
+        let dir =
+            GuardedPath::tempdir().map_err(|err| errors::serve_transfer_tempdir_failed(&err))?;
         let root = dir.as_guarded_path().clone();
         let resolver = PathResolver::new(root.root(), root.root())?;
         // Memory-backed under Miri: the serve loop never runs there (no
@@ -250,8 +251,8 @@ fn feed_exec(exec: &mut GuestExec, bytes: &[u8]) -> Result<()> {
         let Some((json, rest)) = channel::split_prefixed(&exec.head) else {
             return Ok(());
         };
-        let descriptor: types::TarDescriptor =
-            serde_json::from_slice(json).context("serve fetch descriptor decode failed")?;
+        let descriptor: types::TarDescriptor = serde_json::from_slice(json)
+            .map_err(|err| errors::serve_fetch_descriptor_decode_failed(&err))?;
         exec.fetch_remaining = descriptor.tar_len;
         exec.descriptor = Some(descriptor);
         let stage = FetchStage::new()?;
@@ -381,7 +382,7 @@ fn prepare_staging(
     spill: &mut oxdock_core::TransferStage,
 ) -> Result<(GuardedPath, oxdock_fs::GuardedTempDir, PathResolver)> {
     spill.rewind()?;
-    let dir = GuardedPath::tempdir().context("serve staging tempdir failed")?;
+    let dir = GuardedPath::tempdir().map_err(|err| errors::serve_staging_tempdir_failed(&err))?;
     let staging = dir.as_guarded_path().clone();
     let resolver = PathResolver::new(staging.root(), staging.root())?;
     tar::unpack_from(spill, &mut |entry| match entry {
@@ -637,7 +638,7 @@ fn pack_manifest(
             }
         }
     }
-    let push_dir = GuardedPath::tempdir().context("serve push tempdir failed")?;
+    let push_dir = GuardedPath::tempdir().map_err(|err| errors::serve_push_tempdir_failed(&err))?;
     let push_root = push_dir.as_guarded_path().clone();
     let push_resolver = PathResolver::new(push_root.root(), push_root.root())?;
     // Memory-backed under Miri: same unreachable-spill rationale as

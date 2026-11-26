@@ -450,6 +450,62 @@ pub fn serve_engine_panicked() -> anyhow::Error {
     anyhow::Error::new(diag)
 }
 
+/// Transfer staging tempdir failed. Takes the wrapped failure;
+/// `{reason:#}` formatting lives here.
+#[cfg(feature = "net")]
+pub fn serve_transfer_tempdir_failed(reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("serve transfer tempdir failed: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.serve_transfer_tempdir_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Fetch descriptor decode failed. Takes the concrete serialization
+/// failure; rendering lives here.
+#[cfg(feature = "net")]
+pub fn serve_fetch_descriptor_decode_failed(reason: &serde_json::Error) -> anyhow::Error {
+    let reason_text = reason.to_string();
+    let message = format!("serve fetch descriptor decode failed: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.serve_fetch_descriptor_decode_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Unpack staging tempdir failed. Takes the wrapped failure;
+/// `{reason:#}` formatting lives here.
+#[cfg(feature = "net")]
+pub fn serve_staging_tempdir_failed(reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("serve staging tempdir failed: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.serve_staging_tempdir_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Push staging tempdir failed. Takes the wrapped failure;
+/// `{reason:#}` formatting lives here.
+#[cfg(feature = "net")]
+pub fn serve_push_tempdir_failed(reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("serve push tempdir failed: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.serve_push_tempdir_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
 /// Guest push source escapes staging. Takes the underlying failure;
 /// `{reason:#}` formatting lives here.
 #[cfg(feature = "net")]
@@ -530,6 +586,11 @@ pub fn mcp_runs_alone(conflicts: &[&str]) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "net")]
+    fn serde_err() -> serde_json::Error {
+        serde_json::from_slice::<serde_json::Value>(b"{bad}").unwrap_err()
+    }
 
     #[test]
     fn feature_message_shared_across_sites() {
@@ -653,6 +714,26 @@ mod tests {
             ("cli.serve_engine_panicked", serve_engine_panicked()),
             #[cfg(feature = "net")]
             (
+                "cli.serve_transfer_tempdir_failed",
+                serve_transfer_tempdir_failed(&anyhow::anyhow!("boom")),
+            ),
+            #[cfg(feature = "net")]
+            (
+                "cli.serve_fetch_descriptor_decode_failed",
+                serve_fetch_descriptor_decode_failed(&serde_err()),
+            ),
+            #[cfg(feature = "net")]
+            (
+                "cli.serve_staging_tempdir_failed",
+                serve_staging_tempdir_failed(&anyhow::anyhow!("boom")),
+            ),
+            #[cfg(feature = "net")]
+            (
+                "cli.serve_push_tempdir_failed",
+                serve_push_tempdir_failed(&anyhow::anyhow!("boom")),
+            ),
+            #[cfg(feature = "net")]
+            (
                 "cli.serve_push_source_escapes",
                 push_source_escapes("a", &anyhow::anyhow!("root")),
             ),
@@ -765,6 +846,34 @@ mod tests {
         );
         let err = push_source_unreadable("a", &anyhow::anyhow!("denied"));
         assert!(err.to_string().contains("denied"), "{err}");
+        assert_eq!(
+            serve_transfer_tempdir_failed(&anyhow::anyhow!("boom"))
+                .downcast_ref::<Diagnostic>()
+                .expect("typed")
+                .message(),
+            "serve transfer tempdir failed: boom"
+        );
+        assert_eq!(
+            serve_fetch_descriptor_decode_failed(&serde_err())
+                .downcast_ref::<Diagnostic>()
+                .expect("typed")
+                .message(),
+            "serve fetch descriptor decode failed: key must be a string at line 1 column 2"
+        );
+        assert_eq!(
+            serve_staging_tempdir_failed(&anyhow::anyhow!("boom"))
+                .downcast_ref::<Diagnostic>()
+                .expect("typed")
+                .message(),
+            "serve staging tempdir failed: boom"
+        );
+        assert_eq!(
+            serve_push_tempdir_failed(&anyhow::anyhow!("boom"))
+                .downcast_ref::<Diagnostic>()
+                .expect("typed")
+                .message(),
+            "serve push tempdir failed: boom"
+        );
     }
 
     #[test]

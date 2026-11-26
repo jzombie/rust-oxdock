@@ -2883,6 +2883,21 @@ transport, so this phase is mechanical:
    lib 27 plus packaging_invariant 4 green; build clippy zero,
    fmt clean on both files; anyhow Context import drops from
    assets.rs.
+   serve bulk 2026-11-27 (oxdock-cli serve.rs plus errors.rs, 4
+   new cli.serve_* ctors): converts all four bare-string
+   context layers; every site is a direct map_err to a ctor
+   (CLI ctors already return anyhow::Error wrapping Diagnostic,
+   so no Error::new shim needed; signatures unchanged).
+   New ctors follow the file's serve family ({reason:#}
+   rendering): serve_transfer_tempdir_failed plus
+   serve_staging_tempdir_failed plus serve_push_tempdir_failed
+   (all &anyhow::Error: GuardedPath::tempdir chains) plus
+   serve_fetch_descriptor_decode_failed (concrete
+   &serde_json::Error, shell_words/codec precedent). Pins added
+   to the net key table plus serve_staging_messages_name_the_member
+   (key-uniqueness rides the existing table's seen-set).
+   cli lib 49 green; cli clippy zero, fmt clean on both files;
+   anyhow Context import drops from serve.rs.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
