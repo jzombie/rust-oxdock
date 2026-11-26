@@ -11,11 +11,11 @@ use oxdock_parser::template::{bare_sigil_error, qualified_keypath_error};
 use oxdock_parser::{
     ANY_TYPE_NAME, BOOL_TYPE_NAME, Expr, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
     KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CONST,
-    KEYWORD_CONTINUE, KEYWORD_ENV, KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_IMPORT,
-    KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_REMOTE,
-    KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_TYPE, KEYWORD_WITH_IO,
-    LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME,
-    STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
+    KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT, KEYWORD_ENV, KEYWORD_EXPORT, KEYWORD_FUNC,
+    KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND,
+    KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_TYPE,
+    KEYWORD_WITH_IO, LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME,
+    SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
 };
 
 use super::function_names::{
@@ -2119,6 +2119,65 @@ pub fn eval_sleep_cancelled() -> Diagnostic {
         "dsl.eval.sleep_cancelled",
         message,
         Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `COPY` transport failure (resolve, place, or copy). Takes the
+/// source, destination, and the underlying failure verbatim; one key
+/// covers all five call sites, the `from`/`to` pair rides as
+/// structured fields. Renders `{reason:#}` inline with no
+/// `with_source`, per the passthrough contract.
+pub fn eval_copy_failed(from: &str, to: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_COPY} {from} {to}: {reason_text}");
+    Diagnostic::new(
+        "dsl.eval.copy_failed",
+        message,
+        Diagnostic::make_fields(&[("from", from), ("to", to), ("reason", &reason_text)]),
+    )
+}
+
+/// `COPY_GIT` transport failure (resolve or fetch). Takes the
+/// revision, source, destination, and the underlying failure
+/// verbatim; one key covers both call sites. Renders `{reason:#}`
+/// inline with no `with_source`.
+pub fn eval_copy_git_failed(rev: &str, from: &str, to: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_COPY_GIT} {rev} {from} {to}: {reason_text}");
+    Diagnostic::new(
+        "dsl.eval.copy_git_failed",
+        message,
+        Diagnostic::make_fields(&[
+            ("rev", rev),
+            ("from", from),
+            ("to", to),
+            ("reason", &reason_text),
+        ]),
+    )
+}
+
+/// `COPY` source with no file name. Takes the display path; quoting
+/// lives here. No source rides along.
+pub fn eval_copy_no_file_name(display: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_COPY} source has no file name: {display}");
+    Diagnostic::new(
+        "dsl.eval.copy_no_file_name",
+        message,
+        Diagnostic::make_fields(&[("path", display)]),
+    )
+}
+
+/// `COPY` destination escaping the root. Takes the display path
+/// and the underlying join failure verbatim; one key covers the
+/// single call site. Renders `{reason:#}` inline with no
+/// `with_source`.
+pub fn eval_copy_destination_escapes(display: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_COPY} destination escapes root: {display}: {reason_text}");
+    Diagnostic::new(
+        "dsl.eval.copy_destination_escapes",
+        message,
+        Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
     )
 }
 
@@ -4924,6 +4983,10 @@ mod tests {
             eval_run_exec_permit_arg().key(),
             eval_run_exec_element_needs_string("map").key(),
             eval_sleep_cancelled().key(),
+            eval_copy_failed("a", "b", &anyhow::anyhow!("x")).key(),
+            eval_copy_git_failed("r", "a", "b", &anyhow::anyhow!("x")).key(),
+            eval_copy_no_file_name("p").key(),
+            eval_copy_destination_escapes("p", &anyhow::anyhow!("x")).key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -5391,6 +5454,25 @@ mod tests {
         assert_eq!(
             eval_sleep_cancelled().message(),
             "SLEEP interrupted by cancellation"
+        );
+        assert!(
+            eval_copy_failed("a", "b", &anyhow::anyhow!("boom"))
+                .message()
+                .starts_with("COPY a b: ")
+        );
+        assert!(
+            eval_copy_git_failed("r", "a", "b", &anyhow::anyhow!("boom"))
+                .message()
+                .starts_with("COPY_GIT r a b: ")
+        );
+        assert_eq!(
+            eval_copy_no_file_name("/x").message(),
+            "COPY source has no file name: /x"
+        );
+        assert!(
+            eval_copy_destination_escapes("/x", &anyhow::anyhow!("boom"))
+                .message()
+                .starts_with("COPY destination escapes root: /x: ")
         );
         assert!(
             eval_run_exit_status("echo hi", &exit_status_sample())

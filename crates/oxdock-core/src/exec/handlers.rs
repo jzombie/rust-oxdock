@@ -15,11 +15,11 @@ use oxdock_fs::to_forward_slashes;
 use oxdock_parser::constants::KEYWORD_RUN;
 use oxdock_parser::constants::{
     KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASYNC, KEYWORD_AWAIT,
-    KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
-    KEYWORD_EXPAND, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET,
-    KEYWORD_LIST_APPEND, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE,
-    KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_SET_EXECUTABLE, KEYWORD_SYMLINK, KEYWORD_TIMEOUT,
-    KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE,
+    KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_EXPAND, KEYWORD_FOR,
+    KEYWORD_FUNC, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND,
+    KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOVE, KEYWORD_RETURN,
+    KEYWORD_SET_EXECUTABLE, KEYWORD_SYMLINK, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE,
+    KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE,
 };
 use oxdock_parser::{
     Arg, Command, Expr, IoBinding, IoStream, MAP_TYPE_NAME, PIPE_TYPE_NAME, PipeTarget,
@@ -760,22 +760,22 @@ pub(super) fn copy<P: ProcessManager>(
         cx.state
             .fs
             .resolve_copy_source_from_target(copy_source_root(target), from)
-            .with_context(|| format!("{KEYWORD_COPY} {} {}", from, to))?
+            .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?
     } else {
         cx.state
             .fs
             .resolve_copy_source(from)
-            .with_context(|| format!("{KEYWORD_COPY} {} {}", from, to))?
+            .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?
     };
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| format!("{KEYWORD_COPY} {} {}", from, to))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?;
     let to_abs = place_file_in_dir(cx.state.fs.as_ref(), &from_abs, to, &to_abs)
-        .with_context(|| format!("{KEYWORD_COPY} {} {}", from, to))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?;
     copy_entry(cx.state.fs.as_ref(), &from_abs, &to_abs)
-        .with_context(|| format!("{KEYWORD_COPY} {} {}", from, to))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?;
     Ok(())
 }
 
@@ -799,22 +799,16 @@ fn place_file_in_dir(
     if !trailing_slash && !dst_is_dir {
         return Ok(to_abs.clone());
     }
+    let display = from_abs.display().to_string();
     let base = from_abs
         .as_path()
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
-        .with_context(|| {
-            format!(
-                "{KEYWORD_COPY} source has no file name: {}",
-                from_abs.display()
-            )
-        })?;
-    to_abs.join(&base).with_context(|| {
-        format!(
-            "{KEYWORD_COPY} destination escapes root: {}",
-            to_abs.display()
-        )
-    })
+        .ok_or_else(|| anyhow::Error::new(diag::eval_copy_no_file_name(&display)))?;
+    let to_display = to_abs.display().to_string();
+    to_abs
+        .join(&base)
+        .map_err(|e| anyhow::Error::new(diag::eval_copy_destination_escapes(&to_display, &e)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -829,11 +823,11 @@ pub(super) fn copy_git<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| format!("{KEYWORD_COPY_GIT} {} {} {}", rev, from, to))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_copy_git_failed(rev, from, to, &e)))?;
     cx.state
         .fs
         .copy_from_git(rev, from, &to_abs, include_dirty)
-        .with_context(|| format!("{KEYWORD_COPY_GIT} {} {} {}", rev, from, to))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_copy_git_failed(rev, from, to, &e)))?;
     Ok(())
 }
 

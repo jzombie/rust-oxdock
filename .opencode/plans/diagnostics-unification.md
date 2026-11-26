@@ -2075,6 +2075,29 @@ transport, so this phase is mechanical:
    629 green; clippy at baseline (3
    pre-existing), fmt clean on both touched
    files.
+   COPY transport bulk step 2026-11-26
+   (file-sized batch): four new dsl.eval.*
+   ctors with key plus wording pins
+   (copy_failed with from plus to covering all
+   five resolve/place/copy sites, one key;
+   copy_git_failed with rev plus from plus to
+   covering both sites; copy_no_file_name with
+   display for the Option None arm;
+   copy_destination_escapes with display plus
+   anyhow reason for the join guard). Nine
+   sites re-keyed across copy/copy_git/
+   place_file_in_dir via map_err plus anyhow
+   Error new (bare tail for the join guard,
+   no trailing question-mark). The join guard
+   keeps its join error text (outer-context
+   colon plus source rendering preserved);
+   the no-file-name arm stays source-free
+   (Option context, no underlying error).
+   Unused KEYWORD_COPY plus KEYWORD_COPY_GIT
+   imports dropped from handlers. Bytes
+   identical. Core 410 plus integration 629
+   green; clippy at baseline (3 pre-existing),
+   fmt clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
