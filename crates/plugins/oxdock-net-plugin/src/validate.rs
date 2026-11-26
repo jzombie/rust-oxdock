@@ -148,7 +148,7 @@ pub fn parse_endpoint_ref(
 ) -> DiagnosticResult<(Option<Protocol>, VirtualEndpoint)> {
     let text = raw.trim();
     let (protocol, bare) = split_protocol_qualifier(text)
-        .map_err(|err| net_diag::endpoint_ref_invalid(func, raw, &anyhow::Error::new(err)))?;
+        .map_err(|err| net_diag::endpoint_ref_invalid(func, raw, err))?;
     let endpoint = parse_virtual_endpoint(bare, func)?;
     Ok((protocol, endpoint))
 }
@@ -180,8 +180,7 @@ pub fn parse_virtual_endpoint(raw: &str, func: &str) -> DiagnosticResult<Virtual
         return Err(net_diag::endpoint_bad_chars(func, raw));
     }
     if text.chars().all(|c| c.is_ascii_digit()) {
-        let port = parse_port(text)
-            .map_err(|err| net_diag::endpoint_port_parse(func, raw, &anyhow::Error::new(err)))?;
+        let port = parse_port(text).map_err(|err| net_diag::endpoint_port_parse(func, raw, err))?;
         if port == 0 {
             return Err(net_diag::endpoint_port_zero(func, raw));
         }

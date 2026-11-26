@@ -543,9 +543,10 @@ pub fn unknown_protocol_qualifier(text: &str) -> Diagnostic {
 }
 
 /// Qualified-endpoint parse failure. Takes the caller label, the raw
-/// text, and the wrapped failure; the chain renders inline.
-pub fn endpoint_ref_invalid(func: &str, raw: &str, err: &anyhow::Error) -> Diagnostic {
-    let err_text = format!("{err:#}");
+/// text, and the underlying typed failure by value; the reason text
+/// renders inline.
+pub fn endpoint_ref_invalid(func: &str, raw: &str, reason: Diagnostic) -> Diagnostic {
+    let err_text = format!("{reason:#}");
     let message = format!("{func} invalid endpoint {raw:?}: {err_text}");
     Diagnostic::new(
         "net.validate.endpoint_ref_invalid",
@@ -595,10 +596,10 @@ pub fn endpoint_bad_chars(func: &str, raw: &str) -> Diagnostic {
 }
 
 /// Numeric parse failure inside endpoint validation. Takes the caller
-/// label, the raw text, and the wrapped failure; the chain renders
-/// inline.
-pub fn endpoint_port_parse(func: &str, raw: &str, err: &anyhow::Error) -> Diagnostic {
-    let err_text = format!("{err:#}");
+/// label, the raw text, and the underlying typed failure by value;
+/// the reason text renders inline.
+pub fn endpoint_port_parse(func: &str, raw: &str, reason: Diagnostic) -> Diagnostic {
+    let err_text = format!("{reason:#}");
     let message = format!("{func} invalid endpoint {raw:?}: {err_text}");
     Diagnostic::new(
         "net.validate.endpoint_port_parse",
@@ -1113,11 +1114,11 @@ mod tests {
             service_offline("NET_CONNECT", &tcp_key).key(),
             port_not_numeric().key(),
             unknown_protocol_qualifier("sctp/dns").key(),
-            endpoint_ref_invalid("NET_PORT", "tcp/dns", &chain).key(),
+            endpoint_ref_invalid("NET_PORT", "tcp/dns", port_not_numeric()).key(),
             endpoint_empty("NET_LISTEN", "").key(),
             endpoint_host_port("NET_LISTEN", "a:1").key(),
             endpoint_bad_chars("NET_LISTEN", "has space").key(),
-            endpoint_port_parse("NET_LISTEN", "99999", &chain).key(),
+            endpoint_port_parse("NET_LISTEN", "99999", port_not_numeric()).key(),
             endpoint_port_zero("NET_LISTEN", "0").key(),
             endpoint_bad_shape("NET_LISTEN", "!!!").key(),
             endpoint_reserved("NET_LISTEN", "localhost").key(),
@@ -1363,8 +1364,8 @@ mod tests {
             "unknown protocol qualifier in \"sctp/dns\" (expected 'tcp/...', 'udp/...', '.../tcp', or '.../udp')"
         );
         assert_eq!(
-            endpoint_ref_invalid("NET_PORT", "tcp/dns", &chain).message(),
-            "NET_PORT invalid endpoint \"tcp/dns\": boom"
+            endpoint_ref_invalid("NET_PORT", "tcp/dns", port_not_numeric()).message(),
+            "NET_PORT invalid endpoint \"tcp/dns\": port must be numeric 0-65535"
         );
         assert_eq!(
             endpoint_empty("NET_LISTEN", "").message(),
@@ -1379,8 +1380,8 @@ mod tests {
             "NET_LISTEN invalid endpoint \"has space\": service names use [A-Za-z0-9_-] only"
         );
         assert_eq!(
-            endpoint_port_parse("NET_LISTEN", "99999", &chain).message(),
-            "NET_LISTEN invalid endpoint \"99999\": boom"
+            endpoint_port_parse("NET_LISTEN", "99999", port_not_numeric()).message(),
+            "NET_LISTEN invalid endpoint \"99999\": port must be numeric 0-65535"
         );
         assert_eq!(
             endpoint_port_zero("NET_LISTEN", "0").message(),

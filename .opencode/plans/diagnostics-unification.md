@@ -2735,6 +2735,23 @@ transport, so this phase is mechanical:
    anyhow by design and hold via blanket From. net lib 38
    plus net integration 38 green; net clippy zero, fmt clean
    on both files.
+   validate bulk 2026-11-27 (net validate.rs plus net
+   diagnostics plus ssh validate.rs): endpoint_ref_invalid
+   plus endpoint_port_parse normalize from &anyhow::Error to
+   reason: Diagnostic by value (both call sites already
+   returned DiagnosticResult, so the anyhow::Error::new
+   flattening bridges drop and err moves directly; inline
+   {reason:#} renders byte-identical). Test pins swap the
+   anyhow "boom" reason for port_not_numeric with updated
+   expected bytes. ssh parse_serve_endpoint flips to
+   DiagnosticResult (direct tail return, no Ok-wrap; the
+   funcs.rs #[oxdock_func] caller holds via blanket From);
+   anyhow import drops from ssh validate.rs and net
+   validate.rs goes anyhow-free. net lib 38 plus net
+   integration 38 plus ssh lib 13 plus ssh integration 68
+   green; net plus ssh clippy zero on touched files
+   (remaining warnings pre-existing in process/core),
+   fmt clean on three files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

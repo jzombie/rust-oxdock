@@ -5,15 +5,15 @@
 //! `oxdock-net-plugin` (one shared resolver, no per-plugin fork); only
 //! the serve wrapper with its SSH caller label stays here.
 
-use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_net_plugin::validate as net_validate;
 
 /// Validate an `SSH_SERVE` endpoint without touching the network. Scripts
 /// declare service names; physical mapping belongs to the host runner.
 /// Delegates to the shared NET parser so shapes stay identical
 /// everywhere; only the caller label is SSH's.
-pub fn parse_serve_endpoint(raw: &str) -> Result<net_validate::VirtualEndpoint> {
-    Ok(net_validate::parse_virtual_endpoint(raw, "SSH_SERVE")?)
+pub fn parse_serve_endpoint(raw: &str) -> DiagnosticResult<net_validate::VirtualEndpoint> {
+    net_validate::parse_virtual_endpoint(raw, "SSH_SERVE")
 }
 
 #[cfg(test)]
