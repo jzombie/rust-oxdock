@@ -1390,6 +1390,21 @@ transport, so this phase is mechanical:
    clippy shows only the pre-existing
    needless_borrow warnings elsewhere in the file;
    fmt clean.
+   Arith-rule step 2026-11-26: no new ctors, all
+   wordings already pinned. Three signatures flip
+   to DiagnosticResult in static_check.rs:
+   numeric_pair plus neg_rule plus ordering_pair.
+   Bodies drop five anyhow::Error::new wrappers;
+   all three are pure leaves (StaticTy match plus
+   loc prefix, no fallible callees). The one
+   anyhow boundary that returns a leaf directly
+   (infer_expr Arithmetic arm) uses Ok(f(...)?)
+   since Result error types do not coerce on
+   direct return; the `?` call sites ride the
+   blanket conversion unchanged. Core 409 plus
+   integration 629 green; clippy shows only the
+   pre-existing needless_borrow warnings elsewhere
+   in the file; fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

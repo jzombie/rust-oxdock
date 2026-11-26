@@ -5493,11 +5493,9 @@ fn literal_tag(value: &Value) -> TypeTag {
 /// `INT`, any `FLOAT` among numerics promotes, `ANY` defers, and
 /// concrete non-numerics are a static Type Error (the evaluator
 /// bails identically).
-fn numeric_pair(left: StaticTy, right: StaticTy, at: Option<&str>) -> Result<StaticTy> {
+fn numeric_pair(left: StaticTy, right: StaticTy, at: Option<&str>) -> DiagnosticResult<StaticTy> {
     let (StaticTy::Ty(left), StaticTy::Ty(right)) = (left, right) else {
-        return Err(anyhow::Error::new(check_diag::check_void_in_arithmetic(
-            &loc(at),
-        )));
+        return Err(check_diag::check_void_in_arithmetic(&loc(at)));
     };
     if matches!(left, TypeTag::Any) || matches!(right, TypeTag::Any) {
         return Ok(StaticTy::Ty(TypeTag::Any));
@@ -5517,33 +5515,24 @@ fn numeric_pair(left: StaticTy, right: StaticTy, at: Option<&str>) -> Result<Sta
             },
         ));
     }
-    Err(anyhow::Error::new(check_diag::check_arithmetic_type(&loc(
-        at,
-    ))))
+    Err(check_diag::check_arithmetic_type(&loc(at)))
 }
 
 /// Unary negation rule, mirroring `apply_neg`.
-fn neg_rule(top: StaticTy, at: Option<&str>) -> Result<StaticTy> {
+fn neg_rule(top: StaticTy, at: Option<&str>) -> DiagnosticResult<StaticTy> {
     match top {
         StaticTy::Ty(TypeTag::Int) => Ok(StaticTy::Ty(TypeTag::Int)),
         StaticTy::Ty(TypeTag::Float) => Ok(StaticTy::Ty(TypeTag::Float)),
         StaticTy::Ty(TypeTag::Any) => Ok(StaticTy::Ty(TypeTag::Any)),
-        StaticTy::Void => Err(anyhow::Error::new(check_diag::check_void_to_negate(&loc(
-            at,
-        )))),
-        StaticTy::Ty(other) => Err(anyhow::Error::new(check_diag::check_negate_type(
-            &loc(at),
-            other.name(),
-        ))),
+        StaticTy::Void => Err(check_diag::check_void_to_negate(&loc(at))),
+        StaticTy::Ty(other) => Err(check_diag::check_negate_type(&loc(at), other.name())),
     }
 }
 
 /// Ordering comparison rule, mirroring `apply_compare`.
-fn ordering_pair(left: StaticTy, right: StaticTy, at: Option<&str>) -> Result<()> {
+fn ordering_pair(left: StaticTy, right: StaticTy, at: Option<&str>) -> DiagnosticResult<()> {
     let (StaticTy::Ty(left), StaticTy::Ty(right)) = (left, right) else {
-        return Err(anyhow::Error::new(check_diag::check_void_to_compare(&loc(
-            at,
-        ))));
+        return Err(check_diag::check_void_to_compare(&loc(at)));
     };
     if matches!(left, TypeTag::Any) || matches!(right, TypeTag::Any) {
         return Ok(());
@@ -5552,9 +5541,7 @@ fn ordering_pair(left: StaticTy, right: StaticTy, at: Option<&str>) -> Result<()
     if numeric(&left) && numeric(&right) {
         return Ok(());
     }
-    Err(anyhow::Error::new(check_diag::check_ordering_type(&loc(
-        at,
-    ))))
+    Err(check_diag::check_ordering_type(&loc(at)))
 }
 
 impl<'a, P: ProcessManager> Checker<'a, P> {
@@ -5758,7 +5745,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let right_ty = self.infer_expr(right, env, scope, idx, depth + 1)?;
                 // All four operators share one typing rule in
                 // `apply_arith`; only operand shapes matter.
-                numeric_pair(left_ty, right_ty, Some(&at()))
+                Ok(numeric_pair(left_ty, right_ty, Some(&at()))?)
             }
             Expr::CompiledMath(ops) => self.infer_rpn(ops, env, scope, depth),
             Expr::FreshPipe => Ok(StaticTy::Ty(TypeTag::Pipe)),
