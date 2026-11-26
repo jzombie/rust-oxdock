@@ -1546,6 +1546,45 @@ pub fn eval_stdin_read_failed(func: Option<&str>, reason: &std::io::Error) -> Di
     )
 }
 
+/// Exact-match stdin drain exceeding the byte cap. Takes the invoking
+/// verb; the cap and the remediation are fixed, so the verb is the
+/// only field. No source rides along.
+pub fn eval_assert_stdin_overflow(verb: &str) -> Diagnostic {
+    let message = format!(
+        "{verb} stdin exceeded the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout"
+    );
+    Diagnostic::new(
+        "dsl.eval.assert_stdin_overflow",
+        message,
+        Diagnostic::make_fields(&[("verb", verb)]),
+    )
+}
+
+/// Trial-cumulative exact stdout already overflowed. Takes the invoking
+/// verb; the cap and the remediation are fixed, so the verb is the
+/// only field. No source rides along.
+pub fn eval_assert_stdout_overflow(verb: &str) -> Diagnostic {
+    let message = format!(
+        "{verb} stdout overflowed the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout"
+    );
+    Diagnostic::new(
+        "dsl.eval.assert_stdout_overflow",
+        message,
+        Diagnostic::make_fields(&[("verb", verb)]),
+    )
+}
+
+/// Exact stdout read with no capture registered for the generation.
+/// Takes the invoking verb; no source rides along.
+pub fn eval_assert_no_exact_capture(verb: &str) -> Diagnostic {
+    let message = format!("{verb} stdout has no exact capture registered");
+    Diagnostic::new(
+        "dsl.eval.assert_no_exact_capture",
+        message,
+        Diagnostic::make_fields(&[("verb", verb)]),
+    )
+}
+
 /// `int`-typed argument whose resolution failed. Takes the underlying
 /// failure verbatim: its message already names the argument and the
 /// cause, so no wrapper is added.
@@ -4285,6 +4324,9 @@ mod tests {
             eval_flow_crosses_remote(1, "BREAK").key(),
             eval_stdin_lock_failed("READ").key(),
             eval_stdin_read_failed(None, &std::io::Error::other("x")).key(),
+            eval_assert_stdin_overflow("ASSERT_EQ").key(),
+            eval_assert_stdout_overflow("ASSERT_EQ").key(),
+            eval_assert_no_exact_capture("ASSERT_EQ").key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -4612,6 +4654,18 @@ mod tests {
         assert_eq!(
             eval_stdin_read_failed(Some("WRITE"), &std::io::Error::other("boom")).message(),
             "failed to read from stdin for WRITE: boom"
+        );
+        assert_eq!(
+            eval_assert_stdin_overflow("ASSERT_EQ").message(),
+            "ASSERT_EQ stdin exceeded the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout"
+        );
+        assert_eq!(
+            eval_assert_stdout_overflow("ASSERT_EQ").message(),
+            "ASSERT_EQ stdout overflowed the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout"
+        );
+        assert_eq!(
+            eval_assert_no_exact_capture("ASSERT_EQ").message(),
+            "ASSERT_EQ stdout has no exact capture registered"
         );
         assert!(
             eval_async_exit_status(None, &exit_status_sample())

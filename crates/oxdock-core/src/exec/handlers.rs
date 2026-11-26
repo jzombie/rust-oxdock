@@ -1922,9 +1922,7 @@ fn drain_stdin_bounded(input_stream: SharedInput, verb: &str) -> Result<Vec<u8>>
             break;
         }
         if out.len() + n > super::io::EXACT_STDOUT_CAP {
-            bail!(
-                "{verb} stdin exceeded the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout"
-            );
+            return Err(anyhow::Error::new(diag::eval_assert_stdin_overflow(verb)));
         }
         out.extend_from_slice(&buf[..n]);
     }
@@ -1944,11 +1942,11 @@ fn exact_stdout_bytes<P: ProcessManager>(
         .lock()
         .map_err(|_| anyhow::Error::new(diag::std_assert_lock_poisoned("exact_stdout")))?;
     match captures.get(&generation) {
-        Some(entry) if entry.overflowed => bail!(
-            "{verb} stdout overflowed the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout",
-        ),
+        Some(entry) if entry.overflowed => {
+            Err(anyhow::Error::new(diag::eval_assert_stdout_overflow(verb)))
+        }
         Some(entry) => Ok(entry.bytes.clone()),
-        None => bail!("{verb} stdout has no exact capture registered"),
+        None => Err(anyhow::Error::new(diag::eval_assert_no_exact_capture(verb))),
     }
 }
 

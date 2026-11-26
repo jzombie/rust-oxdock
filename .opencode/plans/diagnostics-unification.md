@@ -1905,6 +1905,26 @@ transport, so this phase is mechanical:
    410 plus integration 629 green; clippy
    at baseline (core 3 pre-existing),
    fmt clean on both touched files.
+   Exact-buffer trio bulk step 2026-11-26
+   (file-sized batch): three new dsl.eval.*
+   ctors with key plus wording pins
+   (eval_assert_stdin_overflow covers the
+   drain_stdin_bounded cap breach,
+   eval_assert_stdout_overflow covers the
+   overflowed generation entry,
+   eval_assert_no_exact_capture covers the
+   missing generation entry; each takes
+   the invoking verb as its only field, no
+   source). All 3 sites re-keyed through
+   anyhow::Error::new shims (enclosing fns
+   stay anyhow::Result). The drain if-block
+   keeps explicit return Err (non-tail
+   position must diverge); the match arms
+   use bare Err tails (no needless_return).
+   Bytes identical. Core 410 plus
+   integration 629 green; clippy at
+   baseline, fmt clean on both touched
+   files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
