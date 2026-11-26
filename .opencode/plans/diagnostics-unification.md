@@ -2380,6 +2380,30 @@ transport, so this phase is mechanical:
    KEYWORD_UNARCHIVE imports dropped from handlers. Core lib 410
    plus integration 629 green; clippy at baseline
    (3 pre-existing), fmt clean on both touched files.
+   Flow plus capture bulk step 2026-11-27 (file-sized batch):
+   six new dsl.eval.* ctors with key plus wording pins plus one
+   reuse. Block pair: block_flow_crosses_block with step plus
+   word (one key for BREAK and CONTINUE escaping an inline
+   block value). Async quartet: async_flow_crosses_async with
+   step plus word (one key for BREAK, CONTINUE, and RETURN
+   across both spawn sites: the task closure and the thread
+   worker), entry_unavailable parameterless (the original site
+   discards the channel error), plus while_loop cancel reuses
+   async_cancelled. Capture pair: capture_with_io_stdout with kw
+   (one key for the IMPORT and CALL stdout-pipe arms),
+   capture_not_utf8 with kw plus var plus by-value Diagnostic
+   (bare outer plus chained source; the original flat anyhow
+   over a Diagnostic was already two layers). TTY pair:
+   with_io_tty_live_pipe with stream (one key for stdin and
+   stdout live-OS-pipe guards). Fourteen sites re-keyed across
+   block_value, while_loop, assign_capture, both async spawns,
+   and the tty resolver. Bytes identical (only contains pins on
+   block-boundary wording). Unused anyhow macro plus
+   KEYWORD_ASYNC and KEYWORD_WITH_IO imports dropped from
+   handlers. Tail discipline: bare Err tails in match-value
+   positions (needless_return fix keeps the no-new-warning
+   gate). Core lib 410 plus integration 629 green; clippy at
+   baseline (3 pre-existing), fmt clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

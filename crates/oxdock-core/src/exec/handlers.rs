@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -14,9 +14,9 @@ use oxdock_fs::command_path;
 use oxdock_fs::to_forward_slashes;
 use oxdock_parser::constants::KEYWORD_RUN;
 use oxdock_parser::constants::{
-    KEYWORD_APPEND, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONST,
-    KEYWORD_CONTINUE, KEYWORD_EXPAND, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_READ,
-    KEYWORD_READ_LINE, KEYWORD_RETURN, KEYWORD_TIMEOUT, KEYWORD_WITH_IO, KEYWORD_WRITE,
+    KEYWORD_APPEND, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_CONTINUE,
+    KEYWORD_EXPAND, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_RETURN,
+    KEYWORD_TIMEOUT, KEYWORD_WRITE,
 };
 use oxdock_parser::{
     Arg, Command, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value,
@@ -519,9 +519,9 @@ fn run_pty<P: ProcessManager>(
         },
         #[cfg(not(miri))]
         CommandStdin::OsPipe(_) => {
-            bail!(
-                "{KEYWORD_WITH_IO} [tty] stdin cannot arrive on a live OS pipe; bind a script pipe with stdin=$var"
-            )
+            return Err(anyhow::Error::new(diag::eval_with_io_tty_live_pipe(
+                "stdin",
+            )));
         }
     };
     // Master output lands exclusively in the step stdout sink. `None`
@@ -533,9 +533,9 @@ fn run_pty<P: ProcessManager>(
         None => Arc::new(Mutex::new(std::io::stdout())),
         #[cfg(not(miri))]
         Some(StreamHandle::Os(_)) => {
-            bail!(
-                "{KEYWORD_WITH_IO} [tty] stdout cannot arrive on a live OS pipe; bind a script pipe with stdout=$var"
-            )
+            return Err(anyhow::Error::new(diag::eval_with_io_tty_live_pipe(
+                "stdout",
+            )));
         }
     };
     let hub = cx.cancel_hub();
@@ -3198,36 +3198,31 @@ pub(crate) fn block_value<P: ProcessManager>(
     body: &[Step],
 ) -> Result<Value> {
     cx.state.push_scope();
-    let outcome: Result<Value> = (|| {
-        let flow = super::steps::execute_steps(
-            cx.state,
-            cx.process,
-            body,
-            cx.stdin.clone(),
-            false,
-            cx.out.clone(),
-            cx.err.clone(),
-            cx.out_pipe.clone(),
-            cx.stdin_pipe.clone(),
-            false,
-        )?;
-        match flow {
-            Flow::Done => Ok(Value::string(String::new())),
-            Flow::Return { value, .. } => Ok(value),
-            Flow::Break { idx } => {
-                bail!(
-                    "step {}: {KEYWORD_BREAK} cannot cross block boundary",
-                    idx + 1
-                )
+    let outcome: Result<Value> =
+        (|| {
+            let flow = super::steps::execute_steps(
+                cx.state,
+                cx.process,
+                body,
+                cx.stdin.clone(),
+                false,
+                cx.out.clone(),
+                cx.err.clone(),
+                cx.out_pipe.clone(),
+                cx.stdin_pipe.clone(),
+                false,
+            )?;
+            match flow {
+                Flow::Done => Ok(Value::string(String::new())),
+                Flow::Return { value, .. } => Ok(value),
+                Flow::Break { idx } => Err(anyhow::Error::new(
+                    diag::eval_block_flow_crosses_block(idx + 1, KEYWORD_BREAK),
+                )),
+                Flow::Continue { idx } => Err(anyhow::Error::new(
+                    diag::eval_block_flow_crosses_block(idx + 1, KEYWORD_CONTINUE),
+                )),
             }
-            Flow::Continue { idx } => {
-                bail!(
-                    "step {}: {KEYWORD_CONTINUE} cannot cross block boundary",
-                    idx + 1
-                )
-            }
-        }
-    })();
+        })();
     let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
     match (outcome, pop_res) {
         (Ok(value), Ok(())) => Ok(value),
@@ -3262,7 +3257,7 @@ pub(crate) fn while_loop<P: ProcessManager>(
     use std::sync::atomic::Ordering;
     loop {
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            bail!("{KEYWORD_ASYNC} task cancelled");
+            return Err(anyhow::Error::new(diag::eval_async_cancelled()));
         }
         let val = super::args::evaluate_expr(cond, cx)?;
         if !super::args::is_truthy(&val)? {
@@ -3367,9 +3362,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                 .iter()
                 .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
             {
-                bail!(
-                    "{kw} capture cannot use {KEYWORD_WITH_IO} [stdout=$var]; the capture binds the {KEYWORD_RETURN} value"
-                );
+                return Err(anyhow::Error::new(diag::eval_capture_with_io_stdout(kw)));
             }
             let guard = arm_deadline(cx, deadline);
             let result = if bindings.is_empty() {
@@ -3416,9 +3409,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                 .iter()
                 .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
             {
-                bail!(
-                    "{kw} capture cannot use {KEYWORD_WITH_IO} [stdout=$var]; the capture binds the {KEYWORD_RETURN} value"
-                );
+                return Err(anyhow::Error::new(diag::eval_capture_with_io_stdout(kw)));
             }
             let guard = arm_deadline(cx, deadline);
             let result = if bindings.is_empty() {
@@ -3496,7 +3487,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     }
     let text = sink
         .drain_string_strict()
-        .map_err(|e| anyhow!("{kw} ${var} capture is not valid UTF-8: {e}"))?;
+        .map_err(|err| anyhow::Error::new(diag::eval_capture_not_utf8(kw, var, err)))?;
     let clean_var = var.trim_start_matches('$').to_string();
     let tag = cx.state.resolve_tag(&decl_type)?;
     cx.state
@@ -3918,24 +3909,17 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
         )?;
         match flow {
             Flow::Done => Ok(()),
-            Flow::Break { idx } => {
-                anyhow::bail!(
-                    "step {}: {KEYWORD_BREAK} cannot cross {KEYWORD_ASYNC} boundary",
-                    idx + 1
-                );
-            }
-            Flow::Continue { idx } => {
-                anyhow::bail!(
-                    "step {}: {KEYWORD_CONTINUE} cannot cross {KEYWORD_ASYNC} boundary",
-                    idx + 1
-                );
-            }
-            Flow::Return { idx, .. } => {
-                anyhow::bail!(
-                    "step {}: {KEYWORD_RETURN} cannot cross {KEYWORD_ASYNC} boundary",
-                    idx + 1
-                );
-            }
+            Flow::Break { idx } => Err(anyhow::Error::new(diag::eval_async_flow_crosses_async(
+                idx + 1,
+                KEYWORD_BREAK,
+            ))),
+            Flow::Continue { idx } => Err(anyhow::Error::new(diag::eval_async_flow_crosses_async(
+                idx + 1,
+                KEYWORD_CONTINUE,
+            ))),
+            Flow::Return { idx, .. } => Err(anyhow::Error::new(
+                diag::eval_async_flow_crosses_async(idx + 1, KEYWORD_RETURN),
+            )),
         }
     });
 
@@ -4998,7 +4982,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
         let mut child_process = forked_process;
         let entry = entry_rx
             .recv()
-            .map_err(|_| anyhow::anyhow!("{KEYWORD_ASYNC} task entry unavailable"))?;
+            .map_err(|_| anyhow::Error::new(diag::eval_async_entry_unavailable()))?;
         let flow = super::steps::execute_steps(
             &mut child_state,
             &mut child_process,
@@ -5013,18 +4997,14 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
         )?;
         match flow {
             Flow::Done => Ok(()),
-            Flow::Break { idx } => {
-                anyhow::bail!(
-                    "step {}: {KEYWORD_BREAK} cannot cross {KEYWORD_ASYNC} boundary",
-                    idx + 1
-                );
-            }
-            Flow::Continue { idx } => {
-                anyhow::bail!(
-                    "step {}: {KEYWORD_CONTINUE} cannot cross {KEYWORD_ASYNC} boundary",
-                    idx + 1
-                );
-            }
+            Flow::Break { idx } => Err(anyhow::Error::new(diag::eval_async_flow_crosses_async(
+                idx + 1,
+                KEYWORD_BREAK,
+            ))),
+            Flow::Continue { idx } => Err(anyhow::Error::new(diag::eval_async_flow_crosses_async(
+                idx + 1,
+                KEYWORD_CONTINUE,
+            ))),
             Flow::Return { value, .. } => {
                 // Only an explicit `RETURN` publishes a task value;
                 // there is no stdout sniffing. `LET $out: STRING = AWAIT $t`

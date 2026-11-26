@@ -2153,6 +2153,86 @@ pub fn eval_capture_return_outside_function(step: usize) -> Diagnostic {
     )
 }
 
+/// Flow word escaping an inline block value. Takes the 1-based step
+/// number and the word; one key covers `BREAK` and `CONTINUE`,
+/// mirroring `eval_call_flow_crosses_func`. No source rides along.
+pub fn eval_block_flow_crosses_block(step: usize, word: &str) -> Diagnostic {
+    let message = format!("step {step}: {word} cannot cross block boundary");
+    Diagnostic::new(
+        "dsl.eval.block_flow_crosses_block",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("flow", word)]),
+    )
+}
+
+/// Flow word escaping an `ASYNC` body. Takes the 1-based step number
+/// and the word; one key covers `BREAK`, `CONTINUE`, and `RETURN`,
+/// mirroring `eval_call_flow_crosses_func`. No source rides along.
+pub fn eval_async_flow_crosses_async(step: usize, word: &str) -> Diagnostic {
+    let message = format!("step {step}: {word} cannot cross {KEYWORD_ASYNC} boundary");
+    Diagnostic::new(
+        "dsl.eval.async_flow_crosses_async",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("flow", word)]),
+    )
+}
+
+/// Capture over `IMPORT`/`CALL` with a `WITH_IO` stdout pipe sink.
+/// Takes the invoking keyword (`LET`/`CONST`); the remediation names
+/// the shared keyword and type constants. No source rides along: the
+/// guard fails before any capture runs.
+pub fn eval_capture_with_io_stdout(kw: &str) -> Diagnostic {
+    let message = format!(
+        "{kw} capture cannot use {KEYWORD_WITH_IO} [stdout=$var]; the capture binds the {KEYWORD_RETURN} value"
+    );
+    Diagnostic::new(
+        "dsl.eval.capture_with_io_stdout",
+        message,
+        Diagnostic::make_fields(&[("keyword", kw)]),
+    )
+}
+
+/// Capture sink that is not valid UTF-8. Takes the invoking keyword,
+/// the variable spelling, and the underlying failure by value: the
+/// original site built a flat `anyhow!` string over a `Diagnostic`,
+/// so the bare outer text rides with the concrete diagnostic as
+/// chained source and the chain depth is unchanged.
+pub fn eval_capture_not_utf8(kw: &str, var: &str, reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
+    let message = format!("{kw} ${var} capture is not valid UTF-8");
+    Diagnostic::new(
+        "dsl.eval.capture_not_utf8",
+        message,
+        Diagnostic::make_fields(&[("keyword", kw), ("var", var), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// `WITH_IO` terminal stdio arriving on a live OS pipe. Takes the
+/// stream name (`stdin`/`stdout`); one key covers both, mirroring
+/// `eval_with_io_duplicate_stream`. No source rides along.
+pub fn eval_with_io_tty_live_pipe(stream: &str) -> Diagnostic {
+    let message = format!(
+        "{KEYWORD_WITH_IO} [tty] {stream} cannot arrive on a live OS pipe; bind a script pipe with {stream}=$var"
+    );
+    Diagnostic::new(
+        "dsl.eval.with_io_tty_live_pipe",
+        message,
+        Diagnostic::make_fields(&[("stream", stream)]),
+    )
+}
+
+/// `ASYNC` worker missing its spawned entry. Parameterless: the
+/// original site discards the channel error, so the message stands
+/// alone with no source.
+pub fn eval_async_entry_unavailable() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.async_entry_unavailable",
+        format!("{KEYWORD_ASYNC} task entry unavailable"),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
 /// `RUN` interrupted by cancellation. Takes the rendered command
 /// (shell text or pty `what`); one key covers both, the template
 /// is identical. No source rides along.
@@ -6031,6 +6111,12 @@ mod tests {
             eval_continue_outside_loop().key(),
             eval_capture_flow_outside_loop(1, "BREAK").key(),
             eval_capture_return_outside_function(1).key(),
+            eval_block_flow_crosses_block(1, "BREAK").key(),
+            eval_async_flow_crosses_async(1, "BREAK").key(),
+            eval_capture_with_io_stdout("LET").key(),
+            eval_capture_not_utf8("LET", "a", eval_remove_missing("x")).key(),
+            eval_async_entry_unavailable().key(),
+            eval_with_io_tty_live_pipe("stdin").key(),
             eval_run_cancelled("echo hi").key(),
             eval_run_argv_cancelled(&["echo".to_string()]).key(),
             eval_run_unexpected_capture("echo hi").key(),
@@ -6584,6 +6670,34 @@ mod tests {
         assert_eq!(
             eval_capture_return_outside_function(1).message(),
             "step 1: RETURN outside function (cannot be captured)"
+        );
+        assert_eq!(
+            eval_block_flow_crosses_block(1, "BREAK").message(),
+            "step 1: BREAK cannot cross block boundary"
+        );
+        assert_eq!(
+            eval_async_flow_crosses_async(1, "RETURN").message(),
+            "step 1: RETURN cannot cross ASYNC boundary"
+        );
+        assert_eq!(
+            eval_capture_with_io_stdout("LET").message(),
+            "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
+        );
+        assert_eq!(
+            eval_capture_not_utf8("LET", "a", eval_remove_missing("x")).message(),
+            "LET $a capture is not valid UTF-8"
+        );
+        assert_eq!(
+            eval_with_io_tty_live_pipe("stdin").message(),
+            "WITH_IO [tty] stdin cannot arrive on a live OS pipe; bind a script pipe with stdin=$var"
+        );
+        assert_eq!(
+            eval_with_io_tty_live_pipe("stdout").message(),
+            "WITH_IO [tty] stdout cannot arrive on a live OS pipe; bind a script pipe with stdout=$var"
+        );
+        assert_eq!(
+            eval_async_entry_unavailable().message(),
+            "ASYNC task entry unavailable"
         );
         assert_eq!(
             eval_run_cancelled("echo hi").message(),
