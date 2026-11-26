@@ -25,6 +25,7 @@ const FIELD_VALUE: &str = "value";
 const FIELD_MIN: &str = "min";
 const FIELD_MAX: &str = "max";
 const FIELD_NEEDLE: &str = "needle";
+const FIELD_REASON: &str = "reason";
 
 /// Table cell of an unrenderable type. Takes the value type name;
 /// rendering lives here. Shared by the cell and nested-JSON paths:
@@ -69,6 +70,21 @@ pub fn table_no_columns() -> Diagnostic {
         "md.table.no_columns",
         "MAP_TO_MD_TABLE found no columns to render".to_string(),
         Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Nested cell value failed JSON encoding. Takes the concrete
+/// serialization failure; the text rides verbatim (no prefix), so
+/// the retired bare propagation matches byte-identically.
+/// Practically unreachable (`serde_json::Value` serializes
+/// infallibly); the constructor exists so the fallible signature
+/// stays honest instead of hiding a panic.
+pub fn table_json_encode_failed(reason: &serde_json::Error) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "md.table.json_encode_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[(FIELD_REASON, reason_text.as_str())]),
     )
 }
 
@@ -128,6 +144,20 @@ pub fn toc_inline_requires_single_level(min_level: i64, max_level: i64) -> Diagn
     )
 }
 
+/// TOC option shape check failed. Takes the wrapped `check_value_at`
+/// failure; the text rides verbatim (never stringified into a new
+/// template), so the retired bare propagation matches
+/// byte-identically. Shared by all four per-key reads: one key, one
+/// mode.
+pub fn toc_option_check_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "md.toc.option_check_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[(FIELD_REASON, reason_text.as_str())]),
+    )
+}
+
 /// Section needle matching no heading. Takes the needle; `Debug`
 /// quoting lives here.
 pub fn section_no_heading(needle: &str) -> Diagnostic {
@@ -153,6 +183,10 @@ pub fn section_offsets_out_of_bounds() -> Diagnostic {
 mod tests {
     use super::*;
 
+    fn serde_err() -> serde_json::Error {
+        serde_json::from_slice::<serde_json::Value>(b"{bad}").unwrap_err()
+    }
+
     #[test]
     fn each_failure_has_a_distinct_key() {
         let keys = [
@@ -160,10 +194,12 @@ mod tests {
             table_non_finite_float(f64::NAN).key(),
             table_expects_map_or_list().key(),
             table_no_columns().key(),
+            table_json_encode_failed(&serde_err()).key(),
             toc_invalid_format("grid").key(),
             toc_level_out_of_range("min_level", 0).key(),
             toc_min_exceeds_max(4, 2).key(),
             toc_inline_requires_single_level(2, 3).key(),
+            toc_option_check_failed(&anyhow::anyhow!("boom")).key(),
             section_no_heading("[9.9.9]").key(),
             section_offsets_out_of_bounds().key(),
         ];
@@ -200,6 +236,10 @@ mod tests {
             "MAP_TO_MD_TABLE found no columns to render"
         );
         assert_eq!(
+            table_json_encode_failed(&serde_err()).message(),
+            "key must be a string at line 1 column 2"
+        );
+        assert_eq!(
             toc_invalid_format("grid").message(),
             "TOC option 'format' must be one of: tree, inline, got \"grid\""
         );
@@ -218,6 +258,10 @@ mod tests {
         assert_eq!(
             toc_inline_requires_single_level(2, 3).message(),
             "TOC option error: format 'inline' requires max_level == min_level (single depth layer), got min_level=2, max_level=3"
+        );
+        assert_eq!(
+            toc_option_check_failed(&anyhow::anyhow!("boom")).message(),
+            "boom"
         );
         assert_eq!(
             section_no_heading("[9.9.9]").message(),

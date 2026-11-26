@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::diagnostics as md_diag;
 
@@ -35,7 +35,7 @@ pub fn escape_table_cell(s: &str) -> String {
 /// maps and lists fall back to compact JSON, durations and paths use
 /// their display forms, and opaque handles fail instead of rendering
 /// noise.
-fn cell_text(value: &oxdock_parser::Value) -> Result<String> {
+fn cell_text(value: &oxdock_parser::Value) -> DiagnosticResult<String> {
     if let Some(s) = value.as_str() {
         return Ok(escape_table_cell(s));
     }
@@ -57,11 +57,12 @@ fn cell_text(value: &oxdock_parser::Value) -> Result<String> {
         return Ok(escape_table_cell(&p.to_string_lossy()));
     }
     if value.as_map().is_some() || value.as_list().is_some() {
-        return Ok(escape_table_cell(&serde_json::to_string(&to_json(value)?)?));
+        let nested = to_json(value)?;
+        let encoded = serde_json::to_string(&nested)
+            .map_err(|err| md_diag::table_json_encode_failed(&err))?;
+        return Ok(escape_table_cell(&encoded));
     }
-    Err(anyhow::Error::new(md_diag::table_unrenderable_type(
-        value.type_name(),
-    )))
+    Err(md_diag::table_unrenderable_type(value.type_name()))
 }
 
 /// Convert a script value to JSON for nested cell fallback. Mirrors the
@@ -79,7 +80,7 @@ fn cell_text(value: &oxdock_parser::Value) -> Result<String> {
 /// values arrive here (top-level scalars take the `cell_text` fast
 /// path); the result is embedded inside already-escaped cell text
 /// rather than emitted as standalone JSON.
-fn to_json(value: &oxdock_parser::Value) -> Result<serde_json::Value> {
+fn to_json(value: &oxdock_parser::Value) -> DiagnosticResult<serde_json::Value> {
     if let Some(map) = value.as_map() {
         let mut out = serde_json::Map::with_capacity(map.len());
         for (key, item) in map {
@@ -91,7 +92,7 @@ fn to_json(value: &oxdock_parser::Value) -> Result<serde_json::Value> {
         return list
             .iter()
             .map(to_json)
-            .collect::<Result<Vec<_>>>()
+            .collect::<DiagnosticResult<Vec<_>>>()
             .map(serde_json::Value::Array);
     }
     if let Some(s) = value.as_str() {
@@ -101,8 +102,8 @@ fn to_json(value: &oxdock_parser::Value) -> Result<serde_json::Value> {
         return Ok(serde_json::Value::Number(serde_json::Number::from(i)));
     }
     if let Some(f) = value.as_f64() {
-        let number = serde_json::Number::from_f64(f)
-            .ok_or_else(|| anyhow::Error::new(md_diag::table_non_finite_float(f)))?;
+        let number =
+            serde_json::Number::from_f64(f).ok_or_else(|| md_diag::table_non_finite_float(f))?;
         return Ok(serde_json::Value::Number(number));
     }
     if let Some(b) = value.as_bool() {
@@ -116,9 +117,7 @@ fn to_json(value: &oxdock_parser::Value) -> Result<serde_json::Value> {
     if let Some(p) = value.as_path() {
         return Ok(serde_json::Value::String(p.to_string_lossy().to_string()));
     }
-    Err(anyhow::Error::new(md_diag::table_unrenderable_type(
-        value.type_name(),
-    )))
+    Err(md_diag::table_unrenderable_type(value.type_name()))
 }
 
 /// Render record data as a Markdown table, dataframe style.
@@ -172,7 +171,7 @@ fn to_json(value: &oxdock_parser::Value) -> Result<serde_json::Value> {
 ///
 /// Scalars, lists holding non MAPs, and empty input with no columns
 /// fail strict instead of emitting a misleading table.
-pub fn map_to_table(value: &oxdock_parser::Value) -> Result<String> {
+pub fn map_to_table(value: &oxdock_parser::Value) -> DiagnosticResult<String> {
     let records: Vec<&BTreeMap<String, oxdock_parser::Value>>;
     if let Some(map) = value.as_map() {
         records = vec![map];
@@ -182,13 +181,13 @@ pub fn map_to_table(value: &oxdock_parser::Value) -> Result<String> {
             match item.as_map() {
                 Some(map) => vec.push(map),
                 None => {
-                    return Err(anyhow::Error::new(md_diag::table_expects_map_or_list()));
+                    return Err(md_diag::table_expects_map_or_list());
                 }
             }
         }
         records = vec;
     } else {
-        return Err(anyhow::Error::new(md_diag::table_expects_map_or_list()));
+        return Err(md_diag::table_expects_map_or_list());
     }
     // Raw keys drive lookups, escaped keys drive display: a key holding
     // `|` or a newline must not break the table it heads.
@@ -199,7 +198,7 @@ pub fn map_to_table(value: &oxdock_parser::Value) -> Result<String> {
         .into_iter()
         .collect();
     if keys.is_empty() {
-        return Err(anyhow::Error::new(md_diag::table_no_columns()));
+        return Err(md_diag::table_no_columns());
     }
     let headers: Vec<String> = keys.iter().map(|k| escape_table_cell(k)).collect();
     // Render every cell up front so unrenderable values fail strict here
@@ -299,7 +298,9 @@ pub struct Heading {
 /// explicitly provided, it collapses to `min_level` so a bare
 /// `{format: "inline"}` means the `min_level` layer instead of an
 /// unforced multi-level failure.
-pub fn resolve_toc_options(map: &BTreeMap<String, oxdock_parser::Value>) -> Result<TocOptions> {
+pub fn resolve_toc_options(
+    map: &BTreeMap<String, oxdock_parser::Value>,
+) -> DiagnosticResult<TocOptions> {
     // Per-key reads: one shape check per key, then direct
     // narrowing. Bounds and cross-key rules below are domain logic.
     let min_level = match map.get(OPT_MIN_LEVEL) {
@@ -308,7 +309,8 @@ pub fn resolve_toc_options(map: &BTreeMap<String, oxdock_parser::Value>) -> Resu
                 &oxdock_parser::TypeTag::Int,
                 value,
                 "TOC option '{OPT_MIN_LEVEL}'",
-            )?;
+            )
+            .map_err(|err| md_diag::toc_option_check_failed(&err))?;
             value.as_i64().expect("check_value_at verified INT")
         }
         None => 2,
@@ -319,7 +321,8 @@ pub fn resolve_toc_options(map: &BTreeMap<String, oxdock_parser::Value>) -> Resu
                 &oxdock_parser::TypeTag::Int,
                 value,
                 "TOC option '{OPT_MAX_LEVEL}'",
-            )?;
+            )
+            .map_err(|err| md_diag::toc_option_check_failed(&err))?;
             Some(value.as_i64().expect("check_value_at verified INT"))
         }
         None => None,
@@ -330,7 +333,8 @@ pub fn resolve_toc_options(map: &BTreeMap<String, oxdock_parser::Value>) -> Resu
                 &oxdock_parser::TypeTag::String,
                 value,
                 "TOC option '{OPT_FORMAT}'",
-            )?;
+            )
+            .map_err(|err| md_diag::toc_option_check_failed(&err))?;
             value
                 .as_str()
                 .expect("check_value_at verified STRING")
@@ -344,7 +348,8 @@ pub fn resolve_toc_options(map: &BTreeMap<String, oxdock_parser::Value>) -> Resu
                 &oxdock_parser::TypeTag::String,
                 value,
                 "TOC option '{OPT_DELIMITER}'",
-            )?;
+            )
+            .map_err(|err| md_diag::toc_option_check_failed(&err))?;
             value
                 .as_str()
                 .expect("check_value_at verified STRING")
@@ -356,7 +361,7 @@ pub fn resolve_toc_options(map: &BTreeMap<String, oxdock_parser::Value>) -> Resu
         "tree" => TocFormat::Tree,
         "inline" => TocFormat::Inline,
         other => {
-            return Err(anyhow::Error::new(md_diag::toc_invalid_format(other)));
+            return Err(md_diag::toc_invalid_format(other));
         }
     };
     let max_level = match (format, max_level_explicit) {
@@ -364,25 +369,17 @@ pub fn resolve_toc_options(map: &BTreeMap<String, oxdock_parser::Value>) -> Resu
         (_, explicit) => explicit.unwrap_or(3),
     };
     if !(1..=6).contains(&min_level) {
-        return Err(anyhow::Error::new(md_diag::toc_level_out_of_range(
-            OPT_MIN_LEVEL,
-            min_level,
-        )));
+        return Err(md_diag::toc_level_out_of_range(OPT_MIN_LEVEL, min_level));
     }
     if !(1..=6).contains(&max_level) {
-        return Err(anyhow::Error::new(md_diag::toc_level_out_of_range(
-            OPT_MAX_LEVEL,
-            max_level,
-        )));
+        return Err(md_diag::toc_level_out_of_range(OPT_MAX_LEVEL, max_level));
     }
     if min_level > max_level {
-        return Err(anyhow::Error::new(md_diag::toc_min_exceeds_max(
-            min_level, max_level,
-        )));
+        return Err(md_diag::toc_min_exceeds_max(min_level, max_level));
     }
     if format == TocFormat::Inline && max_level != min_level {
-        return Err(anyhow::Error::new(
-            md_diag::toc_inline_requires_single_level(min_level, max_level),
+        return Err(md_diag::toc_inline_requires_single_level(
+            min_level, max_level,
         ));
     }
     let min_level = min_level as u8;
@@ -474,7 +471,7 @@ pub fn extract_headings(document: &str, min_level: u8, max_level: u8) -> Vec<Hea
 /// only real heading events qualify, so fences showing `##` shapes stay
 /// invisible. The slice keeps its heading and ends with exactly one
 /// trailing newline.
-pub fn extract_section(document: &str, needle: &str) -> Result<String> {
+pub fn extract_section(document: &str, needle: &str) -> DiagnosticResult<String> {
     use pulldown_cmark::{Event, Parser, Tag, TagEnd};
     let mut headings: Vec<(u8, String, usize, usize)> = Vec::new();
     let mut current_level: Option<u8> = None;
@@ -507,7 +504,7 @@ pub fn extract_section(document: &str, needle: &str) -> Result<String> {
     let start_index = headings
         .iter()
         .position(|(_, text, _, _)| text.starts_with(needle))
-        .ok_or_else(|| anyhow::Error::new(md_diag::section_no_heading(needle)))?;
+        .ok_or_else(|| md_diag::section_no_heading(needle))?;
     let level = headings[start_index].0;
     let slice_start = headings[start_index].2;
     let mut slice_end = document.len();
@@ -519,7 +516,7 @@ pub fn extract_section(document: &str, needle: &str) -> Result<String> {
     }
     let mut body = document
         .get(slice_start..slice_end)
-        .ok_or_else(|| anyhow::Error::new(md_diag::section_offsets_out_of_bounds()))?
+        .ok_or_else(md_diag::section_offsets_out_of_bounds)?
         .to_string();
     while body.ends_with('\n') || body.ends_with('\r') {
         body.pop();
@@ -554,13 +551,11 @@ fn render_toc_inline(headings: &[Heading], delimiter: &str) -> String {
 ///
 /// Headings outside `[min_level, max_level]` are ignored. No headings
 /// means an empty string so empty sections still render.
-pub fn generate_toc(document: &str, options: &TocOptions) -> Result<String> {
+pub fn generate_toc(document: &str, options: &TocOptions) -> DiagnosticResult<String> {
     if options.format == TocFormat::Inline && options.max_level != options.min_level {
-        return Err(anyhow::Error::new(
-            md_diag::toc_inline_requires_single_level(
-                i64::from(options.min_level),
-                i64::from(options.max_level),
-            ),
+        return Err(md_diag::toc_inline_requires_single_level(
+            i64::from(options.min_level),
+            i64::from(options.max_level),
         ));
     }
     let headings = extract_headings(document, options.min_level, options.max_level);

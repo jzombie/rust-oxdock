@@ -2933,6 +2933,34 @@ transport, so this phase is mechanical:
    test-stub resolvers (test infrastructure, never user
    facing); child.rs CreateJobObjectW/AssignProcessToJobObject
    contexts are windows-only (cant verify on macOS).
+   markdown flip bulk 2026-11-27 (markdown-plugin markdown.rs
+   plus diagnostics, 6 signature flips, 2 new md.* ctors):
+   markdown.rs goes anyhow-free: cell_text plus to_json plus
+   map_to_table plus resolve_toc_options plus extract_section
+   plus generate_toc flip to DiagnosticResult; all
+   Error::new shims drop to bare ctors; anyhow Result import
+   drops. funcs.rs #[oxdock_func] callers hold via blanket
+   From (no changes there); logic-tests conformance caller
+   holds (Display-based map_err, check-clean). Two foreign
+   ?s needed mapping: 4 check_value_at sites (stays anyhow by
+   design) map through new verbatim passthrough
+   toc_option_check_failed (one key shared by all four
+   per-key reads; text rides {reason:#} so retired bare
+   propagation matches byte-identically), and the nested
+   serde_json::to_string site maps through new verbatim
+   table_json_encode_failed (concrete &serde_json::Error;
+   practically unreachable since Value serializes
+   infallibly, but the ctor keeps the signature honest
+   instead of hiding a panic). Pins added to
+   key-uniqueness plus canonical-wording tests. md lib 26
+   plus integration 1 plus doctest 1 green; md clippy zero,
+   fmt clean on both files. FOLLOW-UP: toc_option_check_failed
+   takes reason: &anyhow::Error today because check_value_at
+   stays anyhow by design; once check_value_at flips to
+   DiagnosticResult, normalize the ctor to reason: Diagnostic
+   by value (unwrapping, not stringifying) so the inner
+   dsl.check.* key survives in the chain instead of
+   flattening to text.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
