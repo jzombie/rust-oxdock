@@ -11,12 +11,12 @@ pub use assets::{
 };
 pub use track::{collect_env_references, plan_input_directives};
 
-use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::env as oxdock_env;
 use oxdock_process::CommandBuilder;
 
 /// Emit `cargo:rustc-env=...` directives for enabled Cargo features.
-pub fn emit_feature_envs() -> Result<()> {
+pub fn emit_feature_envs() -> DiagnosticResult<()> {
     let lines = feature_env_lines();
     for line in lines {
         println!("{line}");
@@ -47,7 +47,7 @@ fn feature_env_lines() -> Vec<String> {
 /// Emit `cargo:rustc-env=...` directives for cfg keys from `rustc --print cfg`.
 /// A rustc that runs but exits nonzero contributes nothing; a rustc that
 /// cannot spawn is an error.
-pub fn emit_cfg_envs() -> Result<()> {
+pub fn emit_cfg_envs() -> DiagnosticResult<()> {
     let rustc =
         std::env::var(oxdock_env::cargo::build::RUSTC).unwrap_or_else(|_| "rustc".to_string());
     for line in collect_cfg_lines(&rustc)? {
@@ -72,7 +72,7 @@ fn cfg_command_args(target: Option<&str>) -> Vec<String> {
 /// A rustc that runs but exits nonzero is swallowed into an empty list so
 /// build scripts survive exotic toolchains; a rustc that cannot spawn at all
 /// still surfaces as an error.
-fn collect_cfg_lines(rustc: &str) -> Result<Vec<String>> {
+fn collect_cfg_lines(rustc: &str) -> DiagnosticResult<Vec<String>> {
     let mut cmd = CommandBuilder::new(rustc);
     let target = std::env::var(oxdock_env::cargo::build::TARGET).ok();
     for arg in cfg_command_args(target.as_deref()) {
@@ -87,7 +87,7 @@ fn collect_cfg_lines(rustc: &str) -> Result<Vec<String>> {
 }
 
 /// Emit both feature and cfg env directives for downstream proc-macros.
-pub fn emit_feature_and_cfg_envs() -> Result<()> {
+pub fn emit_feature_and_cfg_envs() -> DiagnosticResult<()> {
     emit_feature_envs()?;
     emit_cfg_envs()?;
     Ok(())

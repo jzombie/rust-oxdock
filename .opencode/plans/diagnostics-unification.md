@@ -2984,6 +2984,16 @@ transport, so this phase is mechanical:
    parse-surface inner. Test pins swap anyhow bad endpoint
    for a real Diagnostic leaf. cli 49 plus 12 green, clippy
    zero, fmt clean; lean no-default-features check clean.
+   build env-emit flip bulk 2026-11-27 (build lib.rs, 4
+   signature flips, zero new ctors): emit_feature_envs plus
+   emit_cfg_envs plus collect_cfg_lines plus
+   emit_feature_and_cfg_envs flip to DiagnosticResult; pure
+   propagation (CommandBuilder::output is already
+   DiagnosticResult, everything else infallible); anyhow
+   Result import drops, lib.rs now anyhow-free. Fixture
+   build.rs callers hold via .expect (Diagnostic is Debug).
+   build 27 plus 4 green, clippy zero, fmt clean, workspace
+   check clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
