@@ -2212,7 +2212,7 @@ declare_commands! {
                     ParseErrorKind::Validation {
                         command: "UNARCHIVE".to_string(),
                     },
-                    dsl_diag::unarchive_bad_max_bytes(&e),
+                    dsl_diag::unarchive_bad_max_bytes(e),
                     &SpanContext::line_only(0),
                 ));
             }

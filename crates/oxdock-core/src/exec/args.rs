@@ -450,7 +450,7 @@ pub(crate) fn resolve_arg_as_int<P: ProcessManager>(
 pub(crate) fn resolve_arg_as_duration<P: ProcessManager>(
     arg: &Arg,
     cx: &mut StepCtx<'_, P>,
-) -> Result<std::time::Duration> {
+) -> DiagnosticResult<std::time::Duration> {
     let resolved = resolve_arg(arg, cx)?;
     oxdock_parser::command::parse_duration(&resolved)
 }

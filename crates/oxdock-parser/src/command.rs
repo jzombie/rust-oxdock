@@ -2,10 +2,11 @@ use crate::ast::{Arg, Expr, StepKind};
 use crate::diagnostics as dsl_diag;
 use crate::error::{ParseError, ParseErrorKind, SpanContext};
 use crate::{
-    BOOL_TYPE_NAME, DURATION_TYPE_NAME, INT_TYPE_NAME, KEYWORD_TIMEOUT, LIST_TYPE_NAME,
-    PATH_TYPE_NAME, STRING_TYPE_NAME,
+    BOOL_TYPE_NAME, DURATION_TYPE_NAME, INT_TYPE_NAME, LIST_TYPE_NAME, PATH_TYPE_NAME,
+    STRING_TYPE_NAME,
 };
 use anyhow::{Result, anyhow, bail};
+use oxdock_diagnostics::DiagnosticResult;
 
 /// Metadata for a single command argument.
 pub struct ArgSpec {
@@ -93,7 +94,9 @@ impl ArgType {
                 .parse::<i64>()
                 .map(|_| ())
                 .map_err(|_| anyhow!("expected int, got {literal:?}")),
-            ArgType::Duration => parse_duration(literal).map(|_| ()),
+            ArgType::Duration => parse_duration(literal)
+                .map(|_| ())
+                .map_err(anyhow::Error::from),
             ArgType::List => {
                 if literal.starts_with('$') {
                     Ok(())
@@ -364,7 +367,7 @@ pub fn split_assignment(text: &str) -> Result<Option<(String, Arg)>> {
 /// number means seconds). One optional space may separate the number
 /// from its unit (`30 s`), like byte counts: bare DSL tokens still
 /// split upstream, so this covers quoted strings and variables.
-pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
+pub fn parse_duration(s: &str) -> DiagnosticResult<std::time::Duration> {
     let s = join_single_space(s)?;
     let (digits, unit_ms): (&str, u64) = if let Some(v) = s.strip_suffix("ms") {
         (v, 1)
@@ -379,12 +382,12 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
     };
     let n: u64 = digits
         .parse()
-        .map_err(|_| anyhow!("invalid {KEYWORD_TIMEOUT} duration: {s}"))?;
+        .map_err(|_| dsl_diag::invalid_timeout_duration(&s))?;
     let millis = n
         .checked_mul(unit_ms)
-        .ok_or_else(|| anyhow!("{KEYWORD_TIMEOUT} duration out of range: {s}"))?;
+        .ok_or_else(|| dsl_diag::timeout_duration_out_of_range(&s))?;
     if millis == 0 {
-        bail!("{KEYWORD_TIMEOUT} duration must be positive, got: {s}");
+        return Err(dsl_diag::timeout_duration_not_positive(&s));
     }
     Ok(std::time::Duration::from_millis(millis))
 }
@@ -442,11 +445,11 @@ pub fn strip_digit_separators(text: &str) -> String {
 /// (three parts, a split digit run like `1 0`, an empty string) fails:
 /// the space may only separate the number from its unit, never split
 /// the digits themselves.
-fn join_single_space(s: &str) -> Result<String> {
+fn join_single_space(s: &str) -> DiagnosticResult<String> {
     let mut parts = s.split_whitespace();
     let (first, second) = (parts.next(), parts.next());
     if parts.next().is_some() {
-        bail!("invalid numeric token: {s}");
+        return Err(dsl_diag::invalid_numeric_token(s));
     }
     match (first, second) {
         (Some(digits), None) => Ok(digits.to_string()),
@@ -460,7 +463,7 @@ fn join_single_space(s: &str) -> Result<String> {
         {
             Ok(format!("{digits}{unit}"))
         }
-        _ => bail!("invalid numeric token: {s}"),
+        _ => Err(dsl_diag::invalid_numeric_token(s)),
     }
 }
 
@@ -476,7 +479,7 @@ fn join_single_space(s: &str) -> Result<String> {
 /// an exact integer spelling like `1500MB`). Matching is
 /// case-insensitive (`1gb`, `1GB`, and `1Gb` agree), mirroring
 /// [`parse_duration`]: digits only, no fractions, no signs.
-pub fn parse_byte_count(s: &str) -> Result<u64> {
+pub fn parse_byte_count(s: &str) -> DiagnosticResult<u64> {
     let compact = join_single_space(s)?;
     let s = compact.as_str();
     let lower = s.to_ascii_lowercase();
@@ -510,12 +513,12 @@ pub fn parse_byte_count(s: &str) -> Result<u64> {
     let digits = digits.strip_prefix('+').unwrap_or(&digits);
     let n: u64 = digits
         .parse()
-        .map_err(|_| anyhow!("invalid byte count: {s}"))?;
+        .map_err(|_| dsl_diag::invalid_byte_count(s))?;
     let bytes = n
         .checked_mul(unit)
-        .ok_or_else(|| anyhow!("byte count out of range: {s}"))?;
+        .ok_or_else(|| dsl_diag::byte_count_out_of_range(s))?;
     if bytes == 0 {
-        bail!("byte count must be positive, got: {s}");
+        return Err(dsl_diag::byte_count_not_positive(s));
     }
     Ok(bytes)
 }

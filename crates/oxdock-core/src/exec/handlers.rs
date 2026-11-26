@@ -1152,7 +1152,7 @@ pub(super) fn unarchive<P: ProcessManager>(
 ) -> Result<()> {
     let cap = match max_bytes {
         Some(raw) => oxdock_parser::command::parse_byte_count(raw).map_err(|e| {
-            anyhow::Error::new(diag::eval_unarchive_bad_max_bytes(src, dst, raw, &e))
+            anyhow::Error::new(diag::eval_unarchive_bad_max_bytes(src, dst, raw, e))
         })?,
         None => DEFAULT_UNARCHIVE_MAX_BYTES,
     };

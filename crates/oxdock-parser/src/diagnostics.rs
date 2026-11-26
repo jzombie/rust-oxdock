@@ -15,8 +15,8 @@ use crate::constants::{
     KEYWORD_EXIT, KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_INHERIT_ENV,
     KEYWORD_INSTALL, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_MKDIR, KEYWORD_PROMPT,
     KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE,
-    KEYWORD_SLEEP, KEYWORD_SYMLINK, KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO,
-    KEYWORD_WORKDIR, KEYWORD_WORKSPACE, KEYWORD_WRITE, SCRIPT_MODULE_NAME,
+    KEYWORD_SLEEP, KEYWORD_SYMLINK, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE,
+    KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WORKSPACE, KEYWORD_WRITE, SCRIPT_MODULE_NAME,
 };
 use crate::tag::{
     BOOL_TYPE_NAME, FLOAT_TYPE_NAME, HANDLE_TYPE_NAME, INT_TYPE_NAME, LIST_TYPE_NAME,
@@ -550,18 +550,21 @@ pub fn unarchive_requires_destination() -> Diagnostic {
     )
 }
 
-/// `UNARCHIVE --max-bytes` with an unparseable byte count. Takes the
-/// underlying failure; `{reason:#}` formatting lives here.
-pub fn unarchive_bad_max_bytes(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+/// `UNARCHIVE` whose static `--max-bytes` token does not parse.
+/// Takes the underlying diagnostic by value; bare outer context
+/// plus the chained source, so the message never embeds the
+/// inner text twice. `{err:#}` renders the legacy shape.
+pub fn unarchive_bad_max_bytes(reason: Diagnostic) -> Diagnostic {
+    let reason_text = reason.to_string();
     Diagnostic::new(
         "dsl.validation.unarchive_bad_max_bytes",
-        format!("{KEYWORD_UNARCHIVE} --max-bytes {reason_text}"),
+        format!("{KEYWORD_UNARCHIVE} --max-bytes"),
         Diagnostic::make_fields(&[
             (FIELD_COMMAND, KEYWORD_UNARCHIVE),
             (FIELD_REASON, &reason_text),
         ]),
     )
+    .with_source(std::sync::Arc::new(reason))
 }
 
 /// `EXPORT` naming a function with no top-level `FUNC` or known module
@@ -934,6 +937,82 @@ pub fn sleep_takes_one() -> Diagnostic {
     )
 }
 
+/// Numeric token with more than one whitespace-separated part or a
+/// non-numeric shape. Takes the raw token; quoting lives nowhere
+/// (bytes stay identical to the legacy bail). One key covers the
+/// too-many-parts and bad-shape arms: the failure mode is identical.
+pub fn invalid_numeric_token(got: &str) -> Diagnostic {
+    let message = format!("invalid numeric token: {got}");
+    Diagnostic::new(
+        "dsl.validation.invalid_numeric_token",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, got)]),
+    )
+}
+
+/// `TIMEOUT` duration whose digits do not parse. Takes the compacted
+/// token; bytes stay identical to the legacy bail.
+pub fn invalid_timeout_duration(got: &str) -> Diagnostic {
+    let message = format!("invalid {KEYWORD_TIMEOUT} duration: {got}");
+    Diagnostic::new(
+        "dsl.validation.invalid_timeout_duration",
+        message,
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_TIMEOUT), (FIELD_GOT, got)]),
+    )
+}
+
+/// `TIMEOUT` duration overflowing `u64` milliseconds. Takes the
+/// compacted token.
+pub fn timeout_duration_out_of_range(got: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_TIMEOUT} duration out of range: {got}");
+    Diagnostic::new(
+        "dsl.validation.timeout_duration_out_of_range",
+        message,
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_TIMEOUT), (FIELD_GOT, got)]),
+    )
+}
+
+/// `TIMEOUT` duration of zero. Takes the compacted token.
+pub fn timeout_duration_not_positive(got: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_TIMEOUT} duration must be positive, got: {got}");
+    Diagnostic::new(
+        "dsl.validation.timeout_duration_not_positive",
+        message,
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_TIMEOUT), (FIELD_GOT, got)]),
+    )
+}
+
+/// Byte-count token whose digits do not parse. Takes the compacted
+/// token; bytes stay identical to the legacy bail.
+pub fn invalid_byte_count(got: &str) -> Diagnostic {
+    let message = format!("invalid byte count: {got}");
+    Diagnostic::new(
+        "dsl.validation.invalid_byte_count",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, got)]),
+    )
+}
+
+/// Byte-count token overflowing `u64` bytes. Takes the compacted token.
+pub fn byte_count_out_of_range(got: &str) -> Diagnostic {
+    let message = format!("byte count out of range: {got}");
+    Diagnostic::new(
+        "dsl.validation.byte_count_out_of_range",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, got)]),
+    )
+}
+
+/// Byte-count token of zero. Takes the compacted token.
+pub fn byte_count_not_positive(got: &str) -> Diagnostic {
+    let message = format!("byte count must be positive, got: {got}");
+    Diagnostic::new(
+        "dsl.validation.byte_count_not_positive",
+        message,
+        Diagnostic::make_fields(&[(FIELD_GOT, got)]),
+    )
+}
+
 /// `LIST_APPEND` without a LIST variable.
 pub fn list_append_requires_list() -> Diagnostic {
     Diagnostic::new(
@@ -1294,7 +1373,7 @@ mod tests {
             archive_requires_destination().key(),
             unarchive_requires_archive().key(),
             unarchive_requires_destination().key(),
-            unarchive_bad_max_bytes(&anyhow::anyhow!("bad count")).key(),
+            unarchive_bad_max_bytes(invalid_byte_count("abc")).key(),
             export_unknown_func("NOPE").key(),
             export_type_qualified("LIB::T").key(),
             export_unknown_type("NOPE").key(),
@@ -1327,6 +1406,13 @@ mod tests {
             exit_requires_code().key(),
             sleep_requires_duration().key(),
             sleep_takes_one().key(),
+            invalid_numeric_token("x").key(),
+            invalid_timeout_duration("x").key(),
+            timeout_duration_out_of_range("x").key(),
+            timeout_duration_not_positive("x").key(),
+            invalid_byte_count("x").key(),
+            byte_count_out_of_range("x").key(),
+            byte_count_not_positive("x").key(),
             list_append_requires_list().key(),
             list_append_requires_sigil("x").key(),
             list_append_requires_item().key(),
@@ -1529,10 +1615,16 @@ mod tests {
             unarchive_requires_destination().message(),
             "UNARCHIVE requires a destination"
         );
-        let inner = anyhow::anyhow!("bad count");
         assert_eq!(
-            unarchive_bad_max_bytes(&inner).message(),
-            "UNARCHIVE --max-bytes bad count"
+            unarchive_bad_max_bytes(invalid_byte_count("abc")).message(),
+            "UNARCHIVE --max-bytes"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(unarchive_bad_max_bytes(invalid_byte_count("abc")))
+            ),
+            "UNARCHIVE --max-bytes: invalid byte count: abc"
         );
         assert_eq!(write_requires_path().message(), "WRITE requires a path");
         assert_eq!(append_requires_path().message(), "APPEND requires a path");
@@ -1677,6 +1769,34 @@ mod tests {
         assert_eq!(
             sleep_takes_one().message(),
             "SLEEP takes exactly one duration argument"
+        );
+        assert_eq!(
+            invalid_numeric_token("1 2 3").message(),
+            "invalid numeric token: 1 2 3"
+        );
+        assert_eq!(
+            invalid_timeout_duration("abc").message(),
+            "invalid TIMEOUT duration: abc"
+        );
+        assert_eq!(
+            timeout_duration_out_of_range("99999999999999999999h").message(),
+            "TIMEOUT duration out of range: 99999999999999999999h"
+        );
+        assert_eq!(
+            timeout_duration_not_positive("0s").message(),
+            "TIMEOUT duration must be positive, got: 0s"
+        );
+        assert_eq!(
+            invalid_byte_count("abc").message(),
+            "invalid byte count: abc"
+        );
+        assert_eq!(
+            byte_count_out_of_range("99999999999999999999GB").message(),
+            "byte count out of range: 99999999999999999999GB"
+        );
+        assert_eq!(
+            byte_count_not_positive("0").message(),
+            "byte count must be positive, got: 0"
         );
         assert_eq!(
             list_append_requires_list().message(),

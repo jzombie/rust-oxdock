@@ -2514,6 +2514,24 @@ transport, so this phase is mechanical:
    func_zero_value_missing). Core lib 410 plus integration 629
    green; clippy at baseline (3 pre-existing), fmt clean on both
    touched files.
+   numeric-tokens bulk 2026-11-27 (cross-crate, file-sized):
+   seven new dsl.validation.* ctors with key plus wording pins
+   (invalid_numeric_token; invalid/out-of-range/not-positive
+   twins for TIMEOUT durations and byte counts). command.rs
+   join_single_space, parse_duration, and parse_byte_count flip
+   to DiagnosticResult; 8 sites re-keyed with byte-identical
+   messages. Core follow-ons in the same bulk:
+   resolve_arg_as_duration flips to DiagnosticResult (unblocks
+   the parked flip; 5 call sites hold via blanket From),
+   eval_unarchive_bad_max_bytes normalizes to by-value
+   Diagnostic with chained source (message pin unchanged,
+   {:#} pin proves the legacy chain shape), and the parser
+   unarchive_bad_max_bytes twin goes bare-outer plus source
+   with the same proof. validate_literal keeps its anyhow
+   boundary with an explicit Error::from map. Parser 267+303
+   plus core lib 410 plus integration 629 green; clippy at
+   baseline (process 1 plus core 3 pre-existing), fmt clean on
+   all six touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

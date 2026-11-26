@@ -3053,9 +3053,9 @@ pub fn eval_unarchive_bad_max_bytes(
     src: &str,
     dst: &str,
     raw: &str,
-    reason: &anyhow::Error,
+    reason: Diagnostic,
 ) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+    let reason_text = reason.to_string();
     let message = format!("{KEYWORD_UNARCHIVE} {src} {dst}: --max-bytes {raw:?}");
     Diagnostic::new(
         "dsl.eval.unarchive_bad_max_bytes",
@@ -3067,7 +3067,7 @@ pub fn eval_unarchive_bad_max_bytes(
             ("reason", &reason_text),
         ]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new(reason))
 }
 
 /// `UNARCHIVE` member tripping the expansion cap. Takes the script
@@ -6629,7 +6629,13 @@ mod tests {
             eval_archive_destination_inside_tree("a", "b").key(),
             eval_unarchive_failed("a", "b", &anyhow::anyhow!("x")).key(),
             eval_unarchive_member_failed("a", "b", &anyhow::anyhow!("x")).key(),
-            eval_unarchive_bad_max_bytes("a", "b", "r", &anyhow::anyhow!("x")).key(),
+            eval_unarchive_bad_max_bytes(
+                "a",
+                "b",
+                "r",
+                oxdock_parser::diagnostics::invalid_byte_count("r"),
+            )
+            .key(),
             eval_unarchive_expansion_cap("a", "b", 8, "p").key(),
             eval_unarchive_refuses_symlink("a", "b", "p", "t").key(),
             eval_unarchive_restore_mode_failed("a", "b", &anyhow::anyhow!("x")).key(),
@@ -7445,8 +7451,26 @@ mod tests {
             "UNARCHIVE a b: member"
         );
         assert_eq!(
-            eval_unarchive_bad_max_bytes("a", "b", "r", &anyhow::anyhow!("boom")).message(),
+            eval_unarchive_bad_max_bytes(
+                "a",
+                "b",
+                "r",
+                oxdock_parser::diagnostics::invalid_byte_count("r")
+            )
+            .message(),
             "UNARCHIVE a b: --max-bytes \"r\""
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(eval_unarchive_bad_max_bytes(
+                    "a",
+                    "b",
+                    "r",
+                    oxdock_parser::diagnostics::invalid_byte_count("r")
+                ))
+            ),
+            "UNARCHIVE a b: --max-bytes \"r\": invalid byte count: r"
         );
         assert_eq!(
             eval_unarchive_expansion_cap("a", "b", 8, "p").message(),
