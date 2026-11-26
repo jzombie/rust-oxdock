@@ -2466,14 +2466,20 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// spelling (`env:` / `script_env:`) so the message quotes what
     /// the author wrote. Position renders like the runtime
     /// `step_error` context (`step N, line L, col C`).
-    fn check_env_name(&self, env: &Env, name: &str, prefix: &str, scope: &Scope) -> Result<()> {
+    fn check_env_name(
+        &self,
+        env: &Env,
+        name: &str,
+        prefix: &str,
+        scope: &Scope,
+    ) -> DiagnosticResult<()> {
         if !self.env_declared(env, name) {
-            return Err(anyhow::Error::new(check_diag::check_undeclared_env(
+            return Err(check_diag::check_undeclared_env(
                 &step_pos(scope.line, scope.col, scope.idx),
                 scope.label,
                 prefix,
                 name,
-            )));
+            ));
         }
         Ok(())
     }

@@ -1458,6 +1458,18 @@ transport, so this phase is mechanical:
    ride the blanket conversion unchanged. Core 409
    plus integration 629 green; clippy and fmt
    clean.
+   Env-gate step 2026-11-26: no new ctors, all
+   wordings already pinned. One signature flips
+   in static_check.rs: Checker check_env_name
+   returns DiagnosticResult. Body drops one
+   anyhow::Error::new wrapper; a pure leaf
+   (env_declared plus step_pos are infallible, no
+   fallible callees). Callers hold via the blanket
+   Diagnostic-into-anyhow conversion: anyhow walk
+   plus template sites use `?` unchanged, and the
+   one map_err(|_| ...) site discards the error so
+   the type change is invisible. Core 409 plus
+   integration 629 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
