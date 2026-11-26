@@ -2014,6 +2014,50 @@ pub fn eval_run_exec_requires_arg() -> Diagnostic {
     )
 }
 
+/// Pipe buffer that is not valid UTF-8. Takes the invoking verb and
+/// the conversion failure; `Display` rendering of the failure lives
+/// here. One key covers both `ASSERT` equality and `ASSERT_CONTAINS`,
+/// mirroring `check_flow_outside_loop`: the verb rides as a
+/// structured field. The text is inlined, so no source rides along.
+pub fn eval_pipe_not_utf8(verb: &str, reason: &std::string::FromUtf8Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("{verb} pipe content is not UTF-8: {reason_text}");
+    Diagnostic::new(
+        "dsl.eval.pipe_not_utf8",
+        message,
+        Diagnostic::make_fields(&[("verb", verb), ("reason", &reason_text)]),
+    )
+}
+
+/// `RUN` shell or pty spawn failure. Takes the rendered command
+/// (shell text or pty `what`) and the underlying failure verbatim:
+/// its message already names the cause, so the wrapper only adds the
+/// `RUN` prefix. Renders `{reason:#}` inline with no `with_source`,
+/// per the passthrough contract. One key covers both, mirroring
+/// `eval_run_cancelled`.
+pub fn eval_run_spawn_failed(command: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_RUN} {command}: {reason_text}");
+    Diagnostic::new(
+        "dsl.eval.run_spawn_failed",
+        message,
+        Diagnostic::make_fields(&[("command", command), ("reason", &reason_text)]),
+    )
+}
+
+/// `RUN` argv spawn failure. Takes the argv slice and the underlying
+/// failure verbatim; `Debug` rendering of the argv lives here and
+/// `{reason:#}` is inlined with no `with_source`.
+pub fn eval_run_argv_spawn_failed(argv: &[String], reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_RUN} {argv:?}: {reason_text}");
+    Diagnostic::new(
+        "dsl.eval.run_argv_spawn_failed",
+        message,
+        Diagnostic::make_fields(&[("argv", &format!("{argv:?}")), ("reason", &reason_text)]),
+    )
+}
+
 /// `int`-typed argument whose resolution failed. Takes the underlying
 /// failure verbatim: its message already names the argument and the
 /// cause, so no wrapper is added.
@@ -4808,6 +4852,9 @@ mod tests {
             eval_run_needs_program("[]").key(),
             eval_run_pty_exit_status("echo hi", 1).key(),
             eval_run_exec_requires_arg().key(),
+            eval_pipe_not_utf8("ASSERT", &String::from_utf8(vec![0xff]).unwrap_err()).key(),
+            eval_run_spawn_failed("echo hi", &anyhow::anyhow!("x")).key(),
+            eval_run_argv_spawn_failed(&["echo".to_string()], &anyhow::anyhow!("x")).key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -5236,6 +5283,21 @@ mod tests {
         assert_eq!(
             eval_run_exec_requires_arg().message(),
             "RUN exec form requires at least one argument"
+        );
+        assert!(
+            eval_pipe_not_utf8("ASSERT", &String::from_utf8(vec![0xff]).unwrap_err())
+                .message()
+                .starts_with("ASSERT pipe content is not UTF-8: ")
+        );
+        assert!(
+            eval_run_spawn_failed("echo hi", &anyhow::anyhow!("boom"))
+                .message()
+                .starts_with("RUN echo hi: ")
+        );
+        assert!(
+            eval_run_argv_spawn_failed(&["echo".to_string()], &anyhow::anyhow!("boom"))
+                .message()
+                .starts_with("RUN [\"echo\"]: ")
         );
         assert!(
             eval_run_exit_status("echo hi", &exit_status_sample())

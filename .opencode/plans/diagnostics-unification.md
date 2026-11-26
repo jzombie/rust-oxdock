@@ -2027,6 +2027,31 @@ transport, so this phase is mechanical:
    identical. Core 410 plus integration 629
    green; clippy at baseline (3 pre-existing),
    fmt clean on both touched files.
+   Pipe plus spawn transport bulk step
+   2026-11-26 (file-sized batch): three new
+   dsl.eval.* ctors with key plus wording
+   pins (pipe_not_utf8 with verb plus
+   FromUtf8Error covering ASSERT equality and
+   ASSERT_CONTAINS, one key mirroring
+   check_flow_outside_loop; run_spawn_failed
+   with command covering shell cmd plus pty
+   what, mirroring eval_run_cancelled;
+   run_argv_spawn_failed with argv debug).
+   Spawn ctors take &anyhow::Error passthrough
+   (outer-context RUN prefix plus {reason:#}
+   inline, no with_source per contract) because
+   spawn_command/spawn_argv/run_pty_session
+   return anyhow Result; pipe ctor takes
+   &FromUtf8Error concrete (text inlined, no
+   source, per pipe/fs precedent). Five sites
+   re-keyed via map_err plus anyhow Error new
+   (spawn trio drops with_context; pipe pair
+   drops with_context for direct FromUtf8
+   mapping). Bytes identical (context colon
+   plus source rendering preserved). Core 410
+   plus integration 629 green; clippy at
+   baseline (3 pre-existing), fmt clean on
+   both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

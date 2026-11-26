@@ -270,7 +270,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
     let mut handle = match cx
         .process
         .spawn_command(&ctx, cmd, options)
-        .with_context(|| format!("{KEYWORD_RUN} {}", cmd))?
+        .map_err(|e| anyhow::Error::new(diag::eval_run_spawn_failed(cmd, &e)))?
     {
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),
@@ -396,7 +396,7 @@ pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[Strin
     let mut handle = match cx
         .process
         .spawn_argv(&ctx, argv, options)
-        .with_context(|| format!("{KEYWORD_RUN} {argv:?}"))?
+        .map_err(|e| anyhow::Error::new(diag::eval_run_argv_spawn_failed(argv, &e)))?
     {
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),
@@ -564,7 +564,7 @@ fn run_pty<P: ProcessManager>(
         on_output_drained: None,
         func: KEYWORD_RUN,
     })
-    .with_context(|| format!("{KEYWORD_RUN} {what}"))?;
+    .map_err(|e| anyhow::Error::new(diag::eval_run_spawn_failed(what, &e)))?;
     // Pipe EOF rides the writer drops like any `RUN`: the supervisor
     // returns only after the output worker finished, so every byte is
     // already in the sink before the code below runs.
@@ -1890,7 +1890,7 @@ pub(super) fn assert_equality<P: ProcessManager>(
         )),
         ResolvedAssertTarget::Pipe(bytes) => {
             let actual_str = String::from_utf8(bytes.clone())
-                .with_context(|| format!("{verb} pipe content is not UTF-8"))?;
+                .map_err(|e| anyhow::Error::new(diag::eval_pipe_not_utf8(verb, &e)))?;
             let Some(want) = expected.and_then(|v| v.as_str()) else {
                 return Err(anyhow::Error::new(diag::eval_assert_pipe_mismatch(
                     verb,
@@ -2085,7 +2085,7 @@ pub(super) fn assert_contains<P: ProcessManager>(
         }
         ResolvedAssertTarget::Pipe(bytes) => {
             let hay = String::from_utf8(bytes.clone())
-                .with_context(|| format!("{verb} pipe content is not UTF-8"))?;
+                .map_err(|e| anyhow::Error::new(diag::eval_pipe_not_utf8(verb, &e)))?;
             if hay.contains(needle_str.as_str()) {
                 Ok(())
             } else {
