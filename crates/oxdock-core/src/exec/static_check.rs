@@ -77,7 +77,6 @@ use std::collections::{HashMap, HashSet};
 /// overloads. Single alias so the complex type appears once.
 type HomeFuncs = HashMap<(String, String), Vec<(Option<GuardExpr>, FuncInfo)>>;
 
-use anyhow::Result;
 use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::constants::{
@@ -492,7 +491,7 @@ pub fn validate_import_body_types<P: ProcessManager>(
     steps: &[Step],
     exec: &ExecState<P>,
     module: &str,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut checker = Checker::new(exec);
     checker.module_lets.insert(
         module.to_string(),
@@ -519,7 +518,7 @@ pub(crate) fn harvest_touches_module<P: ProcessManager>(
     module: &str,
     steps: &[Step],
     names: &[String],
-) -> Result<Option<String>> {
+) -> DiagnosticResult<Option<String>> {
     let mut checker = Checker::new(exec);
     checker.module_lets.insert(
         module.to_string(),
@@ -643,8 +642,8 @@ fn module_lets_indexed<P: ProcessManager>(
 fn with_scope_aliases<P: ProcessManager, R>(
     exec: &mut ExecState<P>,
     aliases: &[(String, String)],
-    f: impl FnOnce(&mut ExecState<P>) -> Result<R>,
-) -> Result<R> {
+    f: impl FnOnce(&mut ExecState<P>) -> DiagnosticResult<R>,
+) -> DiagnosticResult<R> {
     let saved: Vec<(String, Option<String>)> = aliases
         .iter()
         .map(|(name, _)| (name.clone(), exec.type_aliases.get(name).cloned()))
@@ -825,7 +824,7 @@ pub fn validate_script_closure<P: ProcessManager>(
     entry: &[Step],
     files: &[super::import::ClosureFile],
     exec: &mut ExecState<P>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     for file in files {
         let mut local = std::collections::HashSet::new();
         for step in &file.steps {
@@ -835,9 +834,7 @@ pub fn validate_script_closure<P: ProcessManager>(
         }
         for name in &file.exports.types {
             if !local.contains(name) {
-                return Err(anyhow::Error::new(check_diag::import_export_type_mismatch(
-                    &file.path, name,
-                )));
+                return Err(check_diag::import_export_type_mismatch(&file.path, name));
             }
         }
     }
@@ -847,7 +844,7 @@ pub fn validate_script_closure<P: ProcessManager>(
     // harvests are global requests; file-local defs stay per-file
     // below, so same-named types in different files coexist.
     let saved_global = exec.type_aliases.clone();
-    let outcome: Result<()> = (|| {
+    let outcome: DiagnosticResult<()> = (|| {
         let entry_base = super::import::import_base(exec);
         merge_harvests_in(exec, files, &entry_base, entry, true)?;
         for file in files {
@@ -1022,12 +1019,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 for entry in &file.exports.consts {
                     if let Some((_, base)) = split_qualified(entry) {
                         super::native::chase_const_forward(&view, &file.key, base, entry).map_err(
-                            |err| {
-                                anyhow::Error::new(check_diag::check_ctx_wrap(
-                                    &file.key,
-                                    &anyhow::Error::new(err),
-                                ))
-                            },
+                            |err| check_diag::check_ctx_wrap(&file.key, &anyhow::Error::new(err)),
                         )?;
                     }
                 }
@@ -1336,7 +1328,7 @@ pub fn validate_script_closure<P: ProcessManager>(
 pub fn validate_script_types_counted<P: ProcessManager>(
     steps: &[Step],
     exec: &ExecState<P>,
-) -> Result<u64> {
+) -> DiagnosticResult<u64> {
     let mut checker = Checker::new(exec);
     checker.entry_env_union = file_env_union(steps);
     checker.entry_lets = module_lets(steps, exec)?;
@@ -1892,7 +1884,7 @@ fn entry_let_scopes<P: ProcessManager>(
     entry: &[Step],
     all_funcs: &HashMap<String, FuncInfo>,
     exec: &ExecState<P>,
-) -> Result<HashMap<(String, usize, usize), Vec<GuardedLet>>> {
+) -> DiagnosticResult<HashMap<(String, usize, usize), Vec<GuardedLet>>> {
     let indexed = module_lets_indexed(entry, exec)?;
     // Direct top-level mentions per bare name (definitions excluded:
     // their bodies run at call time, not at their step).
@@ -2415,7 +2407,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// steps are skipped: unregistered code is never checked.
     /// Each function is keyed by bare and `SCRIPT::`-qualified name
     /// so calls resolve regardless of parser qualification.
-    fn collect_owned(&mut self, steps: &[Step], module: Option<&str>) -> Result<()> {
+    fn collect_owned(&mut self, steps: &[Step], module: Option<&str>) -> DiagnosticResult<()> {
         for step in steps {
             if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
                 continue;
@@ -2426,7 +2418,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     }
 
     /// Entry shorthand: ownerless collection for entry scripts.
-    fn collect(&mut self, steps: &[Step]) -> Result<()> {
+    fn collect(&mut self, steps: &[Step]) -> DiagnosticResult<()> {
         self.collect_owned(steps, None)
     }
 
@@ -2494,7 +2486,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         env: &mut Env,
         scope: &Scope,
         depth: usize,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         use oxdock_parser::template::{
             PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
             placeholder_vars,
@@ -2530,7 +2522,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // fails here, never at runtime).
                 PlaceholderKey::DollarQualified { alias, name, keys } => {
                     if !keys.is_empty() {
-                        return Err(anyhow::Error::new(check_diag::check_placeholder_keypath()));
+                        return Err(check_diag::check_placeholder_keypath());
                     }
                     let expr = Expr::ConstRef {
                         alias: alias.to_string(),
@@ -2541,7 +2533,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 PlaceholderKey::Dollar(rest) => {
                     if oxdock_parser::template::parse_var_path(rest).is_none() {
-                        return Err(anyhow::Error::new(check_diag::check_empty_placeholder_var()));
+                        return Err(check_diag::check_empty_placeholder_var());
                     }
                     for var in placeholder_vars(key) {
                         self.check_template_var(&var, env, scope, depth)?;
@@ -2550,7 +2542,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 PlaceholderKey::ConstRef { .. }
                 | PlaceholderKey::KeyPath { .. }
                 | PlaceholderKey::Var(_) => {
-                    return Err(anyhow::Error::new(check_diag::check_bare_sigil(key.trim())));
+                    return Err(check_diag::check_bare_sigil(key.trim()));
                 }
                 PlaceholderKey::Bare(_) => {
                     for var in placeholder_vars(key) {
@@ -2562,9 +2554,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         self.check_template_var(&var, env, scope, depth)?;
                     }
                     let Some(module) = call.module else {
-                        return Err(anyhow::Error::new(check_diag::check_undefined_script_var(
-                            key,
-                        )));
+                        return Err(check_diag::check_undefined_script_var(key));
                     };
                     self.check_template_call(module, call.name, call.args_raw, env, scope, depth)?;
                 }
@@ -2586,7 +2576,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         env: &mut Env,
         scope: &Scope,
         depth: usize,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         use oxdock_parser::template::TemplateVar;
         let expr = match var {
             TemplateVar::Path(parts) => {
@@ -2603,18 +2593,16 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
             }
             TemplateVar::ConstRef { alias, name } => {
-                return Err(anyhow::Error::new(check_diag::check_bare_sigil(&qualify(
-                    alias, name,
-                ))));
+                return Err(check_diag::check_bare_sigil(&qualify(alias, name)));
             }
             TemplateVar::KeyPath { base, keys } => {
-                return Err(anyhow::Error::new(check_diag::check_bare_sigil(&format!(
+                return Err(check_diag::check_bare_sigil(&format!(
                     "{base}.{}",
                     keys.join(".")
-                ))));
+                )));
             }
             TemplateVar::Var(name) => {
-                return Err(anyhow::Error::new(check_diag::check_bare_sigil(name)));
+                return Err(check_diag::check_bare_sigil(name));
             }
             TemplateVar::Bare(name) => Expr::Var { name: name.clone() },
         };
@@ -2638,7 +2626,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         env: &mut Env,
         scope: &Scope,
         depth: usize,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         let qualified = qualify(module, name);
         let Some(meta) = self.pure_hosts.get(&qualified).cloned() else {
             // Sibling-leakage gate through the shared alias-target
@@ -2672,9 +2660,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     is_script_visible = self.funcs.contains_key(&canonical);
                 }
                 super::native::AliasResolution::Ambiguous { files, .. } => {
-                    return Err(anyhow::Error::new(check_diag::func_ambiguous_alias(
-                        module, name, &files,
-                    )));
+                    return Err(check_diag::func_ambiguous_alias(module, name, &files));
                 }
                 // Platform-conditional aliases: the active branch is
                 // unknowable statically. The single miss helper decides
@@ -2686,14 +2672,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     files,
                     has_host,
                 } => {
-                    return Err(anyhow::Error::new(check_diag::check_disjoint_alias_miss(
+                    return Err(check_diag::check_disjoint_alias_miss(
                         module,
                         name,
                         &base,
                         &files,
                         has_host,
                         &|key| self.funcs.contains_key(key),
-                    )));
+                    ));
                 }
                 super::native::AliasResolution::Unknown => {}
             }
@@ -2704,11 +2690,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.hosts.contains_key(&qualified),
                 effective.contains_key(module),
             ) {
-                return Err(anyhow::Error::new(diag));
+                return Err(diag);
             }
-            return Err(anyhow::Error::new(check_diag::check_placeholder_unknown(
-                &qualified,
-            )));
+            return Err(check_diag::check_placeholder_unknown(&qualified));
         };
         let args_src = oxdock_parser::template::split_placeholder_args(args_raw);
         if let Some(host_params) = meta.params.as_deref() {
@@ -2716,22 +2700,22 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             let total = host_params.len();
             if args_src.len() < required || args_src.len() > total {
                 if required == total {
-                    return Err(anyhow::Error::new(check_diag::check_template_arity_exact(
+                    return Err(check_diag::check_template_arity_exact(
                         &step_pos(scope.line, scope.col, scope.idx),
                         scope.label,
                         &qualified,
                         total,
                         args_src.len(),
-                    )));
+                    ));
                 }
-                return Err(anyhow::Error::new(check_diag::check_template_arity_range(
+                return Err(check_diag::check_template_arity_range(
                     &step_pos(scope.line, scope.col, scope.idx),
                     scope.label,
                     &qualified,
                     required,
                     total,
                     args_src.len(),
-                )));
+                ));
             }
             for (position, src) in args_src.iter().enumerate() {
                 let trimmed = src.trim();
@@ -2748,14 +2732,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         && let Some(s) = self.template_arg_literal(trimmed)
                         && !allowed.contains(&s.as_str())
                     {
-                        return Err(anyhow::Error::new(check_diag::check_template_arg_allowed(
+                        return Err(check_diag::check_template_arg_allowed(
                             &step_pos(scope.line, scope.col, scope.idx),
                             scope.label,
                             &qualified,
                             &param.name,
                             &allowed,
                             &s,
-                        )));
+                        ));
                     }
                 }
             }
@@ -2777,17 +2761,17 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         depth: usize,
         literal_depth: usize,
-    ) -> Result<StaticTy> {
+    ) -> DiagnosticResult<StaticTy> {
         use oxdock_parser::template::{
             ScalarLit, TemplateArg, classify_template_arg, parse_string_literal, parse_var_path,
         };
         if literal_depth > oxdock_parser::template::MAX_TEMPLATE_ARG_DEPTH {
-            return Err(anyhow::Error::new(check_diag::check_template_arg_depth()));
+            return Err(check_diag::check_template_arg_depth());
         }
         match classify_template_arg(src) {
             TemplateArg::DollarQualified { alias, name, keys } => {
                 if !keys.is_empty() {
-                    return Err(anyhow::Error::new(check_diag::check_placeholder_keypath()));
+                    return Err(check_diag::check_placeholder_keypath());
                 }
                 let expr = Expr::ConstRef {
                     alias: alias.to_string(),
@@ -2797,7 +2781,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             }
             TemplateArg::Dollar(rest) => {
                 let Some(parts) = parse_var_path(rest) else {
-                    return Err(anyhow::Error::new(check_diag::check_empty_placeholder_arg()));
+                    return Err(check_diag::check_empty_placeholder_arg());
                 };
                 let (base, segs) = parts.split_first().expect("split always yields one");
                 let expr = if segs.is_empty() {
@@ -2824,9 +2808,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             }
             TemplateArg::Scalar(scalar_src) => {
                 let Some(lit) = oxdock_parser::template::parse_scalar_literal(scalar_src) else {
-                    return Err(anyhow::Error::new(
-                        check_diag::check_invalid_placeholder_arg(scalar_src),
-                    ));
+                    return Err(check_diag::check_invalid_placeholder_arg(scalar_src));
                 };
                 Ok(StaticTy::Ty(match lit {
                     ScalarLit::Bool(_) => TypeTag::Bool,
@@ -2835,11 +2817,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }))
             }
             TemplateArg::ConstRef { .. } | TemplateArg::KeyPath { .. } | TemplateArg::Var(_) => {
-                Err(anyhow::Error::new(check_diag::check_bare_sigil(src.trim())))
+                Err(check_diag::check_bare_sigil(src.trim()))
             }
-            TemplateArg::Invalid(invalid) => Err(anyhow::Error::new(
-                check_diag::check_invalid_placeholder_arg(invalid),
-            )),
+            TemplateArg::Invalid(invalid) => {
+                Err(check_diag::check_invalid_placeholder_arg(invalid))
+            }
         }
     }
 
@@ -2854,7 +2836,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         depth: usize,
         literal_depth: usize,
-    ) -> Result<StaticTy> {
+    ) -> DiagnosticResult<StaticTy> {
         use oxdock_parser::template::{parse_map_key, split_map_entry, split_top_level};
         if inner.trim().is_empty() {
             return Ok(StaticTy::Ty(TypeTag::Map));
@@ -2863,20 +2845,16 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let mut value_tags: Vec<TypeTag> = Vec::new();
         for entry in split_top_level(inner, ',') {
             let Some((key_src, value_src)) = split_map_entry(&entry) else {
-                return Err(anyhow::Error::new(check_diag::check_invalid_map_entry(
-                    &entry,
-                )));
+                return Err(check_diag::check_invalid_map_entry(&entry));
             };
             let key = parse_map_key(&key_src)?;
             if !seen.insert(key.clone()) {
-                return Err(anyhow::Error::new(check_diag::check_duplicate_map_key(
-                    &key,
-                )));
+                return Err(check_diag::check_duplicate_map_key(&key));
             }
             let value_ty =
                 self.infer_template_arg(value_src.trim(), env, scope, depth, literal_depth + 1)?;
             let StaticTy::Ty(tag) = value_ty else {
-                return Err(anyhow::Error::new(check_diag::check_void_no_value()));
+                return Err(check_diag::check_void_no_value());
             };
             value_tags.push(tag);
         }
@@ -2899,7 +2877,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         depth: usize,
         literal_depth: usize,
-    ) -> Result<StaticTy> {
+    ) -> DiagnosticResult<StaticTy> {
         use oxdock_parser::template::split_top_level;
         if inner.trim().is_empty() {
             return Ok(StaticTy::Ty(TypeTag::List));
@@ -2909,7 +2887,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             let element_ty =
                 self.infer_template_arg(item.trim(), env, scope, depth, literal_depth + 1)?;
             let StaticTy::Ty(tag) = element_ty else {
-                return Err(anyhow::Error::new(check_diag::check_void_no_value()));
+                return Err(check_diag::check_void_no_value());
             };
             element_tags.push(tag);
         }
@@ -2967,16 +2945,15 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         module: Option<&str>,
         line: usize,
         col: usize,
-    ) -> Result<FuncInfo> {
+    ) -> DiagnosticResult<FuncInfo> {
         let resolved = resolve_script_params(self.exec, name, params)?;
-        let declared = self.exec.resolve_tag(return_type).map_err(|err| {
-            anyhow::Error::new(check_diag::check_func_tag(name, &anyhow::Error::new(err)))
-        })?;
+        let declared = self
+            .exec
+            .resolve_tag(return_type)
+            .map_err(|err| check_diag::check_func_tag(name, &anyhow::Error::new(err)))?;
         self.exec
             .check_return_tag(&format!("function `{name}` returns"), &declared)
-            .map_err(|err| {
-                anyhow::Error::new(check_diag::check_func_tag(name, &anyhow::Error::new(err)))
-            })?;
+            .map_err(|err| check_diag::check_func_tag(name, &anyhow::Error::new(err)))?;
         Ok(FuncInfo {
             params: resolved,
             declared,
@@ -3001,7 +2978,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         module: Option<&str>,
         line: usize,
         col: usize,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         let info =
             self.make_func_info(name, params, return_type, is_async, body, module, line, col)?;
         for key in keys {
@@ -3020,7 +2997,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// Last definition wins, mirroring `define_collected` overwrite
     /// and runtime definition order; statically-dead steps never
     /// index, like collection.
-    fn collect_home(&mut self, file: &super::import::ClosureFile) -> Result<()> {
+    fn collect_home(&mut self, file: &super::import::ClosureFile) -> DiagnosticResult<()> {
         for step in &file.steps {
             if let StepKind::FuncDef {
                 name,
@@ -3084,7 +3061,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         Ok(())
     }
 
-    fn collect_step(&mut self, step: &Step, module: Option<&str>) -> Result<()> {
+    fn collect_step(&mut self, step: &Step, module: Option<&str>) -> DiagnosticResult<()> {
         match &step.kind {
             StepKind::FuncDef {
                 name,
@@ -3159,7 +3136,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// runtime registry remains the enforcer for true duplicates.
     /// Types persist bare globally for later `resolve_tag` calls, which
     /// read the global alias map.
-    fn collect_site(&mut self, site: &ClosureSite, file: &ClosureFile) -> Result<()> {
+    fn collect_site(&mut self, site: &ClosureSite, file: &ClosureFile) -> DiagnosticResult<()> {
         let module = file.key.as_str();
         let steps = file.steps.as_slice();
         let alias = site.alias.as_deref();
@@ -3273,9 +3250,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     None => name.clone(),
                 };
                 if self.func_touches_module(&key)? {
-                    return Err(anyhow::Error::new(check_diag::import_stateful_harvest(
-                        file_path, name,
-                    )));
+                    return Err(check_diag::import_stateful_harvest(file_path, name));
                 }
             }
         }
@@ -3293,7 +3268,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         label: &str,
         steps: &[Step],
         module: Option<&str>,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         let mut env = Env::one_frame(Vec::new());
         if let Some(module) = module {
             let mut lets: HashMap<String, Vec<Binding>> = HashMap::new();
@@ -3328,7 +3303,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// Top-level steps run with an empty environment: undeclared
     /// variables, bad arities, and mistyped arguments fail here, the
     /// same as inside any function.
-    fn check_top_level(&mut self, steps: &[Step]) -> Result<()> {
+    fn check_top_level(&mut self, steps: &[Step]) -> DiagnosticResult<()> {
         let mut env = Env::one_frame(Vec::new());
         let scope = Scope {
             label: "top level",
@@ -3348,7 +3323,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// Phase B: inferred return type of one script function,
     /// memoized. Recursive and forward references widen to `ANY`
     /// while inference is in progress.
-    fn func_return(&mut self, key: &str, depth: usize) -> Result<StaticTy> {
+    fn func_return(&mut self, key: &str, depth: usize) -> DiagnosticResult<StaticTy> {
         if let Some(known) = self.inferred.get(key) {
             return Ok(known.clone());
         }
@@ -3376,7 +3351,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         key: &str,
         info: &FuncInfo,
         depth: usize,
-    ) -> Result<StaticTy> {
+    ) -> DiagnosticResult<StaticTy> {
         self.check_function_body_probed(key, info, depth, None, true)
     }
 
@@ -3398,9 +3373,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         depth: usize,
         probe: Option<std::rc::Rc<std::cell::Cell<bool>>>,
         enforce_types: bool,
-    ) -> Result<StaticTy> {
+    ) -> DiagnosticResult<StaticTy> {
         if depth > MAX_STATIC_DEPTH {
-            return Err(anyhow::Error::new(check_diag::check_depth_function(key)));
+            return Err(check_diag::check_depth_function(key));
         }
         let mut env = Env::one_frame(info.params.clone());
         if let Some(module) = info.module.as_deref() {
@@ -3486,46 +3461,34 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let declared = &info.declared;
         let is_void = matches!(declared, TypeTag::Void);
         if info.is_async && !matches!(declared, TypeTag::Handle | TypeTag::HandleOf(_)) {
-            return Err(anyhow::Error::new(check_diag::check_async_decl_not_handle(
-                key, declared,
-            )));
+            return Err(check_diag::check_async_decl_not_handle(key, declared));
         }
         if out.has_return && out.falls_through && !is_void {
-            return Err(anyhow::Error::new(check_diag::check_func_fallthrough(
-                key, declared,
-            )));
+            return Err(check_diag::check_func_fallthrough(key, declared));
         }
         if !out.has_return {
             if is_void {
                 return Ok(StaticTy::Void);
             }
-            return Err(anyhow::Error::new(check_diag::check_func_no_return(
-                key, declared,
-            )));
+            return Err(check_diag::check_func_no_return(key, declared));
         }
         if out.bare_return && !is_void {
-            return Err(anyhow::Error::new(check_diag::check_func_bare_return(
-                key, declared,
-            )));
+            return Err(check_diag::check_func_bare_return(key, declared));
         }
         if is_void {
             if let Some((ty, line, _col)) = out.types.first() {
-                return Err(anyhow::Error::new(check_diag::check_func_void_yield(
-                    key, *line, ty,
-                )));
+                return Err(check_diag::check_func_void_yield(key, *line, ty));
             }
             return Ok(StaticTy::Void);
         }
         if out.types.is_empty() {
-            return Err(anyhow::Error::new(check_diag::check_func_no_value_return(
-                key, declared,
-            )));
+            return Err(check_diag::check_func_no_value_return(key, declared));
         }
         for (ty, line, _col) in &out.types {
             if !is_compatible(ty, declared) {
-                return Err(anyhow::Error::new(check_diag::check_func_return_mismatch(
+                return Err(check_diag::check_func_return_mismatch(
                     key, declared, *line, ty,
-                )));
+                ));
             }
         }
         Ok(StaticTy::Ty(declared.clone()))
@@ -3544,11 +3507,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         env: &mut Env,
         scope: &Scope,
         depth: usize,
-    ) -> Result<WalkOut> {
+    ) -> DiagnosticResult<WalkOut> {
         if depth > MAX_STATIC_DEPTH {
-            return Err(anyhow::Error::new(check_diag::check_depth_scope(
-                scope.label,
-            )));
+            return Err(check_diag::check_depth_scope(scope.label));
         }
         let base_frames = env.frames.len();
         let base_env_frames = env.env_frames.len();
@@ -3656,13 +3617,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         idx: usize,
         depth: usize,
         var: &str,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         let rhs = self.infer_expr(expr, env, scope, idx, depth + 1)?;
         if matches!(rhs, StaticTy::Void) {
-            return Err(anyhow::Error::new(check_diag::check_void_block_bind(
-                idx + 1,
-                var,
-            )));
+            return Err(check_diag::check_void_block_bind(idx + 1, var));
         }
         Ok(())
     }
@@ -3683,7 +3641,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         idx: usize,
         depth: usize,
         is_const: bool,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         // The captured command runs first at runtime, so its
         // expressions check before the declaration lands.
         self.walk_wrapped(step, cmd, env, scope, idx, depth + 1)?;
@@ -3697,13 +3655,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 .is_err()
         {
             let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
-            return Err(anyhow::Error::new(check_diag::check_capture_mismatch(
+            return Err(check_diag::check_capture_mismatch(
                 idx + 1,
                 kw,
                 &clean_var(var),
                 &yield_tag,
                 tag,
-            )));
+            ));
         }
         Ok(())
     }
@@ -3720,7 +3678,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         env: &mut Env,
         scope: &Scope,
         idx: usize,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         // The handle resolves before the output declares.
         let key = clean_var(task_var);
         let handle_tag =
@@ -3729,19 +3687,19 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             TypeTag::Handle => TypeTag::Any,
             TypeTag::HandleOf(inner) => (*inner).clone(),
             other => {
-                return Err(anyhow::Error::new(check_diag::check_await_not_handle(
+                return Err(check_diag::check_await_not_handle(
                     idx + 1,
                     &clean_var(task_var),
                     &other,
-                )));
+                ));
             }
         };
         if matches!(payload, TypeTag::Void) {
-            return Err(anyhow::Error::new(check_diag::check_await_void_payload(
+            return Err(check_diag::check_await_void_payload(
                 idx + 1,
                 &clean_var(task_var),
                 &clean_var(out_var),
-            )));
+            ));
         }
         if !is_compatible(&payload, tag) && !is_compatible(tag, &payload) {
             // Top-down: capture type must accept the task payload.
@@ -3750,13 +3708,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 .check_arg(tag, StaticTy::Ty(payload.clone()), &step_ctx(idx))
                 .is_err()
             {
-                return Err(anyhow::Error::new(check_diag::check_await_yield_mismatch(
+                return Err(check_diag::check_await_yield_mismatch(
                     idx + 1,
                     &clean_var(task_var),
                     &payload,
                     &clean_var(out_var),
                     tag,
-                )));
+                ));
             }
         }
         Ok(())
@@ -3776,7 +3734,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         idx: usize,
         depth: usize,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         // Bodies publish through `AWAIT`; returns belong to the task,
         // never the enclosing function. Every ASYNC position is HANDLE-headed.
         let mut fork = env.fork();
@@ -3798,46 +3756,42 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             TypeTag::Handle => TypeTag::Any,
             TypeTag::HandleOf(inner_tag) => (**inner_tag).clone(),
             _ => {
-                return Err(anyhow::Error::new(check_diag::check_async_not_handle(
+                return Err(check_diag::check_async_not_handle(
                     idx + 1,
                     &clean_var(var),
                     tag,
-                )));
+                ));
             }
         };
         if inner.bare_return && !matches!(payload, TypeTag::Void) {
-            return Err(anyhow::Error::new(check_diag::check_async_bare_return(
+            return Err(check_diag::check_async_bare_return(
                 idx + 1,
                 &clean_var(var),
                 tag,
-            )));
+            ));
         }
         if matches!(payload, TypeTag::Void) {
             if let Some((ty, line, _col)) = inner.types.first() {
-                return Err(anyhow::Error::new(check_diag::check_async_void_yield(
-                    idx + 1,
-                    *line,
-                    ty,
-                )));
+                return Err(check_diag::check_async_void_yield(idx + 1, *line, ty));
             }
         } else if inner.types.is_empty() {
             if !matches!(payload, TypeTag::Any) {
-                return Err(anyhow::Error::new(check_diag::check_async_no_return(
+                return Err(check_diag::check_async_no_return(
                     idx + 1,
                     &clean_var(var),
                     tag,
-                )));
+                ));
             }
         } else {
             for (ty, line, _col) in &inner.types {
                 if !is_compatible(ty, &payload) {
-                    return Err(anyhow::Error::new(check_diag::check_async_return_mismatch(
+                    return Err(check_diag::check_async_return_mismatch(
                         idx + 1,
                         &clean_var(var),
                         tag,
                         *line,
                         ty,
-                    )));
+                    ));
                 }
             }
         }
@@ -3898,7 +3852,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         idx: usize,
         depth: usize,
-    ) -> Result<WalkOut> {
+    ) -> DiagnosticResult<WalkOut> {
         let live = WalkOut {
             falls_through: true,
             has_return: false,
@@ -3910,14 +3864,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 match &scope.ret {
                     RetCtx::Func(_) | RetCtx::Block | RetCtx::AsyncValue => {}
                     RetCtx::Top => {
-                        return Err(anyhow::Error::new(check_diag::check_return_outside(
-                            idx + 1,
-                        )));
+                        return Err(check_diag::check_return_outside(idx + 1));
                     }
                     RetCtx::AsyncStmt => {
-                        return Err(anyhow::Error::new(check_diag::check_return_crosses_async(
-                            idx + 1,
-                        )));
+                        return Err(check_diag::check_return_crosses_async(idx + 1));
                     }
                 }
                 // Bare RETURN is the void exit, never a value. It marks the
@@ -4034,20 +3984,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             } => {
                 self.infer_expr(in_expr, env, scope, idx, depth + 1)?;
                 let val_tag = self.exec.resolve_tag(var_type).map_err(|err| {
-                    anyhow::Error::new(check_diag::check_step_wrap(
-                        idx + 1,
-                        &anyhow::Error::new(err),
-                    ))
+                    check_diag::check_step_wrap(idx + 1, &anyhow::Error::new(err))
                 })?;
                 let mut fork = env.fork();
                 fork.insert_top(clean_var(var), val_tag, step.guard.as_ref());
                 if let Some(key) = key_var {
                     let key_tag = match key_type {
                         Some(name) => self.exec.resolve_tag(name).map_err(|err| {
-                            anyhow::Error::new(check_diag::check_step_wrap(
-                                idx + 1,
-                                &anyhow::Error::new(err),
-                            ))
+                            check_diag::check_step_wrap(idx + 1, &anyhow::Error::new(err))
                         })?,
                         None => TypeTag::Int,
                     };
@@ -4083,17 +4027,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 ..
             } => {
                 let resolved = resolve_script_params(self.exec, name, params)?;
-                let declared = self.exec.resolve_tag(return_type).map_err(|err| {
-                    anyhow::Error::new(check_diag::check_func_tag(name, &anyhow::Error::new(err)))
-                })?;
+                let declared = self
+                    .exec
+                    .resolve_tag(return_type)
+                    .map_err(|err| check_diag::check_func_tag(name, &anyhow::Error::new(err)))?;
                 self.exec
                     .check_return_tag(&format!("function `{name}` returns"), &declared)
-                    .map_err(|err| {
-                        anyhow::Error::new(check_diag::check_func_tag(
-                            name,
-                            &anyhow::Error::new(err),
-                        ))
-                    })?;
+                    .map_err(|err| check_diag::check_func_tag(name, &anyhow::Error::new(err)))?;
                 let info = FuncInfo {
                     params: resolved,
                     declared,
@@ -4133,10 +4073,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // matching the historical per-form order. No per-form
                 // restatement of the tag gate or the const branch.
                 let tag = self.exec.resolve_tag(decl_type).map_err(|err| {
-                    anyhow::Error::new(check_diag::check_step_wrap(
-                        idx + 1,
-                        &anyhow::Error::new(err),
-                    ))
+                    check_diag::check_step_wrap(idx + 1, &anyhow::Error::new(err))
                 })?;
                 match rhs {
                     oxdock_parser::BindRhs::Expr(expr) => {
@@ -4157,10 +4094,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.exec
                     .check_declaration_tag(&format!("step {}", idx + 1), &tag)
                     .map_err(|err| {
-                        anyhow::Error::new(check_diag::check_step_wrap(
-                            idx + 1,
-                            &anyhow::Error::new(err),
-                        ))
+                        check_diag::check_step_wrap(idx + 1, &anyhow::Error::new(err))
                     })?;
                 let key = clean_var(var);
                 if *is_const {
@@ -4173,16 +4107,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             StepKind::Set { var, expr } => {
                 let key = clean_var(var);
                 if !env.is_declared(&key) {
-                    return Err(anyhow::Error::new(check_diag::check_undeclared_set(
-                        idx + 1,
-                        &key,
-                    )));
+                    return Err(check_diag::check_undeclared_set(idx + 1, &key));
                 }
                 if env.is_const(&key, scope.site.as_ref()) {
-                    return Err(anyhow::Error::new(check_diag::check_mutate_const(
-                        idx + 1,
-                        &key,
-                    )));
+                    return Err(check_diag::check_mutate_const(idx + 1, &key));
                 }
                 // Site-aware liveness: the binding must hold on this
                 // step's path, not merely somewhere in scope. A bare
@@ -4314,9 +4242,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // Re-adds scrubbed snapshot names for the rest of the
                 // block, mirroring `isolated_inherit_env` one for one.
                 if self.isolated_depth == 0 {
-                    return Err(anyhow::Error::new(check_diag::check_isolated_allowlist(
-                        idx + 1,
-                    )));
+                    return Err(check_diag::check_isolated_allowlist(idx + 1));
                 }
                 for key in keys {
                     env.declare_env(key.clone());
@@ -4338,13 +4264,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let mut sealed = Env::one_frame(Vec::new());
                 for name in vars {
                     let key = clean_var(name);
-                    let (tag, guard) =
-                        env.read_entry_guarded(&key, step.guard.as_ref())
-                            .map_err(|_| {
-                                anyhow::Error::new(check_diag::check_remote_unknown_var(
-                                    target, &key,
-                                ))
-                            })?;
+                    let (tag, guard) = env
+                        .read_entry_guarded(&key, step.guard.as_ref())
+                        .map_err(|_| check_diag::check_remote_unknown_var(target, &key))?;
                     sealed.insert_top(key, tag, guard.as_ref());
                 }
                 // Header `env:` names read the outer environment at
@@ -4352,12 +4274,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // the seal they arrive declared.
                 for name in header_env {
                     self.check_env_name(env, name, "env:", scope).map_err(|_| {
-                        anyhow::Error::new(check_diag::check_remote_undeclared_env(
+                        check_diag::check_remote_undeclared_env(
                             &step_pos(scope.line, scope.col, scope.idx),
                             scope.label,
                             target,
                             name,
-                        ))
+                        )
                     })?;
                     sealed.declare_env(name.clone());
                 }
@@ -4388,10 +4310,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // rejects `CONST` through `mutate_var`.
                 let key = clean_var(var);
                 if env.is_const(&key, scope.site.as_ref()) {
-                    return Err(anyhow::Error::new(check_diag::check_mutate_const(
-                        idx + 1,
-                        &key,
-                    )));
+                    return Err(check_diag::check_mutate_const(idx + 1, &key));
                 }
                 if !env.is_declared(&key) {
                     env.insert_top(key, TypeTag::String, step.guard.as_ref());
@@ -4403,10 +4322,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // the answer binds as `STRING`, mutating when present.
                 let key = clean_var(var);
                 if env.is_const(&key, scope.site.as_ref()) {
-                    return Err(anyhow::Error::new(check_diag::check_mutate_const(
-                        idx + 1,
-                        &key,
-                    )));
+                    return Err(check_diag::check_mutate_const(idx + 1, &key));
                 }
                 if !env.is_declared(&key) {
                     env.insert_top(key, TypeTag::String, step.guard.as_ref());
@@ -4462,10 +4378,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     StepKind::ListAppend { list, item } => {
                         let key = clean_var(list);
                         if env.is_const(&key, scope.site.as_ref()) {
-                            return Err(anyhow::Error::new(check_diag::check_mutate_const(
-                                idx + 1,
-                                &key,
-                            )));
+                            return Err(check_diag::check_mutate_const(idx + 1, &key));
                         }
                         let tag = Self::check_name_read(env, list, scope, idx)?;
                         let element = match tag {
@@ -4493,11 +4406,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             | TypeTag::MapOf(_)
                             | TypeTag::Record(_)
                             | TypeTag::Union(..) => {
-                                return Err(anyhow::Error::new(check_diag::check_list_not_list(
+                                return Err(check_diag::check_list_not_list(
                                     idx + 1,
                                     &clean_var(list),
                                     &tag,
-                                )));
+                                ));
                             }
                         };
                         // Shaped lists check the item exactly (no coercion
@@ -4512,10 +4425,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                                 _ => StaticTy::Ty(TypeTag::String),
                             };
                             let StaticTy::Ty(actual) = actual else {
-                                return Err(anyhow::Error::new(check_diag::check_list_void_push(
+                                return Err(check_diag::check_list_void_push(
                                     idx + 1,
                                     &clean_var(list),
-                                )));
+                                ));
                             };
                             Self::check_exact(&expected, &actual, &step_ctx(idx))?;
                         }
@@ -4542,8 +4455,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         idx: usize,
         depth: usize,
-    ) -> Result<()> {
-        let mut failed: Option<anyhow::Error> = None;
+    ) -> DiagnosticResult<()> {
+        let mut failed: Option<Diagnostic> = None;
         kind.walk_exprs(&mut |expr| {
             if failed.is_none()
                 && let Err(err) = self.infer_expr(expr, env, scope, idx, depth + 1)
@@ -4558,7 +4471,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // at runtime through the same `expand_string` as whole-arg
         // expressions, so they read through the same declaration gate.
         // `Arg::String` and `ArgPart::Text` carry nothing else.
-        let mut failed: Option<anyhow::Error> = None;
+        let mut failed: Option<Diagnostic> = None;
         kind.walk_raw_strings(&mut |text| {
             if failed.is_none()
                 && let Err(err) = self.check_template_env(text, env, scope, depth)
@@ -4576,14 +4489,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// friends): the binding must be declared and live on this
     /// step's path, mirroring the `undefined variable` failure one
     /// for one.
-    fn check_name_read(env: &Env, name: &str, scope: &Scope, idx: usize) -> Result<TypeTag> {
+    fn check_name_read(
+        env: &Env,
+        name: &str,
+        scope: &Scope,
+        idx: usize,
+    ) -> DiagnosticResult<TypeTag> {
         let key = clean_var(name);
-        Ok(check_var_binding_access(
-            env,
-            &key,
-            scope.site.as_ref(),
-            &step_prefix(idx),
-        )?)
+        check_var_binding_access(env, &key, scope.site.as_ref(), &step_prefix(idx))
     }
 
     /// Static counterpart of `resolve_pipe_handle`: a pipe endpoint
@@ -4594,17 +4507,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         bindings: &[IoBinding],
         scope: &Scope,
         idx: usize,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         for binding in bindings {
             if let Some(PipeTarget::Var { name }) = &binding.pipe {
                 let key = clean_var(name);
                 let tag =
                     check_var_binding_access(env, &key, scope.site.as_ref(), &step_prefix(idx))?;
                 if !tags_equal(&tag, &TypeTag::Pipe) {
-                    return Err(anyhow::Error::new(check_diag::check_pipe_mismatch(
-                        idx + 1,
-                        tag.name(),
-                    )));
+                    return Err(check_diag::check_pipe_mismatch(idx + 1, tag.name()));
                 }
             }
         }
@@ -4615,7 +4525,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// `BREAK` which is also legal directly in a `SWITCH` arm (the
     /// switch consumes it). Anywhere else the boundary error mirrors
     /// execution one for one.
-    fn walk_break(&mut self, word: &str, scope: &Scope, idx: usize) -> Result<WalkOut> {
+    fn walk_break(&mut self, word: &str, scope: &Scope, idx: usize) -> DiagnosticResult<WalkOut> {
         let legal = if word == KEYWORD_BREAK {
             scope.loops > 0 || scope.switches > 0
         } else {
@@ -4632,28 +4542,16 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         match &scope.ret {
             RetCtx::Top => {
                 if word == KEYWORD_BREAK {
-                    Err(anyhow::Error::new(check_diag::check_break_outside_switch(
-                        idx + 1,
-                    )))
+                    Err(check_diag::check_break_outside_switch(idx + 1))
                 } else {
-                    Err(anyhow::Error::new(check_diag::check_flow_outside_loop(
-                        idx + 1,
-                        word,
-                    )))
+                    Err(check_diag::check_flow_outside_loop(idx + 1, word))
                 }
             }
-            RetCtx::Func(name) => Err(anyhow::Error::new(check_diag::check_flow_crosses_func(
-                idx + 1,
-                word,
-                name,
-            ))),
-            RetCtx::Block => Err(anyhow::Error::new(check_diag::check_flow_crosses_block(
-                idx + 1,
-                word,
-            ))),
-            RetCtx::AsyncValue | RetCtx::AsyncStmt => Err(anyhow::Error::new(
-                check_diag::check_flow_crosses_async(idx + 1, word),
-            )),
+            RetCtx::Func(name) => Err(check_diag::check_flow_crosses_func(idx + 1, word, name)),
+            RetCtx::Block => Err(check_diag::check_flow_crosses_block(idx + 1, word)),
+            RetCtx::AsyncValue | RetCtx::AsyncStmt => {
+                Err(check_diag::check_flow_crosses_async(idx + 1, word))
+            }
         }
     }
 
@@ -4670,7 +4568,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         idx: usize,
         depth: usize,
-    ) -> Result<WalkOut> {
+    ) -> DiagnosticResult<WalkOut> {
         let step = Step {
             guard: None,
             kind: cmd.clone(),
@@ -4696,7 +4594,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         env: &Env,
         site: Option<&GuardExpr>,
         depth: usize,
-    ) -> Result<Option<TypeTag>> {
+    ) -> DiagnosticResult<Option<TypeTag>> {
         let mut current = cmd;
         loop {
             match current {
@@ -5005,7 +4903,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         env: &Env,
         site: Option<&GuardExpr>,
         depth: usize,
-    ) -> Result<Callee> {
+    ) -> DiagnosticResult<Callee> {
         let env_module = env.module.as_ref().map(|m| m.key.as_str());
         let nested: &[_] = &env.func_frames;
         // Canonical lookup key through the single alias-target
@@ -5021,15 +4919,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 super::native::AliasResolution::Global => {}
                 super::native::AliasResolution::Canonical(key) => lookup = key,
                 super::native::AliasResolution::Unknown => {
-                    return Err(anyhow::Error::new(check_diag::check_unknown_function(
+                    return Err(check_diag::check_unknown_function(
                         name,
                         &self.missing_import_hint(&effective, name),
-                    )));
+                    ));
                 }
                 super::native::AliasResolution::Ambiguous { alias, base, files } => {
-                    return Err(anyhow::Error::new(check_diag::func_ambiguous_alias(
-                        &alias, &base, &files,
-                    )));
+                    return Err(check_diag::func_ambiguous_alias(&alias, &base, &files));
                 }
                 // Disjoint platform-conditional targets: the active
                 // branch is unknowable statically. Every file must
@@ -5044,10 +4940,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     // A host-harvest branch holds no file functions, so
                     // any file-backed call misses there.
                     if has_host {
-                        return Err(anyhow::Error::new(check_diag::check_unknown_function(
+                        return Err(check_diag::check_unknown_function(
                             name,
                             &self.missing_import_hint(&effective, name),
-                        )));
+                        ));
                     }
                     // Every disjoint target must export the name: a
                     // missing branch fails the call on its platform.
@@ -5055,10 +4951,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     for file in files {
                         let canonical = super::native::file_func_key(file.as_str(), base.as_str());
                         let Some(info) = self.funcs.get(&canonical) else {
-                            return Err(anyhow::Error::new(check_diag::check_unknown_function(
+                            return Err(check_diag::check_unknown_function(
                                 name,
                                 &self.missing_import_hint(&effective, name),
-                            )));
+                            ));
                         };
                         canonicals.push((canonical, info.clone()));
                     }
@@ -5195,10 +5091,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             && alias != oxdock_parser::SCRIPT_MODULE_NAME
             && !self.hosts.contains_key(name)
         {
-            return Err(anyhow::Error::new(check_diag::check_unknown_function(
+            return Err(check_diag::check_unknown_function(
                 name,
                 &self.missing_import_hint(&effective, name),
-            )));
+            ));
         }
         Ok(Callee {
             params: None,
@@ -5220,7 +5116,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         name: &str,
         env: &Env,
         scope: &Scope,
-    ) -> Result<TypeTag> {
+    ) -> DiagnosticResult<TypeTag> {
         use super::native::{
             ConstHolders, chase_const_forward, const_holder_files, missing_const_hint,
         };
@@ -5240,21 +5136,21 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             ConstHolders::Found(files) => files,
             ConstHolders::NoAlias => {
                 if self.strict_qualified {
-                    return Err(anyhow::Error::new(check_diag::check_const_no_alias_at(
+                    return Err(check_diag::check_const_no_alias_at(
                         &at(),
                         &qualified,
                         alias,
-                    )));
+                    ));
                 }
                 return Ok(TypeTag::Any);
             }
             ConstHolders::Ambiguous { alias, base, files } => {
-                return Err(anyhow::Error::new(check_diag::check_const_ambiguous_at(
+                return Err(check_diag::check_const_ambiguous_at(
                     &at(),
                     &alias,
                     &base,
                     &files,
-                )));
+                ));
             }
         };
         // Tag lookup over exporting files, following qualified
@@ -5265,9 +5161,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // initializes.
         let mut tags: Vec<TypeTag> = Vec::new();
         for file in &files {
-            let terminals = chase_const_forward(&view, file, name, &qualified).map_err(|err| {
-                anyhow::Error::new(check_diag::check_ctx_wrap(&at(), &anyhow::Error::new(err)))
-            })?;
+            let terminals = chase_const_forward(&view, file, name, &qualified)
+                .map_err(|err| check_diag::check_ctx_wrap(&at(), &anyhow::Error::new(err)))?;
             for terminal in &terminals {
                 let Some(binding) = self
                     .module_lets
@@ -5277,10 +5172,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     continue;
                 };
                 if !binding.is_const {
-                    return Err(anyhow::Error::new(check_diag::check_const_is_let_at(
-                        &at(),
-                        &qualified,
-                    )));
+                    return Err(check_diag::check_const_is_let_at(&at(), &qualified));
                 }
                 tags.push(binding.tag.clone());
             }
@@ -5296,16 +5188,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             None => {
                 let hint = missing_const_hint(&view, &effective, alias, name);
                 match hint {
-                    Some(hint) => Err(anyhow::Error::new(check_diag::check_const_hinted_at(
-                        &at(),
-                        &qualified,
-                        &hint,
-                    ))),
-                    None => Err(anyhow::Error::new(check_diag::check_const_no_alias_at(
+                    Some(hint) => Err(check_diag::check_const_hinted_at(&at(), &qualified, &hint)),
+                    None => Err(check_diag::check_const_no_alias_at(
                         &at(),
                         &qualified,
                         alias,
-                    ))),
+                    )),
                 }
             }
         }
@@ -5314,7 +5202,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// Whether checking this function observes module-shared state
     /// (#115): runs the body check with an armed probe and reports the
     /// flag. Used by the harvest gate, statically and at load time.
-    fn func_touches_module(&mut self, key: &str) -> Result<bool> {
+    fn func_touches_module(&mut self, key: &str) -> DiagnosticResult<bool> {
         let info = self.funcs.get(key).cloned();
         let Some(info) = info else {
             return Ok(false);
@@ -5329,7 +5217,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 
     /// Memoized script return with recursion guard, keyed by the
     /// registry key the call resolved through.
-    fn func_return_owned(&mut self, info: &FuncInfo, key: &str, depth: usize) -> Result<StaticTy> {
+    fn func_return_owned(
+        &mut self,
+        info: &FuncInfo,
+        key: &str,
+        depth: usize,
+    ) -> DiagnosticResult<StaticTy> {
         if let Some(known) = self.inferred.get(key) {
             return Ok(known.clone());
         }
@@ -5357,7 +5250,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         idx: usize,
         depth: usize,
-    ) -> Result<StaticTy> {
+    ) -> DiagnosticResult<StaticTy> {
         // Order mirrors execution: the arity gate fires before any
         // argument evaluates, so undeclared names in extra arguments
         // never surface. (`native_arity_failure_...` pins this.)
@@ -5375,20 +5268,20 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         };
         if args.len() < required || args.len() > total {
             if required == total {
-                return Err(anyhow::Error::new(check_diag::check_call_arity_exact(
+                return Err(check_diag::check_call_arity_exact(
                     idx + 1,
                     &base_name(name),
                     total,
                     args.len(),
-                )));
+                ));
             }
-            return Err(anyhow::Error::new(check_diag::check_call_arity_range(
+            return Err(check_diag::check_call_arity_range(
                 idx + 1,
                 &base_name(name),
                 required,
                 total,
                 args.len(),
-            )));
+            ));
         }
         let mut tys = Vec::with_capacity(args.len());
         let mut literals: Vec<Option<&str>> = Vec::with_capacity(args.len());
@@ -5421,7 +5314,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         arg_tys: &[StaticTy],
         literals: &[Option<&str>],
         at: Option<&str>,
-    ) -> Result<StaticTy> {
+    ) -> DiagnosticResult<StaticTy> {
         let display = base_name(name);
         let Callee {
             params,
@@ -5439,20 +5332,20 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         };
         if arg_tys.len() < required || arg_tys.len() > total {
             if required == total {
-                return Err(anyhow::Error::new(check_diag::check_apply_arity_exact(
+                return Err(check_diag::check_apply_arity_exact(
                     &loc(at),
                     display,
                     total,
                     arg_tys.len(),
-                )));
+                ));
             }
-            return Err(anyhow::Error::new(check_diag::check_apply_arity_range(
+            return Err(check_diag::check_apply_arity_range(
                 &loc(at),
                 display,
                 required,
                 total,
                 arg_tys.len(),
-            )));
+            ));
         }
         for (position, actual) in arg_tys.iter().enumerate() {
             let Some(expected) = params.as_deref().and_then(|list| list.get(position)) else {
@@ -5467,9 +5360,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 && let Some(Some(text)) = literals.get(position)
                 && !allowed.contains(text)
             {
-                return Err(anyhow::Error::new(check_diag::check_call_arg_allowed(
-                    &pat, allowed, text,
-                )));
+                return Err(check_diag::check_call_arg_allowed(&pat, allowed, text));
             }
         }
         Ok(ret.clone())
@@ -5552,7 +5443,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         idx: usize,
         depth: usize,
-    ) -> Result<StaticTy> {
+    ) -> DiagnosticResult<StaticTy> {
         let mut tags = Vec::with_capacity(items.len());
         for item in items {
             match self.infer_expr(item, env, scope, idx, depth + 1)? {
@@ -5600,7 +5491,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         idx: usize,
         depth: usize,
-    ) -> Result<StaticTy> {
+    ) -> DiagnosticResult<StaticTy> {
         let mut parts = Vec::with_capacity(entries.len());
         for (key, value) in entries {
             match self.infer_expr(value, env, scope, idx, depth + 1)? {
@@ -5628,11 +5519,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         idx: usize,
         depth: usize,
-    ) -> Result<StaticTy> {
+    ) -> DiagnosticResult<StaticTy> {
         if depth > MAX_STATIC_DEPTH {
-            return Err(anyhow::Error::new(check_diag::check_depth_scope(
-                scope.label,
-            )));
+            return Err(check_diag::check_depth_scope(scope.label));
         }
         self.visits += 1;
         let at = || format!("step {}", idx + 1);
@@ -5694,9 +5583,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     depth + 1,
                 )?;
                 if out.has_return && out.falls_through {
-                    return Err(anyhow::Error::new(check_diag::check_block_fallthrough(
-                        &at(),
-                    )));
+                    return Err(check_diag::check_block_fallthrough(&at()));
                 }
                 if !out.has_return {
                     return Ok(StaticTy::Void);
@@ -5738,7 +5625,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let right_ty = self.infer_expr(right, env, scope, idx, depth + 1)?;
                 // All four operators share one typing rule in
                 // `apply_arith`; only operand shapes matter.
-                Ok(numeric_pair(left_ty, right_ty, Some(&at()))?)
+                numeric_pair(left_ty, right_ty, Some(&at()))
             }
             Expr::CompiledMath(ops) => self.infer_rpn(ops, env, scope, depth),
             Expr::FreshPipe => Ok(StaticTy::Ty(TypeTag::Pipe)),
@@ -5776,11 +5663,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         env: &mut Env,
         scope: &Scope,
         depth: usize,
-    ) -> Result<StaticTy> {
+    ) -> DiagnosticResult<StaticTy> {
         if depth > MAX_STATIC_DEPTH {
-            return Err(anyhow::Error::new(check_diag::check_depth_scope(
-                scope.label,
-            )));
+            return Err(check_diag::check_depth_scope(scope.label));
         }
         let mut stack: Vec<StaticTy> = Vec::new();
         for op in ops {
@@ -5813,7 +5698,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 MathOp::Call { name, arity } => {
                     let before = stack.len();
                     if before < *arity {
-                        return Err(anyhow::Error::new(check_diag::check_rpn_underflow()));
+                        return Err(check_diag::check_rpn_underflow());
                     }
                     // `split_off` keeps left-to-right order already,
                     // matching the runtime's pop-then-reverse: no
@@ -5836,35 +5721,33 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 MathOp::Neg => {
                     let Some(top) = stack.pop() else {
-                        return Err(anyhow::Error::new(check_diag::check_rpn_underflow()));
+                        return Err(check_diag::check_rpn_underflow());
                     };
                     stack.push(neg_rule(top, None)?);
                 }
                 MathOp::Add | MathOp::Sub | MathOp::Mul | MathOp::Div => {
                     let (Some(right), Some(left)) = (stack.pop(), stack.pop()) else {
-                        return Err(anyhow::Error::new(check_diag::check_rpn_underflow()));
+                        return Err(check_diag::check_rpn_underflow());
                     };
                     stack.push(numeric_pair(left, right, None)?);
                 }
                 MathOp::Lt | MathOp::Le | MathOp::Gt | MathOp::Ge => {
                     let (Some(right), Some(left)) = (stack.pop(), stack.pop()) else {
-                        return Err(anyhow::Error::new(check_diag::check_rpn_underflow()));
+                        return Err(check_diag::check_rpn_underflow());
                     };
                     ordering_pair(left, right, None)?;
                     stack.push(StaticTy::Ty(TypeTag::Bool));
                 }
                 MathOp::Eq | MathOp::Ne => {
                     if stack.pop().is_none() || stack.pop().is_none() {
-                        return Err(anyhow::Error::new(check_diag::check_rpn_underflow()));
+                        return Err(check_diag::check_rpn_underflow());
                     }
                     stack.push(StaticTy::Ty(TypeTag::Bool));
                 }
             }
         }
         if stack.len() != 1 {
-            return Err(anyhow::Error::new(check_diag::check_rpn_leftover(
-                stack.len(),
-            )));
+            return Err(check_diag::check_rpn_leftover(stack.len()));
         }
         Ok(stack.pop().expect("length checked"))
     }

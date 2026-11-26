@@ -519,14 +519,14 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         // false-positive on nested calls. Unseen files still validate.
         if !cx.state.validated_modules.contains(&key) {
             super::static_check::validate_import_body_types(&steps, cx.state, &key)
-                .map_err(|e| anyhow::Error::new(import_diag::import_failed_validation(path, &e)))?;
+                .map_err(|e| import_diag::import_failed_validation(path, &anyhow::Error::new(e)))?;
         }
         // Stateful harvests are rejected: the file body never runs, so
         // there is no initialized state for them to observe. Import the
         // file to share its module instead.
         if let Some(offender) =
             super::static_check::harvest_touches_module(cx.state, &key, &steps, func_names)
-                .map_err(|e| anyhow::Error::new(import_diag::import_failed_validation(path, &e)))?
+                .map_err(|e| import_diag::import_failed_validation(path, &anyhow::Error::new(e)))?
         {
             return Err(anyhow::Error::new(import_diag::import_stateful_harvest(
                 path, &offender,
@@ -1100,7 +1100,7 @@ pub(crate) fn import_file<P: ProcessManager>(
         // false-positive on nested calls. Unseen files still validate.
         if !cx.state.validated_modules.contains(&key) {
             super::static_check::validate_import_body_types(&steps, cx.state, &key)
-                .map_err(|e| anyhow::Error::new(import_diag::import_failed_validation(path, &e)))?;
+                .map_err(|e| import_diag::import_failed_validation(path, &anyhow::Error::new(e)))?;
         }
         // Register the imported file's EXPORTed top-level FUNCs under
         // the alias in the caller's scope: unexported means private.

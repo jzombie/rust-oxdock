@@ -1482,6 +1482,36 @@ transport, so this phase is mechanical:
    Diagnostic-into-anyhow conversion with no
    change. Core 409 plus integration 629 green;
    clippy and fmt clean.
+   Static-check bulk step 2026-11-26 (per user
+   request for whole-file efficiency over
+   one-leaf increments): no new ctors, all
+   wordings already pinned. All remaining
+   anyhow::Result signatures in static_check.rs
+   flip to DiagnosticResult in one pass
+   (validate_import_body_types, harvest probes,
+   Checker collect plus walk plus infer plus
+   call plus return plus flow families, template
+   plus placeholder plus map plus RPN helpers,
+   with_scope_aliases closure bound,
+   validate_script_closure outcome holder).
+   Bodies drop ~97 anyhow::Error::new wrappers by
+   balanced-paren unwrap; the 12 surviving
+   anyhow::Error::new(err) sites are inner reason
+   wraps for ctors taking &anyhow::Error and stay
+   per contract. Option<anyhow::Error> failure
+   holders become Option<Diagnostic>. Two
+   now-needless Ok(f(...)?) sites shed the
+   wrapper after both sides flipped. Cross-file
+   fallout in import.rs: three
+   import_failed_validation sites gain the inner
+   anyhow::Error::new(e) wrap since the callee
+   now returns Diagnostic while the ctor takes
+   &anyhow::Error. Outside callers hold via the
+   blanket Diagnostic-into-anyhow conversion with
+   no change. Core 409 plus integration 629
+   green; clippy shows only the three
+   pre-existing needless_borrow warnings; fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
