@@ -1578,7 +1578,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oxdock"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1594,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-build"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-core",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-cli"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-core"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "base64",
@@ -1671,14 +1671,14 @@ dependencies = [
 
 [[package]]
 name = "oxdock-diagnostics"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "oxdock-doc-tests"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1692,7 +1692,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-embed"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1705,7 +1705,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fixture"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1716,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fs"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "cache-manager",
@@ -1732,7 +1732,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-func-macro"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1742,7 +1742,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-logic-tests"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-macros"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-build",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-markdown-plugin"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1802,7 +1802,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-mcp"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1823,7 +1823,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-net-plugin"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1852,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-parser"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1868,7 +1868,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-pipe"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "oxdock-diagnostics",
  "oxdock-fs",
@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-process"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1891,7 +1891,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-pty"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "libc",
@@ -1904,7 +1904,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-remote-proto"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "muxio-rpc-service",
@@ -1916,7 +1916,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-render"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "base64",
@@ -1937,7 +1937,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-ssh-plugin"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1963,11 +1963,11 @@ dependencies = [
 
 [[package]]
 name = "oxdock-sys-test-utils"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 
 [[package]]
 name = "oxdock-utils"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "anyhow",
  "flate2",
@@ -3600,7 +3600,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.44.1-alpha"
+version = "0.45.0-alpha"
 dependencies = [
  "oxdock-core",
  "oxdock-fs",
