@@ -4092,6 +4092,66 @@ pub fn std_pipe_writer_lock_poisoned(func: &str) -> Diagnostic {
     )
 }
 
+/// Text-pump input that is not valid UTF-8. Parameterless: the four
+/// push/flush sites discard the `Utf8Error`, and the pump thread owns
+/// no call-site channel (failures trip cancellation instead of
+/// surfacing), so the wording stands alone with no source.
+pub fn std_pump_not_utf8() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.std.pump_not_utf8",
+        "text pump input is not valid UTF-8".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Text-pump writer lock poisoned. Parameterless: the poison flag
+/// carries no detail, and the pump thread trips cancellation rather
+/// than surfacing the error.
+pub fn std_pump_writer_lock_poisoned() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.std.pump_writer_lock_poisoned",
+        "text pump writer lock poisoned".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Text-pump write failure. Takes the underlying I/O failure; the
+/// text is inlined, so no source rides along. The `BrokenPipe` arm
+/// keeps its typed `PumpDownstreamClosed` stop signal instead.
+pub fn std_pump_write_failed(reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("text pump write failed: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.pump_write_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// Text-pump spill-drain failure. Takes the underlying I/O failure;
+/// the text is inlined, so no source rides along.
+pub fn std_pump_spill_drain_failed(reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("text pump spill drain failed: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.pump_spill_drain_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// Text-pump spill failure. Takes the underlying I/O failure; the
+/// text is inlined, so no source rides along.
+pub fn std_pump_spill_failed(reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("text pump spill failed: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.pump_spill_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
 /// Take-twice on an OS pipe half: the descriptor already moved to a
 /// previous binding. Parameterless: every site reports the identical
 /// remedy, so the wording lives here once.
@@ -6643,6 +6703,11 @@ mod tests {
             std_pipe_spawn_failed("TEXT_REPLACE", &std::io::Error::other("x")).key(),
             std_pipe_reader_lock_poisoned("TEXT_REPLACE").key(),
             std_pipe_writer_lock_poisoned("TEXT_REPLACE").key(),
+            std_pump_not_utf8().key(),
+            std_pump_writer_lock_poisoned().key(),
+            std_pump_write_failed(&std::io::Error::other("x")).key(),
+            std_pump_spill_drain_failed(&std::io::Error::other("x")).key(),
+            std_pump_spill_failed(&std::io::Error::other("x")).key(),
             std_pipe_handle_spent().key(),
             std_pipe_needs_pipe("TEXT_REPLACE", "STRING").key(),
             std_pipe_close_needs_script().key(),
@@ -7692,6 +7757,26 @@ mod tests {
         assert_eq!(
             std_pipe_writer_lock_poisoned("TEXT_REPLACE").message(),
             "TEXT_REPLACE pipe writer lock poisoned"
+        );
+        assert_eq!(
+            std_pump_not_utf8().message(),
+            "text pump input is not valid UTF-8"
+        );
+        assert_eq!(
+            std_pump_writer_lock_poisoned().message(),
+            "text pump writer lock poisoned"
+        );
+        assert_eq!(
+            std_pump_write_failed(&std::io::Error::other("denied")).message(),
+            "text pump write failed: denied"
+        );
+        assert_eq!(
+            std_pump_spill_drain_failed(&std::io::Error::other("denied")).message(),
+            "text pump spill drain failed: denied"
+        );
+        assert_eq!(
+            std_pump_spill_failed(&std::io::Error::other("denied")).message(),
+            "text pump spill failed: denied"
         );
         assert_eq!(
             std_pipe_handle_spent().message(),

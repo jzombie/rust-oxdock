@@ -2434,7 +2434,7 @@ impl TextPumpState {
         match self {
             Self::Case { upper, carry } => {
                 let text = std::str::from_utf8(carry)
-                    .map_err(|_| anyhow::anyhow!("text pump input is not valid UTF-8"))?;
+                    .map_err(|_| anyhow::Error::new(args_diag::std_pump_not_utf8()))?;
                 let mapped = if *upper {
                     text.to_uppercase()
                 } else {
@@ -2455,7 +2455,7 @@ impl TextPumpState {
                 // its own trailing run.
                 let _ = held;
                 let text = std::str::from_utf8(carry)
-                    .map_err(|_| anyhow::anyhow!("text pump input is not valid UTF-8"))?;
+                    .map_err(|_| anyhow::Error::new(args_diag::std_pump_not_utf8()))?;
                 let head = text.trim_end_matches(char::is_whitespace);
                 Self::write(writer, head.as_bytes())
             }
@@ -2492,13 +2492,13 @@ impl TextPumpState {
         }
         writer
             .lock()
-            .map_err(|_| anyhow::anyhow!("text pump writer lock poisoned"))?
+            .map_err(|_| anyhow::Error::new(args_diag::std_pump_writer_lock_poisoned()))?
             .write_all(bytes)
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::BrokenPipe {
                     anyhow::Error::new(PumpDownstreamClosed)
                 } else {
-                    anyhow::anyhow!("text pump write failed: {e}")
+                    anyhow::Error::new(args_diag::std_pump_write_failed(&e))
                 }
             })?;
         Ok(())
@@ -2509,7 +2509,7 @@ impl TextPumpState {
     fn drain_into(held: &SpillBuffer, writer: &SharedOutput) -> Result<()> {
         let bytes = held
             .drain_bytes()
-            .map_err(|e| anyhow::anyhow!("text pump spill drain failed: {e}"))?;
+            .map_err(|e| anyhow::Error::new(args_diag::std_pump_spill_drain_failed(&e)))?;
         Self::write(writer, &bytes)
     }
 
@@ -2531,7 +2531,7 @@ impl TextPumpState {
         staged.extend_from_slice(data);
         let (head, tail) = Self::head_tail(&staged);
         let text = std::str::from_utf8(head)
-            .map_err(|_| anyhow::anyhow!("text pump input is not valid UTF-8"))?;
+            .map_err(|_| anyhow::Error::new(args_diag::std_pump_not_utf8()))?;
         let mapped = if upper {
             text.to_uppercase()
         } else {
@@ -2553,7 +2553,7 @@ impl TextPumpState {
         staged.extend_from_slice(data);
         let (head, tail) = Self::head_tail(&staged);
         let mut text = std::str::from_utf8(head)
-            .map_err(|_| anyhow::anyhow!("text pump input is not valid UTF-8"))?;
+            .map_err(|_| anyhow::Error::new(args_diag::std_pump_not_utf8()))?;
         if !*leading {
             text = text.trim_start_matches(char::is_whitespace);
             if text.is_empty() {
@@ -2569,7 +2569,7 @@ impl TextPumpState {
             Self::write(writer, content.as_bytes())?;
         }
         held.push_bytes(ws.as_bytes())
-            .map_err(|e| anyhow::anyhow!("text pump spill failed: {e}"))?;
+            .map_err(|e| anyhow::Error::new(args_diag::std_pump_spill_failed(&e)))?;
         *carry = tail.to_vec();
         Ok(())
     }

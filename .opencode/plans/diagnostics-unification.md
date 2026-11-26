@@ -2486,6 +2486,20 @@ transport, so this phase is mechanical:
    KEYWORD_ASYNC/KEYWORD_LET/KEYWORD_RETURN imports from mod
    (BREAK/CONTINUE stay). Core lib 410 plus integration 629
    green; clippy at baseline (3 pre-existing), fmt clean.
+   text-pump bulk 2026-11-27 (file-sized batch): five new
+   dsl.std.pump_* ctors with key plus wording pins. The four
+   not-UTF-8 sites share parameterless std_pump_not_utf8; writer
+   lock is parameterless std_pump_writer_lock_poisoned; write,
+   spill-drain, and spill failures take &std::io::Error inline
+   with no source (BrokenPipe keeps its typed
+   PumpDownstreamClosed stop signal). Eight sites re-keyed
+   across flush/push_case/push_trim/write/drain_into (4 UTF-8,
+   1 lock poison, 1 write, 1 spill-drain, 1 spill-push); the only
+   remaining anyhow! in args.rs is the lift_dispatch_error
+   fallback test. Pump failures trip cancellation rather than
+   surfacing, so bytes are unchanged by construction. Core lib
+   410 plus integration 629 green; clippy at baseline
+   (3 pre-existing), fmt clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
