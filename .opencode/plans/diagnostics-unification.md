@@ -2825,6 +2825,40 @@ transport, so this phase is mechanical:
    inventory build plus validate sites) hold via blanket From
    (? auto-converts). net lib 38 plus net integration 38 plus
    cli lib 49 green; net clippy zero, fmt clean on both files.
+   session bulk 2026-11-27 (net remote/session.rs plus net
+   diagnostics, 16 new net.remote.* ctors): converts the last
+   sixteen bare-string context layers; every remaining anyhow
+   site is a pure Error::new(ctor) boundary shim (signatures
+   stay anyhow: the RemoteRunner trait plus the deferred
+   utils/core pack/unpack/apply surface block flipping, and
+   bare ? propagations need no change). New ctors follow the
+   net inline family: remote_transport_spawn_failed (concrete
+   &std::io::Error) plus remote_transport_spawn_failed_outer
+   (the re-prefixing caller layer takes &anyhow::Error,
+   preserving the historical double prefix byte-identically)
+   plus remote_transport_stdio_missing (pipe field, shared by
+   both take sites) plus remote_streaming_call_failed (shared
+   by roundtrip plus open_stream) plus remote_end_stream_failed
+   plus remote_response_item_failed plus
+   remote_stdin_end_failed plus remote_fetch_source_unreadable
+   plus remote_transfer_scratch_tempdir_failed plus
+   remote_stream_write_failed plus remote_stream_flush_failed
+   (all &anyhow::Error: muxio/fs errors chain, so anyhow's
+   {:#} walk is the only proven byte-identical rendering)
+   plus remote_hello_encode_failed plus
+   remote_verdict_decode_failed plus
+   remote_fetch_descriptor_encode_failed plus
+   remote_result_decode_failed (concrete &serde_json::Error,
+   shell_words precedent). The guest-EXIT site keeps its
+   context shape with a typed ctor
+   (remote_target_exit_status): .context(ctor) over the
+   constructed ExitRequest preserves the host exit-code walk
+   (dropping the chain would regress guest exit codes to
+   transport failures). anyhow Context import stays for that
+   site; KEYWORD_REMOTE import drops (no format! left).
+   Test pins added to the key-uniqueness plus
+   canonical-wording tests. net lib 38 plus net integration
+   38 green; net clippy zero, fmt clean on both files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

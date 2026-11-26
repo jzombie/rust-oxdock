@@ -41,6 +41,8 @@ const FIELD_PATH: &str = "path";
 const FIELD_DECLARED: &str = "declared";
 const FIELD_ADDR: &str = "addr";
 const FIELD_SERVICE: &str = "service";
+const FIELD_PIPE: &str = "pipe";
+const FIELD_CODE: &str = "code";
 
 // ---------------------------------------------------------------------------
 // Pump (`net.pump.*`, `bridge.rs`)
@@ -993,12 +995,98 @@ pub fn remote_transport_command_empty() -> Diagnostic {
     )
 }
 
+/// Transport spawn failed at the OS level. Takes the I/O failure;
+/// rendering lives here.
+pub fn remote_transport_spawn_failed(err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{KEYWORD_REMOTE} transport spawn failed: {err_text}");
+    Diagnostic::new(
+        "net.remote.transport_spawn_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Transport spawn helper failed after prefixing its own layer. Takes
+/// the wrapped helper failure; the chain renders inline, preserving
+/// the historical double prefix byte-identically.
+pub fn remote_transport_spawn_failed_outer(err: &anyhow::Error) -> Diagnostic {
+    let err_text = format!("{err:#}");
+    let message = format!("{KEYWORD_REMOTE} transport spawn failed: {err_text}");
+    Diagnostic::new(
+        "net.remote.transport_spawn_failed_outer",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Transport child without a piped stdio handle. Takes which pipe
+/// (`stdin` / `stdout`); rendering lives here. Shared by both
+/// take sites: one key, one mode.
+pub fn remote_transport_stdio_missing(pipe: &str) -> Diagnostic {
+    let message = format!("child has no piped {pipe}");
+    Diagnostic::new(
+        "net.remote.transport_stdio_missing",
+        message,
+        Diagnostic::make_fields(&[(FIELD_PIPE, pipe)]),
+    )
+}
+
 /// Cancelled remote block. Parameterless: the wording is fixed.
 pub fn remote_block_cancelled() -> Diagnostic {
     Diagnostic::new(
         "net.remote.block_cancelled",
         format!("{KEYWORD_REMOTE} block cancelled"),
         Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Streaming call open failed. Takes the wrapped muxio failure; the
+/// chain renders inline. Shared by the roundtrip and open-stream
+/// paths, which retire the same context text: one key, one mode.
+pub fn remote_streaming_call_failed(err: &anyhow::Error) -> Diagnostic {
+    let err_text = format!("{err:#}");
+    let message = format!("{KEYWORD_REMOTE} streaming call failed: {err_text}");
+    Diagnostic::new(
+        "net.remote.streaming_call_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Stream end failed. Takes the wrapped muxio failure; the chain
+/// renders inline.
+pub fn remote_end_stream_failed(err: &anyhow::Error) -> Diagnostic {
+    let err_text = format!("{err:#}");
+    let message = format!("{KEYWORD_REMOTE} end_stream failed: {err_text}");
+    Diagnostic::new(
+        "net.remote.end_stream_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Response item failed. Takes the wrapped muxio failure; the chain
+/// renders inline.
+pub fn remote_response_item_failed(err: &anyhow::Error) -> Diagnostic {
+    let err_text = format!("{err:#}");
+    let message = format!("{KEYWORD_REMOTE} response item failed: {err_text}");
+    Diagnostic::new(
+        "net.remote.response_item_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Stdin end failed. Takes the wrapped muxio failure; the chain
+/// renders inline.
+pub fn remote_stdin_end_failed(err: &anyhow::Error) -> Diagnostic {
+    let err_text = format!("{err:#}");
+    let message = format!("{KEYWORD_REMOTE} stdin end failed: {err_text}");
+    Diagnostic::new(
+        "net.remote.stdin_end_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
     )
 }
 
@@ -1069,6 +1157,54 @@ pub fn remote_language_mismatch(target: &str, host: &str, guest: &str) -> Diagno
     )
 }
 
+/// Hello encode failed. Takes the concrete serialization failure;
+/// rendering lives here.
+pub fn remote_hello_encode_failed(err: &serde_json::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{KEYWORD_REMOTE} hello encode failed: {err_text}");
+    Diagnostic::new(
+        "net.remote.hello_encode_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Verdict decode failed. Takes the concrete serialization failure;
+/// rendering lives here.
+pub fn remote_verdict_decode_failed(err: &serde_json::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{KEYWORD_REMOTE} verdict decode failed: {err_text}");
+    Diagnostic::new(
+        "net.remote.verdict_decode_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Fetch descriptor encode failed. Takes the concrete serialization
+/// failure; rendering lives here.
+pub fn remote_fetch_descriptor_encode_failed(err: &serde_json::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{KEYWORD_REMOTE} fetch descriptor encode failed: {err_text}");
+    Diagnostic::new(
+        "net.remote.fetch_descriptor_encode_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Result decode failed. Takes the concrete serialization failure;
+/// rendering lives here.
+pub fn remote_result_decode_failed(err: &serde_json::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{KEYWORD_REMOTE} result decode failed: {err_text}");
+    Diagnostic::new(
+        "net.remote.result_decode_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
 /// Response stream failure. Takes the wrapped failure; the chain
 /// renders inline.
 pub fn remote_response_failed(err: &anyhow::Error) -> Diagnostic {
@@ -1076,6 +1212,54 @@ pub fn remote_response_failed(err: &anyhow::Error) -> Diagnostic {
     let message = format!("{KEYWORD_REMOTE} response failed: {err_text}");
     Diagnostic::new(
         "net.remote.response_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Fetch source unreadable. Takes the display path plus the wrapped
+/// filesystem failure; the chain renders inline.
+pub fn remote_fetch_source_unreadable(path: &str, err: &anyhow::Error) -> Diagnostic {
+    let err_text = format!("{err:#}");
+    let message = format!("{KEYWORD_REMOTE} fetch source unreadable: {path}: {err_text}");
+    Diagnostic::new(
+        "net.remote.fetch_source_unreadable",
+        message,
+        Diagnostic::make_fields(&[(FIELD_PATH, path), (FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Transfer scratch tempdir failed. Takes the wrapped filesystem
+/// failure; the chain renders inline.
+pub fn remote_transfer_scratch_tempdir_failed(err: &anyhow::Error) -> Diagnostic {
+    let err_text = format!("{err:#}");
+    let message = format!("{KEYWORD_REMOTE} transfer scratch tempdir failed: {err_text}");
+    Diagnostic::new(
+        "net.remote.transfer_scratch_tempdir_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Stream write failed. Takes the wrapped muxio failure; the chain
+/// renders inline.
+pub fn remote_stream_write_failed(err: &anyhow::Error) -> Diagnostic {
+    let err_text = format!("{err:#}");
+    let message = format!("{KEYWORD_REMOTE} stream write failed: {err_text}");
+    Diagnostic::new(
+        "net.remote.stream_write_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Stream flush failed. Takes the wrapped muxio failure; the chain
+/// renders inline.
+pub fn remote_stream_flush_failed(err: &anyhow::Error) -> Diagnostic {
+    let err_text = format!("{err:#}");
+    let message = format!("{KEYWORD_REMOTE} stream flush failed: {err_text}");
+    Diagnostic::new(
+        "net.remote.stream_flush_failed",
         message,
         Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
     )
@@ -1100,6 +1284,18 @@ pub fn remote_target_failed(target: &str, reason: Option<&str>) -> Diagnostic {
         "net.remote.target_failed",
         message,
         Diagnostic::make_fields(&[(FIELD_TARGET, target), (FIELD_REASON, reason_text)]),
+    )
+}
+
+/// Guest EXIT relay. Takes the target plus the code; rendering lives
+/// here. Attached as a typed context over the `ExitRequest` (never
+/// stringified), so the host exit-code walk keeps working.
+pub fn remote_target_exit_status(target: &str, code: i64) -> Diagnostic {
+    let message = format!("{KEYWORD_REMOTE} target '{target}' exited with code {code}");
+    Diagnostic::new(
+        "net.remote.target_exit_status",
+        message,
+        Diagnostic::make_fields(&[(FIELD_TARGET, target), (FIELD_CODE, &code.to_string())]),
     )
 }
 
@@ -1281,6 +1477,10 @@ mod tests {
         shell_words::split("\"unterminated").unwrap_err()
     }
 
+    fn serde_err() -> serde_json::Error {
+        serde_json::from_slice::<serde_json::Value>(b"{bad").unwrap_err()
+    }
+
     fn named_key(name: &str) -> EndpointKey {
         EndpointKey::tcp(VirtualEndpoint::Name(name.to_string()))
     }
@@ -1376,15 +1576,31 @@ mod tests {
             fetch_option_negative("max_body_bytes", -1).key(),
             fetch_option_exceeds_u32("max_redirects", u64::from(u32::MAX) + 1).key(),
             remote_transport_command_empty().key(),
+            remote_transport_spawn_failed(&err).key(),
+            remote_transport_spawn_failed_outer(&chain).key(),
+            remote_transport_stdio_missing("stdin").key(),
             remote_block_cancelled().key(),
+            remote_streaming_call_failed(&chain).key(),
+            remote_end_stream_failed(&chain).key(),
+            remote_response_item_failed(&chain).key(),
+            remote_stdin_end_failed(&chain).key(),
             remote_unknown_response_tag(99).key(),
             remote_result_no_staged_tarball().key(),
             remote_handshake_rejected("prod", None).key(),
             remote_proto_digest_mismatch("prod", "h", "g").key(),
             remote_language_mismatch("prod", "h", "g").key(),
             remote_response_failed(&chain).key(),
+            remote_fetch_source_unreadable("out.txt", &chain).key(),
+            remote_transfer_scratch_tempdir_failed(&chain).key(),
+            remote_stream_write_failed(&chain).key(),
+            remote_stream_flush_failed(&chain).key(),
+            remote_hello_encode_failed(&serde_err()).key(),
+            remote_verdict_decode_failed(&serde_err()).key(),
+            remote_fetch_descriptor_encode_failed(&serde_err()).key(),
+            remote_result_decode_failed(&serde_err()).key(),
             remote_no_result_frame("prod").key(),
             remote_target_failed("prod", None).key(),
+            remote_target_exit_status("prod", 3).key(),
             remote_script_sha_mismatch("prod").key(),
             remote_stdout_sha_mismatch("prod").key(),
             remote_no_result_tarball("prod").key(),
@@ -1444,6 +1660,10 @@ mod tests {
         assert_eq!(
             timeout_option_invalid("NET_CONNECT", "timeout", "x", port_not_numeric()).key(),
             timeout_option_invalid("NET_FETCH", "timeout", "y", port_not_numeric()).key()
+        );
+        assert_eq!(
+            remote_transport_stdio_missing("stdin").key(),
+            remote_transport_stdio_missing("stdout").key()
         );
     }
 
@@ -1743,7 +1963,35 @@ mod tests {
             remote_transport_command_empty().message(),
             "REMOTE transport command is empty"
         );
+        assert_eq!(
+            remote_transport_spawn_failed(&err).message(),
+            "REMOTE transport spawn failed: boom"
+        );
+        assert_eq!(
+            remote_transport_spawn_failed_outer(&chain).message(),
+            "REMOTE transport spawn failed: boom"
+        );
+        assert_eq!(
+            remote_transport_stdio_missing("stdin").message(),
+            "child has no piped stdin"
+        );
         assert_eq!(remote_block_cancelled().message(), "REMOTE block cancelled");
+        assert_eq!(
+            remote_streaming_call_failed(&chain).message(),
+            "REMOTE streaming call failed: boom"
+        );
+        assert_eq!(
+            remote_end_stream_failed(&chain).message(),
+            "REMOTE end_stream failed: boom"
+        );
+        assert_eq!(
+            remote_response_item_failed(&chain).message(),
+            "REMOTE response item failed: boom"
+        );
+        assert_eq!(
+            remote_stdin_end_failed(&chain).message(),
+            "REMOTE stdin end failed: boom"
+        );
         assert_eq!(
             remote_unknown_response_tag(99).message(),
             "REMOTE target sent unknown response tag 99"
@@ -1773,12 +2021,48 @@ mod tests {
             "REMOTE response failed: boom"
         );
         assert_eq!(
+            remote_fetch_source_unreadable("out.txt", &chain).message(),
+            "REMOTE fetch source unreadable: out.txt: boom"
+        );
+        assert_eq!(
+            remote_transfer_scratch_tempdir_failed(&chain).message(),
+            "REMOTE transfer scratch tempdir failed: boom"
+        );
+        assert_eq!(
+            remote_stream_write_failed(&chain).message(),
+            "REMOTE stream write failed: boom"
+        );
+        assert_eq!(
+            remote_stream_flush_failed(&chain).message(),
+            "REMOTE stream flush failed: boom"
+        );
+        assert_eq!(
+            remote_hello_encode_failed(&serde_err()).message(),
+            "REMOTE hello encode failed: key must be a string at line 1 column 2"
+        );
+        assert_eq!(
+            remote_verdict_decode_failed(&serde_err()).message(),
+            "REMOTE verdict decode failed: key must be a string at line 1 column 2"
+        );
+        assert_eq!(
+            remote_fetch_descriptor_encode_failed(&serde_err()).message(),
+            "REMOTE fetch descriptor encode failed: key must be a string at line 1 column 2"
+        );
+        assert_eq!(
+            remote_result_decode_failed(&serde_err()).message(),
+            "REMOTE result decode failed: key must be a string at line 1 column 2"
+        );
+        assert_eq!(
             remote_no_result_frame("prod").message(),
             "REMOTE target 'prod' sent no result frame"
         );
         assert_eq!(
             remote_target_failed("prod", None).message(),
             "REMOTE target 'prod' failed: no reason given"
+        );
+        assert_eq!(
+            remote_target_exit_status("prod", 3).message(),
+            "REMOTE target 'prod' exited with code 3"
         );
         assert_eq!(
             remote_script_sha_mismatch("prod").message(),
