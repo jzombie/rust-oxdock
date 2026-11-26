@@ -10,14 +10,14 @@ use oxdock_diagnostics::Diagnostic;
 use oxdock_parser::template::{bare_sigil_error, qualified_keypath_error};
 use oxdock_parser::{
     ANY_TYPE_NAME, BOOL_TYPE_NAME, Expr, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
-    KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CONST,
-    KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT, KEYWORD_ENV, KEYWORD_EXPORT, KEYWORD_FUNC,
-    KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND,
-    KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_RETURN,
-    KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK,
-    KEYWORD_TYPE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE, LIST_TYPE_NAME, MAP_TYPE_NAME,
-    PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag,
-    VOID_TYPE_NAME, render_structural,
+    KEYWORD_APPEND, KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
+    KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT, KEYWORD_ENV, KEYWORD_EXPORT,
+    KEYWORD_FUNC, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED, KEYWORD_LET,
+    KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_READ, KEYWORD_READ_LINE,
+    KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP,
+    KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TYPE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE,
+    LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME,
+    STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
 };
 
 use super::function_names::{
@@ -2480,6 +2480,61 @@ pub fn eval_write_stream_failed(display: &str, reason: &anyhow::Error) -> Diagno
     let message = format!("failed to write to {display}");
     Diagnostic::new(
         "dsl.eval.write_stream_failed",
+        message,
+        Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `APPEND` destination-resolution failure. Takes the script spelling
+/// and the underlying failure. Bare outer context plus chained
+/// source.
+pub fn eval_append_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_APPEND} {path}");
+    Diagnostic::new(
+        "dsl.eval.append_resolve_failed",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `APPEND` write failure (whole-file or streamed chunk). Takes the
+/// resolved display and the underlying failure; one key covers both
+/// sites since the outer text is identical, mirroring
+/// `eval_set_executable_failed`.
+pub fn eval_append_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to append to {display}");
+    Diagnostic::new(
+        "dsl.eval.append_failed",
+        message,
+        Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `APPEND` without a stdin stream. Takes the script spelling; the
+/// remediation lives here. No underlying error, so no source.
+pub fn eval_append_needs_stdin(path: &str) -> Diagnostic {
+    let message = format!(
+        "{KEYWORD_APPEND} {path} requires stdin (use {KEYWORD_WITH_IO} [stdin=...] {KEYWORD_APPEND})"
+    );
+    Diagnostic::new(
+        "dsl.eval.append_needs_stdin",
+        message,
+        Diagnostic::make_fields(&[("path", path)]),
+    )
+}
+
+/// `APPEND` stream-open failure. Takes the resolved display and the
+/// underlying failure. Bare outer context plus chained source.
+pub fn eval_append_open_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to open {display} for appending");
+    Diagnostic::new(
+        "dsl.eval.append_open_failed",
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
     )
@@ -5313,6 +5368,10 @@ mod tests {
             eval_write_needs_stdin("p").key(),
             eval_write_open_failed("p", &anyhow::anyhow!("x")).key(),
             eval_write_stream_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_append_resolve_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_append_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_append_needs_stdin("p").key(),
+            eval_append_open_failed("p", &anyhow::anyhow!("x")).key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -5887,6 +5946,22 @@ mod tests {
         assert_eq!(
             eval_write_stream_failed("/x", &anyhow::anyhow!("boom")).message(),
             "failed to write to /x"
+        );
+        assert_eq!(
+            eval_append_resolve_failed("f", &anyhow::anyhow!("boom")).message(),
+            "APPEND f"
+        );
+        assert_eq!(
+            eval_append_failed("/x", &anyhow::anyhow!("boom")).message(),
+            "failed to append to /x"
+        );
+        assert_eq!(
+            eval_append_needs_stdin("f").message(),
+            "APPEND f requires stdin (use WITH_IO [stdin=...] APPEND)"
+        );
+        assert_eq!(
+            eval_append_open_failed("/x", &anyhow::anyhow!("boom")).message(),
+            "failed to open /x for appending"
         );
         assert!(
             eval_run_exit_status("echo hi", &exit_status_sample())

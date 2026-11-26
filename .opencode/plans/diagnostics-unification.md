@@ -2214,6 +2214,25 @@ transport, so this phase is mechanical:
    410 plus integration 629 green; clippy at
    baseline (3 pre-existing), fmt clean on both
    touched files.
+   APPEND bulk step 2026-11-26 (file-sized batch):
+   four new dsl.eval.* ctors with key plus wording
+   pins (append_resolve_failed with path;
+   append_failed with display, one key covering
+   both the whole-file and streamed-chunk sites
+   since the outer text is identical, mirroring
+   set_executable_failed; append_needs_stdin with
+   path, no source; append_open_failed with display
+   for appending). Six sites re-keyed across append
+   via map_err plus anyhow Error new (stdin-missing
+   bail becomes explicit return Err). The parent-dir
+   site reuses ensure_parent_failed from the WRITE
+   batch, single ownership holding. The streamed
+   write_all site wraps its std io Error with anyhow
+   Error new at the call site. All failure ctors keep
+   the bare outer-context message plus chained source.
+   Bytes identical. Core 410 plus integration 629
+   green; clippy at baseline (3 pre-existing), fmt
+   clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

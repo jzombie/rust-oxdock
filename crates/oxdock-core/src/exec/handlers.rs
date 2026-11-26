@@ -1604,31 +1604,33 @@ pub(super) fn append<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("{KEYWORD_APPEND} {}", path))?;
-    cx.state
-        .fs
-        .ensure_parent_dir(&target)
-        .with_context(|| format!("failed to create parent for {}", target.display()))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_append_resolve_failed(path, &e)))?;
+    cx.state.fs.ensure_parent_dir(&target).map_err(|e| {
+        anyhow::Error::new(diag::eval_ensure_parent_failed(
+            &target.display().to_string(),
+            &e,
+        ))
+    })?;
     if let Some(body) = contents {
         cx.state
             .fs
             .append_file(&target, body.as_bytes())
-            .with_context(|| format!("failed to append to {}", target.display()))?;
+            .map_err(|e| {
+                anyhow::Error::new(diag::eval_append_failed(&target.display().to_string(), &e))
+            })?;
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-            bail!(
-                "{KEYWORD_APPEND} {} requires stdin (use {KEYWORD_WITH_IO} [stdin=...] {KEYWORD_APPEND})",
-                path
-            );
+            return Err(anyhow::Error::new(diag::eval_append_needs_stdin(path)));
         };
         let mut guard = input_stream
             .lock()
             .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_APPEND)))?;
-        let mut writer = cx
-            .state
-            .fs
-            .open_append(&target)
-            .with_context(|| format!("failed to open {} for appending", target.display()))?;
+        let mut writer = cx.state.fs.open_append(&target).map_err(|e| {
+            anyhow::Error::new(diag::eval_append_open_failed(
+                &target.display().to_string(),
+                &e,
+            ))
+        })?;
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
             let n = guard.read(&mut buf).map_err(|e| {
@@ -1637,9 +1639,12 @@ pub(super) fn append<P: ProcessManager>(
             if n == 0 {
                 break;
             }
-            writer
-                .write_all(&buf[..n])
-                .with_context(|| format!("failed to append to {}", target.display()))?;
+            writer.write_all(&buf[..n]).map_err(|e| {
+                anyhow::Error::new(diag::eval_append_failed(
+                    &target.display().to_string(),
+                    &anyhow::Error::new(e),
+                ))
+            })?;
             writer.flush()?;
         }
     }
