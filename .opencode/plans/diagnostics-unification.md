@@ -1470,6 +1470,18 @@ transport, so this phase is mechanical:
    one map_err(|_| ...) site discards the error so
    the type change is invisible. Core 409 plus
    integration 629 green; clippy and fmt clean.
+   Declare step 2026-11-26: no new ctors, all
+   wordings already pinned. Three signatures flip
+   in static_check.rs: Env declare plus
+   declare_const plus declare_inner return
+   DiagnosticResult. Bodies drop two
+   anyhow::Error::new wrappers; the cluster is
+   self-contained (guards_overlap is infallible
+   bool, recursion stays inside the flipped set).
+   Callers hold via the blanket
+   Diagnostic-into-anyhow conversion with no
+   change. Core 409 plus integration 629 green;
+   clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

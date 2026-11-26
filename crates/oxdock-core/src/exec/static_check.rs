@@ -2304,7 +2304,7 @@ impl Env {
         tag: TypeTag,
         guard: Option<&GuardExpr>,
         idx: usize,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         self.declare_inner(key, tag, guard, idx, false)
     }
 
@@ -2316,7 +2316,7 @@ impl Env {
         tag: TypeTag,
         guard: Option<&GuardExpr>,
         idx: usize,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         self.declare_inner(key, tag, guard, idx, true)
     }
 
@@ -2327,22 +2327,16 @@ impl Env {
         guard: Option<&GuardExpr>,
         idx: usize,
         is_const: bool,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         if let Some(frame) = self.frames.last()
             && let Some(entries) = frame.get(&key)
         {
             for entry in entries {
                 if oxdock_parser::guards_overlap(entry.guard.as_ref(), guard) {
                     if entry.is_const || is_const {
-                        return Err(anyhow::Error::new(check_diag::check_redeclare_const(
-                            idx + 1,
-                            &key,
-                        )));
+                        return Err(check_diag::check_redeclare_const(idx + 1, &key));
                     }
-                    return Err(anyhow::Error::new(check_diag::check_redeclare_let(
-                        idx + 1,
-                        &key,
-                    )));
+                    return Err(check_diag::check_redeclare_let(idx + 1, &key));
                 }
             }
         }
