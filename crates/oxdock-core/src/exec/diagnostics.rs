@@ -1651,6 +1651,39 @@ pub fn std_pipe_writer_lock_poisoned(func: &str) -> Diagnostic {
     )
 }
 
+/// Take-twice on an OS pipe half: the descriptor already moved to a
+/// previous binding. Parameterless: every site reports the identical
+/// remedy, so the wording lives here once.
+pub fn std_pipe_handle_spent() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.std.pipe_handle_spent",
+        "OS pipe handle has already been consumed by another binding; declare a fresh LET $x: PIPE for a new session".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Host pipe accessor handed a non-PIPE word. Takes the invoking
+/// function and the offending type; quoting lives here.
+pub fn std_pipe_needs_pipe(func: &str, actual: &str) -> Diagnostic {
+    let message = format!("host {func} needs a PIPE value, got {actual}");
+    Diagnostic::new(
+        "dsl.std.pipe_needs_pipe",
+        message,
+        Diagnostic::make_fields(&[("func", func), ("actual", actual)]),
+    )
+}
+
+/// Force-close on a pipe without a script backend: unbound and OS
+/// handles close by dropping their taken halves. Parameterless: the
+/// single call site names the function in the fixed text.
+pub fn std_pipe_close_needs_script() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.std.pipe_close_needs_script",
+        "host close_pipe needs a script-materialized pipe (unbound and OS handles cannot be force-closed)".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
 /// Chunk read failure inside the eager-read loop. Takes the invoking
 /// function and the underlying I/O failure with `Display` rendering:
 /// the loop reports `{e}`, while the outer open reports `{e:#}`, so
@@ -3897,6 +3930,9 @@ mod tests {
             std_pipe_spawn_failed("TEXT_REPLACE", &std::io::Error::other("x")).key(),
             std_pipe_reader_lock_poisoned("TEXT_REPLACE").key(),
             std_pipe_writer_lock_poisoned("TEXT_REPLACE").key(),
+            std_pipe_handle_spent().key(),
+            std_pipe_needs_pipe("TEXT_REPLACE", "STRING").key(),
+            std_pipe_close_needs_script().key(),
             std_pipe_chunk_read_failed("TEXT_REPLACE", &std::io::Error::other("x")).key(),
             std_pipe_input_not_utf8("TEXT_REPLACE").key(),
             std_pipe_spill_failed("TEXT_REPLACE", &std::io::Error::other("x")).key(),
@@ -4237,6 +4273,18 @@ mod tests {
         assert_eq!(
             std_pipe_writer_lock_poisoned("TEXT_REPLACE").message(),
             "TEXT_REPLACE pipe writer lock poisoned"
+        );
+        assert_eq!(
+            std_pipe_handle_spent().message(),
+            "OS pipe handle has already been consumed by another binding; declare a fresh LET $x: PIPE for a new session"
+        );
+        assert_eq!(
+            std_pipe_needs_pipe("TEXT_REPLACE", "STRING").message(),
+            "host TEXT_REPLACE needs a PIPE value, got STRING"
+        );
+        assert_eq!(
+            std_pipe_close_needs_script().message(),
+            "host close_pipe needs a script-materialized pipe (unbound and OS handles cannot be force-closed)"
         );
         assert_eq!(
             std_pipe_chunk_read_failed("TEXT_REPLACE", &std::io::Error::other("denied"),).message(),

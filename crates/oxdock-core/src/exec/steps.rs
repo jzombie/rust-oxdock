@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Result, bail};
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::GuardedPath;
 use oxdock_parser::{Arg, AssertTarget, Command, Step, StepKind, Value, guard_option_allows};
 use oxdock_process::{BackgroundHandle, CommandStdin, ProcessManager, SharedInput, SharedOutput};
@@ -513,23 +514,22 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     /// through the single-take bridge: the first call takes, repeats bail
     /// loudly (same contract as DSL consumers; use script-backed pipes
     /// for repeat or multi access).
-    pub fn pipe_reader(&self, value: &Value) -> Result<SharedInput> {
+    pub fn pipe_reader(&self, value: &Value) -> DiagnosticResult<SharedInput> {
         use oxdock_pipe::{Materialized, materialize};
         let Some(handle) = value.as_pipe_handle() else {
-            anyhow::bail!(
-                "host pipe_reader needs a PIPE value, got {}",
-                value.type_name()
-            );
+            return Err(super::diagnostics::std_pipe_needs_pipe(
+                "pipe_reader",
+                value.type_name(),
+            ));
         };
         match materialize(&handle, false)? {
             Materialized::Script(backend) => Ok(backend.reader_handle()),
             #[cfg(not(miri))]
             Materialized::Os(entry) => {
-                let owned = entry.reader.take().map_err(|_| {
-                    anyhow::anyhow!(
-                        "OS pipe handle has already been consumed by another binding; declare a fresh LET $x: PIPE for a new session"
-                    )
-                })?;
+                let owned = entry
+                    .reader
+                    .take()
+                    .map_err(|_| super::diagnostics::std_pipe_handle_spent())?;
                 Ok(Arc::new(Mutex::new(owned)))
             }
         }
@@ -538,23 +538,22 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     /// Borrow the write half of a `PIPE` value for byte streaming (see
     /// [`PipeStream`](super::PipeStream)). Same materialization and take-once contract as
     /// [`StepCtx::pipe_reader`].
-    pub fn pipe_writer(&self, value: &Value) -> Result<SharedOutput> {
+    pub fn pipe_writer(&self, value: &Value) -> DiagnosticResult<SharedOutput> {
         use oxdock_pipe::{Materialized, materialize};
         let Some(handle) = value.as_pipe_handle() else {
-            anyhow::bail!(
-                "host pipe_writer needs a PIPE value, got {}",
-                value.type_name()
-            );
+            return Err(super::diagnostics::std_pipe_needs_pipe(
+                "pipe_writer",
+                value.type_name(),
+            ));
         };
         match materialize(&handle, false)? {
             Materialized::Script(backend) => Ok(backend.writer_handle()),
             #[cfg(not(miri))]
             Materialized::Os(entry) => {
-                let owned = entry.writer.take().map_err(|_| {
-                    anyhow::anyhow!(
-                        "OS pipe handle has already been consumed by another binding; declare a fresh LET $x: PIPE for a new session"
-                    )
-                })?;
+                let owned = entry
+                    .writer
+                    .take()
+                    .map_err(|_| super::diagnostics::std_pipe_handle_spent())?;
                 Ok(Arc::new(Mutex::new(owned)))
             }
         }
@@ -565,17 +564,15 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     /// handles bail (closing a never-bound pipe is a caller bug), and
     /// OS-materialized handles bail (kernel pairs close by dropping their
     /// taken halves : drop the value instead).
-    pub fn close_pipe(&self, value: &Value) -> Result<()> {
+    pub fn close_pipe(&self, value: &Value) -> DiagnosticResult<()> {
         let Some(handle) = value.as_pipe_handle() else {
-            anyhow::bail!(
-                "host close_pipe needs a PIPE value, got {}",
-                value.type_name()
-            );
+            return Err(super::diagnostics::std_pipe_needs_pipe(
+                "close_pipe",
+                value.type_name(),
+            ));
         };
         let Some(backend) = oxdock_pipe::script_backend(&handle) else {
-            anyhow::bail!(
-                "host close_pipe needs a script-materialized pipe (unbound and OS handles cannot be force-closed)"
-            );
+            return Err(super::diagnostics::std_pipe_close_needs_script());
         };
         backend.force_close();
         Ok(())

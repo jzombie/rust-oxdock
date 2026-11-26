@@ -2245,13 +2245,19 @@ pub(crate) fn mirror_stream<P: ProcessManager>(
     {
         return Err(args_diag::std_text_needs_search(func).into());
     }
-    let reader = cx
-        .pipe_reader(value)
-        .map_err(|err| anyhow::Error::from(args_diag::std_pipe_read_failed(func, &err)))?;
+    let reader = cx.pipe_reader(value).map_err(|err| {
+        anyhow::Error::from(args_diag::std_pipe_read_failed(
+            func,
+            &anyhow::Error::new(err),
+        ))
+    })?;
     let output = cx.new_pipe();
-    let writer = cx
-        .pipe_writer(&output)
-        .map_err(|err| anyhow::Error::from(args_diag::std_pipe_create_failed(func, &err)))?;
+    let writer = cx.pipe_writer(&output).map_err(|err| {
+        anyhow::Error::from(args_diag::std_pipe_create_failed(
+            func,
+            &anyhow::Error::new(err),
+        ))
+    })?;
     let cancelled = cx.cancel_token();
     let thread_name = format!("oxdock-text-{func}-pump");
     std::thread::Builder::new()
@@ -2686,9 +2692,12 @@ pub(crate) fn read_pipe_eager<P: ProcessManager>(
         )
         .into());
     }
-    let reader = cx
-        .pipe_reader(value)
-        .map_err(|err| anyhow::Error::from(args_diag::std_pipe_read_failed(func, &err)))?;
+    let reader = cx.pipe_reader(value).map_err(|err| {
+        anyhow::Error::from(args_diag::std_pipe_read_failed(
+            func,
+            &anyhow::Error::new(err),
+        ))
+    })?;
     let spill = SpillBuffer::new();
     let mut carry = Vec::new();
     let mut chunk = [0u8; super::io::CHUNK_SIZE];
@@ -2730,9 +2739,12 @@ pub(crate) fn write_completed_pipe<P: ProcessManager>(
     text: String,
 ) -> Result<Value> {
     let pipe = cx.new_pipe();
-    let writer = cx
-        .pipe_writer(&pipe)
-        .map_err(|err| anyhow::Error::from(args_diag::std_pipe_create_failed(func, &err)))?;
+    let writer = cx.pipe_writer(&pipe).map_err(|err| {
+        anyhow::Error::from(args_diag::std_pipe_create_failed(
+            func,
+            &anyhow::Error::new(err),
+        ))
+    })?;
     {
         let mut guard = writer
             .lock()

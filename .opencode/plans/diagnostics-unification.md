@@ -1568,6 +1568,37 @@ transport, so this phase is mechanical:
    (import_file/ensure_module_init runtime paths,
    handlers call dispatch). Core 409 plus
    integration 629 green; clippy and fmt clean.
+   Pipe-handle bulk step 2026-11-26 (per user
+   file-sized batches): three new ctors in
+   exec/diagnostics.rs with key plus wording
+   pins (std_pipe_handle_spent parameterless for
+   the take-twice remedy shared by all five take
+   sites; std_pipe_needs_pipe(func, actual) for
+   the three host needs-PIPE checks; 
+   std_pipe_close_needs_script parameterless for
+   the single force-close site). Sixteen
+   signatures flip: io.rs spent_handle returns
+   Diagnostic plus PipeRegistry
+   ensure_handle/peek_pipe_content/pin_keeper/
+   resolve_stdin/resolve_stdout/resolve_stderr
+   plus the six ExecState wrappers return
+   DiagnosticResult; steps.rs pipe_reader/
+   pipe_writer/close_pipe return
+   DiagnosticResult. Bodies drop bare anyhow!
+   sites; take sites keep map_err shape against
+   the new spent ctor; materialize/peek already
+   Diagnostic so ensure/peek flips shed one
+   needless Ok(?). Cross-file fallout in args.rs:
+   four std_pipe_read/create_failed sites gain
+   the inner anyhow::Error::new(e) wrap since the
+   callee now returns Diagnostic while the ctor
+   takes &anyhow::Error. resolve_assert_target
+   needs no change (anyhow! formats the
+   Diagnostic source inline). Outside callers
+   hold via the blanket conversion (handlers io
+   paths, SSH pipe bridges, test harnesses).
+   Core 409 plus integration 629 green; clippy
+   and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
