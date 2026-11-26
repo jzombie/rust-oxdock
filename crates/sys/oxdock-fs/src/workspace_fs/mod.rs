@@ -4,6 +4,7 @@
 use anyhow::{Context, Result};
 
 use crate::diagnostics as fs_diag;
+use oxdock_diagnostics::DiagnosticResult;
 
 use backend::Backend;
 use std::sync::{Arc, OnceLock};
@@ -184,7 +185,7 @@ impl CargoScratch {
 /// Build outputs stay a managed, guarded location instead of an arbitrary
 /// relative string (or the live workspace tree).
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-pub fn reserve_cargo_scratch() -> Result<CargoScratch> {
+pub fn reserve_cargo_scratch() -> DiagnosticResult<CargoScratch> {
     Ok(CargoScratch {
         root: Arc::new(LazyGuardedTempDir::new()),
     })

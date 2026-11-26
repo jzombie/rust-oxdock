@@ -1325,6 +1325,20 @@ transport, so this phase is mechanical:
    Core 409 plus integration 629 plus net 38 plus
    service_enforcement 4 green; clippy and fmt
    clean.
+   Session-assembly step 2026-11-26: no new ctors,
+   both fns infallible. Two signatures flip to
+   DiagnosticResult: fs reserve_cargo_scratch plus
+   core new_state. reserve_cargo_scratch is pure
+   lazy reservation with no I/O, so the body stays
+   a bare Ok; the flip only retires the anyhow
+   Result alias at the boundary. new_state holds a
+   single `?` on reserve, now direct with no
+   conversion. Callers hold: the anyhow session
+   entry rides the blanket Diagnostic-into-anyhow
+   conversion with no change, and the `.unwrap()` /
+   `.expect()` test harnesses work unchanged since
+   Diagnostic is Debug. Core 409 plus integration
+   629 plus fs 71 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

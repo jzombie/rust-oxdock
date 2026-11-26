@@ -71,6 +71,7 @@ pub use self::typing::{
 };
 
 use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::{
     GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs, reserve_cargo_scratch,
 };
@@ -416,7 +417,7 @@ pub fn run_steps_with_manager_with_modules_and_entry<P: ProcessManager>(
 pub(crate) fn new_state<P: ProcessManager>(
     fs: Box<dyn WorkspaceFs>,
     io: ExecIo,
-) -> Result<ExecState<P>> {
+) -> DiagnosticResult<ExecState<P>> {
     let cwd = fs.root().clone();
     let build_context = fs.build_context().clone();
     let cargo_scratch = reserve_cargo_scratch()?;
