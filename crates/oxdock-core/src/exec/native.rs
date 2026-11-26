@@ -4119,13 +4119,22 @@ fn text_trim<P: ProcessManager>(
     #[union(String, Pipe)]
     text: Value,
 ) -> Result<Value> {
-    super::args::mirror_stream(cx, "TEXT_TRIM", &text, super::args::TextPump::Trim)
+    Ok(super::args::mirror_stream(
+        cx,
+        "TEXT_TRIM",
+        &text,
+        super::args::TextPump::Trim,
+    )?)
 }
 
 /// Template projection of `TEXT_TRIM`: the same trim for `{{ }}`
 /// placeholders, which carry no step IO for pipes.
 fn text_trim_string(text: Value) -> Result<Value> {
-    super::args::mirror_string("TEXT_TRIM", &text, super::args::TextPump::Trim)
+    Ok(super::args::mirror_string(
+        "TEXT_TRIM",
+        &text,
+        super::args::TextPump::Trim,
+    )?)
 }
 
 /// Strip one leading prefix, returning the input unchanged when absent.
@@ -4186,22 +4195,22 @@ fn text_trim_prefix<P: ProcessManager>(
     /// Leading prefix to remove once.
     prefix: String,
 ) -> Result<Value> {
-    super::args::mirror_stream(
+    Ok(super::args::mirror_stream(
         cx,
         "TEXT_TRIM_PREFIX",
         &text,
         super::args::TextPump::TrimPrefix(prefix),
-    )
+    )?)
 }
 
 /// Template projection of `TEXT_TRIM_PREFIX`: the same strip for
 /// `{{ }}` placeholders, which carry no step IO for pipes.
 fn text_trim_prefix_string(text: Value, prefix: String) -> Result<Value> {
-    super::args::mirror_string(
+    Ok(super::args::mirror_string(
         "TEXT_TRIM_PREFIX",
         &text,
         super::args::TextPump::TrimPrefix(prefix),
-    )
+    )?)
 }
 
 /// Strip one trailing suffix, returning the input unchanged when absent.
@@ -4260,22 +4269,22 @@ fn text_trim_suffix<P: ProcessManager>(
     /// Trailing suffix to remove once.
     suffix: String,
 ) -> Result<Value> {
-    super::args::mirror_stream(
+    Ok(super::args::mirror_stream(
         cx,
         "TEXT_TRIM_SUFFIX",
         &text,
         super::args::TextPump::TrimSuffix(suffix),
-    )
+    )?)
 }
 
 /// Template projection of `TEXT_TRIM_SUFFIX`: the same strip for
 /// `{{ }}` placeholders, which carry no step IO for pipes.
 fn text_trim_suffix_string(text: Value, suffix: String) -> Result<Value> {
-    super::args::mirror_string(
+    Ok(super::args::mirror_string(
         "TEXT_TRIM_SUFFIX",
         &text,
         super::args::TextPump::TrimSuffix(suffix),
-    )
+    )?)
 }
 
 /// Join a directory and a file name with the host-native separator.
@@ -4434,13 +4443,22 @@ fn text_to_upper<P: ProcessManager>(
     #[union(String, Pipe)]
     text: Value,
 ) -> Result<Value> {
-    super::args::mirror_stream(cx, "TEXT_TO_UPPER", &text, super::args::TextPump::ToUpper)
+    Ok(super::args::mirror_stream(
+        cx,
+        "TEXT_TO_UPPER",
+        &text,
+        super::args::TextPump::ToUpper,
+    )?)
 }
 
 /// Template projection of `TEXT_TO_UPPER`: the same fold for `{{ }}`
 /// placeholders, which carry no step IO for pipes.
 fn text_to_upper_string(text: Value) -> Result<Value> {
-    super::args::mirror_string("TEXT_TO_UPPER", &text, super::args::TextPump::ToUpper)
+    Ok(super::args::mirror_string(
+        "TEXT_TO_UPPER",
+        &text,
+        super::args::TextPump::ToUpper,
+    )?)
 }
 
 /// Lowercase text with full Unicode mapping.
@@ -4492,13 +4510,22 @@ fn text_to_lower<P: ProcessManager>(
     #[union(String, Pipe)]
     text: Value,
 ) -> Result<Value> {
-    super::args::mirror_stream(cx, "TEXT_TO_LOWER", &text, super::args::TextPump::ToLower)
+    Ok(super::args::mirror_stream(
+        cx,
+        "TEXT_TO_LOWER",
+        &text,
+        super::args::TextPump::ToLower,
+    )?)
 }
 
 /// Template projection of `TEXT_TO_LOWER`: the same fold for `{{ }}`
 /// placeholders, which carry no step IO for pipes.
 fn text_to_lower_string(text: Value) -> Result<Value> {
-    super::args::mirror_string("TEXT_TO_LOWER", &text, super::args::TextPump::ToLower)
+    Ok(super::args::mirror_string(
+        "TEXT_TO_LOWER",
+        &text,
+        super::args::TextPump::ToLower,
+    )?)
 }
 
 /// Replace every literal occurrence of `from` with `to`.
@@ -4559,22 +4586,22 @@ fn text_replace<P: ProcessManager>(
     /// Literal replacement text.
     to: String,
 ) -> Result<Value> {
-    super::args::mirror_stream(
+    Ok(super::args::mirror_stream(
         cx,
         FUNC_TEXT_REPLACE,
         &text,
         super::args::TextPump::ReplaceLiteral { from, to },
-    )
+    )?)
 }
 
 /// Template projection of `TEXT_REPLACE`: the same rewrite for `{{ }}`
 /// placeholders, which carry no step IO for pipes.
 fn text_replace_string(text: Value, from: String, to: String) -> Result<Value> {
-    super::args::mirror_string(
+    Ok(super::args::mirror_string(
         FUNC_TEXT_REPLACE,
         &text,
         super::args::TextPump::ReplaceLiteral { from, to },
-    )
+    )?)
 }
 
 /// Replace every regex match, expanding `$1` and `$name` captures.
@@ -4652,7 +4679,11 @@ fn text_replace_regex<P: ProcessManager>(
         &replacement,
         FUNC_TEXT_REPLACE_REGEX,
     )?;
-    super::args::write_completed_pipe(cx, FUNC_TEXT_REPLACE_REGEX, out)
+    Ok(super::args::write_completed_pipe(
+        cx,
+        FUNC_TEXT_REPLACE_REGEX,
+        out,
+    )?)
 }
 
 /// Template projection of `TEXT_REPLACE_REGEX`: the same rewrite for

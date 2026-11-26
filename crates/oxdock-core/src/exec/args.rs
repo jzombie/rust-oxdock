@@ -2199,7 +2199,7 @@ impl TextPump {
     /// Eager string application with the exact semantics the pump
     /// produces chunk by chunk, so string and pipe inputs agree.
     /// Shared by the stateful body and the template projection.
-    pub(crate) fn apply_str(&self, s: &str, func: &str) -> Result<String> {
+    pub(crate) fn apply_str(&self, s: &str, func: &str) -> DiagnosticResult<String> {
         match self {
             TextPump::Trim => Ok(text_trim_str(s)),
             TextPump::TrimPrefix(prefix) => Ok(text_trim_prefix_str(s, prefix)),
@@ -2217,11 +2217,11 @@ impl TextPump {
 /// expansion: strings apply eagerly through the shared pump semantics,
 /// pipes bail naming the step IO they need (placeholder evaluation
 /// has no step context to pump through).
-pub(crate) fn mirror_string(func: &str, value: &Value, pump: TextPump) -> Result<Value> {
+pub(crate) fn mirror_string(func: &str, value: &Value, pump: TextPump) -> DiagnosticResult<Value> {
     if let Some(s) = value.as_str() {
         return pump.apply_str(s, func).map(Value::string);
     }
-    Err(args_diag::std_pipe_needs_step_io(func).into())
+    Err(args_diag::std_pipe_needs_step_io(func))
 }
 
 /// Mirror a `STRING|PIPE` input through a transform: strings apply
@@ -2234,7 +2234,7 @@ pub(crate) fn mirror_stream<P: ProcessManager>(
     func: &str,
     value: &Value,
     pump: TextPump,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     if let Some(s) = value.as_str() {
         return pump.apply_str(s, func).map(Value::string);
     }
@@ -2243,33 +2243,26 @@ pub(crate) fn mirror_stream<P: ProcessManager>(
             &format!("{func} text position"),
             &oxdock_parser::union_tag!(String, Pipe),
             value,
-        )
-        .into());
+        ));
     }
     if let TextPump::ReplaceLiteral { from, .. } = &pump
         && from.is_empty()
     {
-        return Err(args_diag::std_text_needs_search(func).into());
+        return Err(args_diag::std_text_needs_search(func));
     }
-    let reader = cx.pipe_reader(value).map_err(|err| {
-        anyhow::Error::from(args_diag::std_pipe_read_failed(
-            func,
-            &anyhow::Error::new(err),
-        ))
-    })?;
+    let reader = cx
+        .pipe_reader(value)
+        .map_err(|err| args_diag::std_pipe_read_failed(func, &anyhow::Error::new(err)))?;
     let output = cx.new_pipe();
-    let writer = cx.pipe_writer(&output).map_err(|err| {
-        anyhow::Error::from(args_diag::std_pipe_create_failed(
-            func,
-            &anyhow::Error::new(err),
-        ))
-    })?;
+    let writer = cx
+        .pipe_writer(&output)
+        .map_err(|err| args_diag::std_pipe_create_failed(func, &anyhow::Error::new(err)))?;
     let cancelled = cx.cancel_token();
     let thread_name = format!("oxdock-text-{func}-pump");
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || run_text_pump(reader, writer, pump, &cancelled))
-        .map_err(|err| anyhow::Error::from(args_diag::std_pipe_spawn_failed(func, &err)))?;
+        .map_err(|err| args_diag::std_pipe_spawn_failed(func, &err))?;
     Ok(output)
 }
 
@@ -2689,31 +2682,25 @@ pub(crate) fn read_pipe_eager<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     func: &str,
     value: &Value,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     if value.as_pipe_handle().is_none() {
         return Err(args_diag::coerce_type_mismatch(
             &format!("{func} text position"),
             &oxdock_parser::union_tag!(String, Pipe),
             value,
-        )
-        .into());
+        ));
     }
-    let reader = cx.pipe_reader(value).map_err(|err| {
-        anyhow::Error::from(args_diag::std_pipe_read_failed(
-            func,
-            &anyhow::Error::new(err),
-        ))
-    })?;
+    let reader = cx
+        .pipe_reader(value)
+        .map_err(|err| args_diag::std_pipe_read_failed(func, &anyhow::Error::new(err)))?;
     let spill = SpillBuffer::new();
     let mut carry = Vec::new();
     let mut chunk = [0u8; super::io::CHUNK_SIZE];
     loop {
         let n = reader.lock().map(|mut guard| guard.read(&mut chunk));
         let n = n
-            .map_err(|_| anyhow::Error::from(args_diag::std_pipe_reader_lock_poisoned(func)))?
-            .map_err(|err| {
-                anyhow::Error::from(args_diag::std_pipe_chunk_read_failed(func, &err))
-            })?;
+            .map_err(|_| args_diag::std_pipe_reader_lock_poisoned(func))?
+            .map_err(|err| args_diag::std_pipe_chunk_read_failed(func, &err))?;
         if n == 0 {
             break;
         }
@@ -2722,18 +2709,18 @@ pub(crate) fn read_pipe_eager<P: ProcessManager>(
         let hold = trailing_incomplete_len(&staged);
         let valid_len = staged.len() - hold;
         std::str::from_utf8(&staged[..valid_len])
-            .map_err(|_| anyhow::Error::from(args_diag::std_pipe_input_not_utf8(func)))?;
+            .map_err(|_| args_diag::std_pipe_input_not_utf8(func))?;
         spill
             .push_bytes(&staged[..valid_len])
-            .map_err(|err| anyhow::Error::from(args_diag::std_pipe_spill_failed(func, &err)))?;
+            .map_err(|err| args_diag::std_pipe_spill_failed(func, &err))?;
         carry = staged[valid_len..].to_vec();
     }
     spill
         .push_bytes(&carry)
-        .map_err(|err| anyhow::Error::from(args_diag::std_pipe_spill_failed(func, &err)))?;
+        .map_err(|err| args_diag::std_pipe_spill_failed(func, &err))?;
     spill
         .drain_string_strict()
-        .map_err(|_| anyhow::Error::from(args_diag::std_pipe_input_not_utf8(func)))
+        .map_err(|_| args_diag::std_pipe_input_not_utf8(func))
 }
 
 /// Completed pipe for eager pipe-out: mints a task-owned handle, writes
@@ -2743,24 +2730,21 @@ pub(crate) fn write_completed_pipe<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     func: &str,
     text: String,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     let pipe = cx.new_pipe();
-    let writer = cx.pipe_writer(&pipe).map_err(|err| {
-        anyhow::Error::from(args_diag::std_pipe_create_failed(
-            func,
-            &anyhow::Error::new(err),
-        ))
-    })?;
+    let writer = cx
+        .pipe_writer(&pipe)
+        .map_err(|err| args_diag::std_pipe_create_failed(func, &anyhow::Error::new(err)))?;
     {
         let mut guard = writer
             .lock()
-            .map_err(|_| anyhow::Error::from(args_diag::std_pipe_writer_lock_poisoned(func)))?;
+            .map_err(|_| args_diag::std_pipe_writer_lock_poisoned(func))?;
         guard
             .write_all(text.as_bytes())
-            .map_err(|err| anyhow::Error::from(args_diag::std_pipe_write_failed(func, &err)))?;
+            .map_err(|err| args_diag::std_pipe_write_failed(func, &err))?;
         guard
             .flush()
-            .map_err(|err| anyhow::Error::from(args_diag::std_pipe_write_failed(func, &err)))?;
+            .map_err(|err| args_diag::std_pipe_write_failed(func, &err))?;
     }
     Ok(pipe)
 }

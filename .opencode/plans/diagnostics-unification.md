@@ -1722,6 +1722,33 @@ transport, so this phase is mechanical:
    hold via ? and expect. Core 409 plus
    integration 629 green; clippy and fmt
    clean.
+   Mirror/eager bulk step 2026-11-26: no new
+   ctors, all wordings already pinned. Five
+   signatures flip in exec/args.rs:
+   TextPump::apply_str plus mirror_string plus
+   mirror_stream plus read_pipe_eager plus
+   write_completed_pipe return
+   DiagnosticResult. Bodies drop outer
+   anyhow::Error::from and .into() wrappers
+   on the already-keyed arms; pipe
+   reader/writer legs keep the inner
+   anyhow::Error::new(err) reason wraps since
+   those ctors take &anyhow::Error while the
+   callees now return Diagnostic. Pump-thread
+   internals (SpillBuffer push/flush/write/
+   drain, push_case/trim/prefix/suffix/
+   replace) deliberately stay anyhow: the
+   pump body discriminates clean
+   downstream-close via downcast_ref::<
+   PumpDownstreamClosed>, which has no
+   Diagnostic equivalent. Thirteen
+   #[oxdock_func] macro tails in native.rs
+   gain the Ok(f(...)?) firewall; the one ?
+   caller (read_pipe_eager in replace_regex)
+   holds. Callers outside native hold via the
+   blanket conversion. Core 409 plus
+   integration 629 green; clippy and fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
