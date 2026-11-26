@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::diagnostics as ssh_diag;
 use oxdock_core::{StepCtx, Value};
@@ -85,13 +85,13 @@ pub fn pump_pty_session<P: ProcessManager>(
     in_pipe: &Value,
     out_pipe: &Value,
     on_exit: Option<Arc<dyn Fn(u32) + Send + Sync>>,
-) -> Result<i64> {
+) -> DiagnosticResult<i64> {
     let reader = cx
         .pipe_reader(in_pipe)
-        .map_err(|e| anyhow::Error::new(ssh_diag::pty_borrow_input_failed(e)))?;
+        .map_err(ssh_diag::pty_borrow_input_failed)?;
     let writer = cx
         .pipe_writer(out_pipe)
-        .map_err(|e| anyhow::Error::new(ssh_diag::pty_borrow_output_failed(e)))?;
+        .map_err(ssh_diag::pty_borrow_output_failed)?;
     // Interruptible chunk reads with the backend's keeper semantics,
     // unchanged from the inlined pump: `read_pump_chunk` carries the
     // timeout and wake contract, so the shared runner sees the exact
@@ -115,13 +115,13 @@ pub fn pump_pty_session<P: ProcessManager>(
     {
         let mut guard = writer
             .lock()
-            .map_err(|_| anyhow::Error::new(ssh_diag::pty_output_lock_poisoned()))?;
+            .map_err(|_| ssh_diag::pty_output_lock_poisoned())?;
         guard
             .write_all(b"\x1b[2J\x1b[H")
-            .map_err(|e| anyhow::Error::new(ssh_diag::pty_session_init_write_failed(e)))?;
+            .map_err(ssh_diag::pty_session_init_write_failed)?;
         guard
             .flush()
-            .map_err(|e| anyhow::Error::new(ssh_diag::pty_session_init_flush_failed(e)))?;
+            .map_err(ssh_diag::pty_session_init_flush_failed)?;
     }
     let hub = cx.cancel_hub();
     let outcome = run_pty_session(PtyRequest {
@@ -154,9 +154,7 @@ pub fn pump_pty_session<P: ProcessManager>(
         PtyOutcome::Cancelled => {
             let _ = cx.close_pipe(in_pipe);
             let _ = cx.close_pipe(out_pipe);
-            Err(anyhow::Error::new(
-                ssh_diag::pty_interrupted_by_cancellation(),
-            ))
+            Err(ssh_diag::pty_interrupted_by_cancellation())
         }
     }
 }

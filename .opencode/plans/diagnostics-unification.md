@@ -2705,6 +2705,16 @@ transport, so this phase is mechanical:
    ctor to reason: Diagnostic by value with with_source and
    drop the &anyhow::Error::new(e) flattening bridge at the
    run_pty call site.
+   ssh supervisor bulk 2026-11-27 (ssh pty.rs plus run.rs, no
+   new ctors: all ctors pre-existed by-value): pump_pty_session
+   plus pump_run_session flip to DiagnosticResult; all
+   anyhow::Error::new wrappers drop (borrow/input/output,
+   lock, init write/flush, needs_program, spawn, lost_stderr,
+   both cancellations, failed re-emit); map_err goes direct
+   (ctor as fn reference). funcs.rs #[oxdock_func] callers
+   stay anyhow by design and hold via blanket From. ssh lib
+   13 plus ssh integration 68 green; ssh clippy zero, fmt
+   clean on both files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

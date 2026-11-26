@@ -12,8 +12,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::Result;
-use oxdock_diagnostics::Diagnostic;
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 
 use crate::diagnostics as ssh_diag;
 use oxdock_core::{StepCtx, Value};
@@ -33,7 +32,7 @@ fn pump_fd_to_pipe(
     stream: &mut Box<dyn Read + Send>,
     writer: &SharedOutput,
     name: &str,
-) -> oxdock_diagnostics::DiagnosticResult<()> {
+) -> DiagnosticResult<()> {
     let mut buffer = [0u8; PUMP_CHUNK];
     loop {
         match stream.read(&mut buffer) {
@@ -162,19 +161,19 @@ pub fn pump_run_session<P: ProcessManager>(
     out_pipe: &Value,
     err_pipe: &Value,
     on_exit: Option<Arc<dyn Fn(u32) + Send + Sync>>,
-) -> Result<i64> {
+) -> DiagnosticResult<i64> {
     if argv.is_empty() {
-        return Err(anyhow::Error::new(ssh_diag::run_needs_program()));
+        return Err(ssh_diag::run_needs_program());
     }
     let reader = cx
         .pipe_reader(in_pipe)
-        .map_err(|e| anyhow::Error::new(ssh_diag::run_borrow_input_failed(e)))?;
+        .map_err(ssh_diag::run_borrow_input_failed)?;
     let out_writer = cx
         .pipe_writer(out_pipe)
-        .map_err(|e| anyhow::Error::new(ssh_diag::run_borrow_output_failed(e)))?;
+        .map_err(ssh_diag::run_borrow_output_failed)?;
     let err_writer = cx
         .pipe_writer(err_pipe)
-        .map_err(|e| anyhow::Error::new(ssh_diag::run_borrow_error_failed(e)))?;
+        .map_err(ssh_diag::run_borrow_error_failed)?;
 
     cx.ensure_scratch_materialized()?;
     let staged = cx.env_snapshot();
@@ -194,7 +193,7 @@ pub fn pump_run_session<P: ProcessManager>(
     }
     let piped = builder
         .spawn_piped_with_stderr()
-        .map_err(|e| anyhow::Error::new(ssh_diag::run_spawn_failed(e)))?;
+        .map_err(ssh_diag::run_spawn_failed)?;
     let PipedChild {
         handle,
         stdin,
@@ -204,7 +203,7 @@ pub fn pump_run_session<P: ProcessManager>(
     let child_stdin: Box<dyn Write + Send> = Box::new(stdin);
     let child_stdout: Box<dyn Read + Send> = Box::new(stdout);
     let Some(stderr) = stderr else {
-        return Err(anyhow::Error::new(ssh_diag::run_spawn_lost_stderr()));
+        return Err(ssh_diag::run_spawn_lost_stderr());
     };
     let child_stderr: Box<dyn Read + Send> = Box::new(stderr);
 
@@ -343,12 +342,10 @@ pub fn pump_run_session<P: ProcessManager>(
         (_, seen) = hub.wait(seen);
     }
     match failed {
-        Some(err) => Err(anyhow::Error::new(err)),
+        Some(err) => Err(err),
         None => {
             if cancel.load(Ordering::SeqCst) {
-                return Err(anyhow::Error::new(
-                    ssh_diag::run_interrupted_by_cancellation(),
-                ));
+                return Err(ssh_diag::run_interrupted_by_cancellation());
             }
             Ok(exit_code.unwrap_or(-1))
         }
