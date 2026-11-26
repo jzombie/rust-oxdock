@@ -2912,6 +2912,27 @@ transport, so this phase is mechanical:
    the existing serve pin). mcp lib 11 plus session 26 plus
    tools 13 green; mcp clippy zero, fmt clean on both files;
    anyhow Context import drops from server.rs.
+   process wait bulk 2026-11-27 (oxdock-process shell_manager.rs
+   plus diagnostics, 1 new proc.run.* ctor): converts the last
+   bare-string wait context. First attempt reused run_failed,
+   but handle.wait() returns anyhow (managed ChildHandle wait
+   chain, already keyed wait_failed inside), not std io, so
+   E0308 forced the honest shape: new run_wait_failed
+   (cmd Debug plus &anyhow::Error, {reason:#} inline, no
+   with_source per the job_assign_failed/synthetic_failed
+   passthrough precedent). Distinct key from run_failed is
+   load-bearing, not proliferation: io-direct std call sites
+   vs managed-handle wait chain are different inner types;
+   retired wordings match byte-identically. Pins added to
+   key-uniqueness plus canonical-wording tests. process lib
+   121 green; process clippy shows only the pre-existing
+   obfuscated_if_else baseline in undefined_env_var (untouched);
+   fmt clean on both files; anyhow Context import plus the
+   now-dead desc binding drop from shell_manager.rs. Skipped
+   as out of scope: expand.rs anyhow!/bail! sites are
+   test-stub resolvers (test infrastructure, never user
+   facing); child.rs CreateJobObjectW/AssignProcessToJobObject
+   contexts are windows-only (cant verify on macOS).
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

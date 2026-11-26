@@ -373,6 +373,27 @@ pub fn run_failed(cmd: &impl std::fmt::Debug, err: &std::io::Error) -> Diagnosti
     )))
 }
 
+/// Waiting on a managed shell child failed. Takes the command (any
+/// `Debug`: `std::process::Command`) plus the wrapped wait failure;
+/// the chain renders inline. Distinct key from `run_failed`: that
+/// wraps a direct `std::io::Error` from `std` spawn/wait calls,
+/// while this wraps the managed-handle wait chain (already keyed
+/// `wait_failed` inside); the retired wordings match
+/// byte-identically through `{reason:#}`.
+pub fn run_wait_failed(cmd: &impl std::fmt::Debug, reason: &anyhow::Error) -> Diagnostic {
+    let cmd_text = format!("{cmd:?}");
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to run {cmd_text}: {reason_text}");
+    Diagnostic::new(
+        "proc.run.run_wait_failed",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_COMMAND, cmd_text.as_str()),
+            (FIELD_REASON, reason_text.as_str()),
+        ]),
+    )
+}
+
 /// Spawning a shell command failed. Takes the command (any `Debug`:
 /// `std::process::Command`) and the I/O failure; rendering lives
 /// here. The typed I/O error rides as the chained source.
@@ -668,6 +689,7 @@ mod tests {
             run_capture_lock_poisoned().key(),
             run_current_exe_failed(&io_err).key(),
             run_failed(&"echo hi", &io_err).key(),
+            run_wait_failed(&"echo hi", &anyhow::anyhow!("boom")).key(),
             spawn_failed(&"echo hi", &io_err).key(),
             wait_failed(&io_err).key(),
             job_assign_failed(&anyhow::anyhow!("boom")).key(),
@@ -772,6 +794,10 @@ mod tests {
         assert_eq!(
             run_failed(&"echo hi", &io_err).message(),
             "failed to run \"echo hi\": nope"
+        );
+        assert_eq!(
+            run_wait_failed(&"echo hi", &anyhow::anyhow!("boom")).message(),
+            "failed to run \"echo hi\": boom"
         );
         assert_eq!(
             spawn_failed(&"echo hi", &io_err).message(),

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::Command as ProcessCommand;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -135,15 +135,13 @@ fn run_prepared(
             None
         }
     };
-    let desc = format!("{:?}", command);
-
     match mode {
         CommandMode::Foreground => {
             let mut handle =
                 spawn_child_with_streams(command, stdin_stream, stdout_stream, stderr_stream)?;
             let status = handle
                 .wait()
-                .with_context(|| format!("failed to run {desc}"))?;
+                .map_err(|err| anyhow::Error::new(proc_diag::run_wait_failed(&*command, &err)))?;
             if !status.success() {
                 return Err(anyhow::Error::new(proc_diag::run_command_failed(
                     &*command, &status,
