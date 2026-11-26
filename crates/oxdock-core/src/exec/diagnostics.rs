@@ -1861,6 +1861,51 @@ pub fn eval_assert_contains_pipe_mismatch(verb: &str, needle: &str, hay: &str) -
     )
 }
 
+/// Bare `BREAK` outside any loop. Parameterless: the keyword is
+/// fixed, so no fields vary. No source rides along.
+pub fn eval_break_outside_loop() -> Diagnostic {
+    let message = format!("{KEYWORD_BREAK} outside loop");
+    Diagnostic::new(
+        "dsl.eval.break_outside_loop",
+        message,
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Bare `CONTINUE` outside any loop. Parameterless: the keyword is
+/// fixed, so no fields vary. No source rides along.
+pub fn eval_continue_outside_loop() -> Diagnostic {
+    let message = format!("{KEYWORD_CONTINUE} outside loop");
+    Diagnostic::new(
+        "dsl.eval.continue_outside_loop",
+        message,
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Flow word escaping a capture boundary. Takes the 1-based step
+/// number and the word (`BREAK`/`CONTINUE`); quoting lives here.
+/// One key covers both words, mirroring `check_flow_outside_loop`.
+pub fn eval_capture_flow_outside_loop(step: usize, word: &str) -> Diagnostic {
+    let message = format!("step {step}: {word} outside loop (cannot be captured)");
+    Diagnostic::new(
+        "dsl.eval.capture_flow_outside_loop",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("flow", word)]),
+    )
+}
+
+/// `RETURN` escaping a capture boundary. Takes the 1-based step
+/// number. No source rides along.
+pub fn eval_capture_return_outside_function(step: usize) -> Diagnostic {
+    let message = format!("step {step}: {KEYWORD_RETURN} outside function (cannot be captured)");
+    Diagnostic::new(
+        "dsl.eval.capture_return_outside_function",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string())]),
+    )
+}
+
 /// `int`-typed argument whose resolution failed. Takes the underlying
 /// failure verbatim: its message already names the argument and the
 /// cause, so no wrapper is added.
@@ -4642,6 +4687,10 @@ mod tests {
             .key(),
             eval_assert_contains_emitted_mismatch("ASSERT_CONTAINS", "n", "e").key(),
             eval_assert_contains_pipe_mismatch("ASSERT_CONTAINS", "n", "h").key(),
+            eval_break_outside_loop().key(),
+            eval_continue_outside_loop().key(),
+            eval_capture_flow_outside_loop(1, "BREAK").key(),
+            eval_capture_return_outside_function(1).key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -5033,6 +5082,19 @@ mod tests {
         assert_eq!(
             eval_assert_contains_pipe_mismatch("ASSERT_CONTAINS", "n", "h").message(),
             "ASSERT_CONTAINS did not contain 'n'; pipe held \"h\""
+        );
+        assert_eq!(eval_break_outside_loop().message(), "BREAK outside loop");
+        assert_eq!(
+            eval_continue_outside_loop().message(),
+            "CONTINUE outside loop"
+        );
+        assert_eq!(
+            eval_capture_flow_outside_loop(1, "BREAK").message(),
+            "step 1: BREAK outside loop (cannot be captured)"
+        );
+        assert_eq!(
+            eval_capture_return_outside_function(1).message(),
+            "step 1: RETURN outside function (cannot be captured)"
         );
         assert!(
             eval_async_exit_status(None, &exit_status_sample())

@@ -51,18 +51,15 @@ use oxdock_pipe::{KeeperGuard, PipeHandle, PipeInner, SharedOutput};
 fn top_level_flow(flow: Flow) -> Result<()> {
     match flow {
         Flow::Done => Ok(()),
-        Flow::Break { idx } => {
-            bail!("step {}: {KEYWORD_BREAK} outside loop", idx + 1);
-        }
-        Flow::Continue { idx } => {
-            bail!("step {}: {KEYWORD_CONTINUE} outside loop", idx + 1);
-        }
-        Flow::Return { idx, .. } => {
-            bail!(
-                "step {}: {KEYWORD_RETURN} outside function, {KEYWORD_ASYNC} task, or {KEYWORD_LET} block",
-                idx + 1
-            );
-        }
+        Flow::Break { idx } => Err(anyhow::Error::new(diag::check_flow_outside_loop(
+            idx + 1,
+            KEYWORD_BREAK,
+        ))),
+        Flow::Continue { idx } => Err(anyhow::Error::new(diag::check_flow_outside_loop(
+            idx + 1,
+            KEYWORD_CONTINUE,
+        ))),
+        Flow::Return { idx, .. } => Err(anyhow::Error::new(diag::check_return_outside(idx + 1))),
     }
 }
 
@@ -3390,22 +3387,21 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     match flow {
         Flow::Done => {}
         Flow::Break { idx } => {
-            bail!(
-                "step {}: {KEYWORD_BREAK} outside loop (cannot be captured)",
-                idx + 1
-            );
+            return Err(anyhow::Error::new(diag::eval_capture_flow_outside_loop(
+                idx + 1,
+                KEYWORD_BREAK,
+            )));
         }
         Flow::Continue { idx } => {
-            bail!(
-                "step {}: {KEYWORD_CONTINUE} outside loop (cannot be captured)",
-                idx + 1
-            );
+            return Err(anyhow::Error::new(diag::eval_capture_flow_outside_loop(
+                idx + 1,
+                KEYWORD_CONTINUE,
+            )));
         }
         Flow::Return { idx, .. } => {
-            bail!(
-                "step {}: {KEYWORD_RETURN} outside function (cannot be captured)",
-                idx + 1
-            );
+            return Err(anyhow::Error::new(
+                diag::eval_capture_return_outside_function(idx + 1),
+            ));
         }
     }
     let text = sink
@@ -4761,7 +4757,7 @@ pub(crate) fn dispatch_break<P: ProcessManager>(
     let StepKind::Break = step else {
         unreachable!()
     };
-    bail!("{KEYWORD_BREAK} outside loop");
+    Err(anyhow::Error::new(diag::eval_break_outside_loop()))
 }
 
 pub(crate) fn dispatch_continue<P: ProcessManager>(
@@ -4771,7 +4767,7 @@ pub(crate) fn dispatch_continue<P: ProcessManager>(
     let StepKind::Continue = step else {
         unreachable!()
     };
-    bail!("{KEYWORD_CONTINUE} outside loop");
+    Err(anyhow::Error::new(diag::eval_continue_outside_loop()))
 }
 
 // ── AWAIT / AssignAsync handlers ─────────────────────────────────────────
