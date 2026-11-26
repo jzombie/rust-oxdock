@@ -1503,6 +1503,128 @@ pub fn eval_host_return_failed(reason: &anyhow::Error) -> Diagnostic {
     )
 }
 
+/// Scope stack empty on pop: an internal invariant, never a user
+/// spelling. Parameterless: no operand varies.
+pub fn eval_scope_underflow() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.scope_underflow",
+        "scope stack underflow during pop".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `LET` redeclaration in one scope. Takes the key; quoting lives
+/// here.
+pub fn eval_redeclare_var(key: &str) -> Diagnostic {
+    let message = format!(
+        "redeclaration error: ${key} already declared in this scope; use ${key} = ... to mutate"
+    );
+    Diagnostic::new(
+        "dsl.eval.redeclare_var",
+        message,
+        Diagnostic::make_fields(&[("key", key)]),
+    )
+}
+
+/// `CONST` redeclaration in one scope. Takes the key; the keyword
+/// renders from the shared constant.
+pub fn eval_redeclare_const(key: &str) -> Diagnostic {
+    let message = format!(
+        "redeclaration error: {key} already declared in this scope; {} bindings are immutable and cannot redeclare it",
+        oxdock_parser::constants::KEYWORD_CONST,
+    );
+    Diagnostic::new(
+        "dsl.eval.redeclare_const",
+        message,
+        Diagnostic::make_fields(&[("key", key)]),
+    )
+}
+
+/// Declaration with no variable scope on the stack: an internal
+/// invariant, never a user spelling. Parameterless.
+pub fn eval_no_var_scope() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.no_var_scope",
+        "no variable scope for declaration".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Refused `CONST` write. Takes the offending binding description;
+/// the keyword renders from the shared constant. Single wording
+/// owner for every runtime `CONST` refusal; the `anyhow` helper in
+/// `state.rs` delegates here so macro-generated wrappers share it.
+pub fn eval_const_mutation(what: &str) -> Diagnostic {
+    let message = format!(
+        "cannot mutate {} {what}: {} bindings are deeply immutable",
+        oxdock_parser::constants::KEYWORD_CONST,
+        oxdock_parser::constants::KEYWORD_CONST,
+    );
+    Diagnostic::new(
+        "dsl.eval.const_mutation",
+        message,
+        Diagnostic::make_fields(&[("what", what)]),
+    )
+}
+
+/// Undeclared variable with a declare-first hint. Takes the key and
+/// the expected declaration shape (`TYPE` for mutation,
+/// `LIST<...>` for append); quoting lives here.
+pub fn eval_undeclared_declare(key: &str, expected: &str) -> Diagnostic {
+    let message =
+        format!("undeclared variable ${key}: declare it first with LET ${key}: {expected} = ...");
+    Diagnostic::new(
+        "dsl.eval.undeclared_declare",
+        message,
+        Diagnostic::make_fields(&[("key", key), ("expected", expected)]),
+    )
+}
+
+/// Undeclared variable with no hint. Takes the key; quoting lives
+/// here.
+pub fn eval_undeclared(key: &str) -> Diagnostic {
+    let message = format!("undeclared variable ${key}");
+    Diagnostic::new(
+        "dsl.eval.undeclared",
+        message,
+        Diagnostic::make_fields(&[("key", key)]),
+    )
+}
+
+/// `LIST_APPEND` on a non-LIST binding. Takes the key and the actual
+/// type name; quoting lives here.
+pub fn eval_list_not_list(key: &str, actual: &str) -> Diagnostic {
+    let message = format!("LIST_APPEND ${key}: variable is {actual}, not LIST");
+    Diagnostic::new(
+        "dsl.eval.list_not_list",
+        message,
+        Diagnostic::make_fields(&[("key", key), ("actual", actual)]),
+    )
+}
+
+/// `LIST_APPEND` on a binding whose value is not a list buffer.
+/// Takes the key; quoting lives here.
+pub fn eval_list_value_not_list(key: &str) -> Diagnostic {
+    let message = format!("LIST_APPEND ${key}: variable is not a LIST value");
+    Diagnostic::new(
+        "dsl.eval.list_value_not_list",
+        message,
+        Diagnostic::make_fields(&[("key", key)]),
+    )
+}
+
+/// Shaped-list element failing its element tag. Takes the underlying
+/// shape failure verbatim: its indexed path already names the
+/// position, so no wrapper is added.
+pub fn eval_list_element_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.eval.list_element_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
 /// Key path on `$ALIAS::NAME` in a placeholder call arg. Parameterless:
 /// the parser owns the wording through its template helper, so every
 /// phase agrees word for word; this constructor only adds the key.
@@ -3954,6 +4076,16 @@ mod tests {
             coerce_pipe_to_string().key(),
             coerce_check_failed(&anyhow::anyhow!("x")).key(),
             eval_host_return_failed(&anyhow::anyhow!("x")).key(),
+            eval_scope_underflow().key(),
+            eval_redeclare_var("x").key(),
+            eval_redeclare_const("x").key(),
+            eval_no_var_scope().key(),
+            eval_const_mutation("x").key(),
+            eval_undeclared_declare("x", "TYPE").key(),
+            eval_undeclared("x").key(),
+            eval_list_not_list("x", "STRING").key(),
+            eval_list_value_not_list("x").key(),
+            eval_list_element_failed(&anyhow::anyhow!("x")).key(),
             eval_const_arg_keypath().key(),
             eval_const_arg_bare_sigil("foo").key(),
             eval_template_missing_key("foo", false).key(),
@@ -4256,6 +4388,43 @@ mod tests {
         assert_eq!(coerce_check_failed(&anyhow::anyhow!("x")).message(), "x");
         assert_eq!(
             eval_host_return_failed(&anyhow::anyhow!("x")).message(),
+            "x"
+        );
+        assert_eq!(
+            eval_scope_underflow().message(),
+            "scope stack underflow during pop"
+        );
+        assert_eq!(
+            eval_redeclare_var("x").message(),
+            "redeclaration error: $x already declared in this scope; use $x = ... to mutate"
+        );
+        assert_eq!(
+            eval_redeclare_const("x").message(),
+            "redeclaration error: x already declared in this scope; CONST bindings are immutable and cannot redeclare it"
+        );
+        assert_eq!(
+            eval_no_var_scope().message(),
+            "no variable scope for declaration"
+        );
+        assert_eq!(
+            eval_const_mutation("$x").message(),
+            "cannot mutate CONST $x: CONST bindings are deeply immutable"
+        );
+        assert_eq!(
+            eval_undeclared_declare("x", "TYPE").message(),
+            "undeclared variable $x: declare it first with LET $x: TYPE = ..."
+        );
+        assert_eq!(eval_undeclared("x").message(), "undeclared variable $x");
+        assert_eq!(
+            eval_list_not_list("x", "STRING").message(),
+            "LIST_APPEND $x: variable is STRING, not LIST"
+        );
+        assert_eq!(
+            eval_list_value_not_list("x").message(),
+            "LIST_APPEND $x: variable is not a LIST value"
+        );
+        assert_eq!(
+            eval_list_element_failed(&anyhow::anyhow!("x")).message(),
             "x"
         );
         assert_eq!(

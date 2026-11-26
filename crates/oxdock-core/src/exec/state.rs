@@ -3,9 +3,10 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
+use super::diagnostics as state_diag;
 use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs, WorkspaceSelection};
-use oxdock_parser::constants::KEYWORD_CONST;
 use oxdock_parser::{Field, GuardExpr, Step, TypeDescriptor, TypeTag, Value, sigil_var};
 use oxdock_process::{BackgroundHandle, CancelHub, CommandContext, ProcessManager};
 
@@ -60,10 +61,7 @@ const TASK_TAIL_CAP: usize = 64 * 1024;
 /// Free function (not a method) so host-function extractors and
 /// macro-generated wrappers share it without a state handle.
 pub fn const_mutation_error(what: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "cannot mutate {kw} {what}: {kw} bindings are deeply immutable",
-        kw = KEYWORD_CONST,
-    )
+    anyhow::Error::new(state_diag::eval_const_mutation(what))
 }
 
 /// Execution state for one script run. Public so hosts can register
@@ -1087,11 +1085,11 @@ impl<P: ProcessManager> ExecState<P> {
     /// Exit a lexical scope, restoring everything `push_scope` saved
     /// plus dropping block import frames deeper than the surviving
     /// stack, so block imports unwind with their block.
-    pub(super) fn pop_scope(&mut self) -> Result<()> {
+    pub(super) fn pop_scope(&mut self) -> DiagnosticResult<()> {
         let snapshot = self
             .scope_stack
             .pop()
-            .ok_or_else(|| anyhow::anyhow!("scope stack underflow during pop"))?;
+            .ok_or_else(state_diag::eval_scope_underflow)?;
         self.fs.restore_selection(snapshot.selection);
         self.cwd = snapshot.cwd;
         self.envs = snapshot.envs;
@@ -1101,24 +1099,25 @@ impl<P: ProcessManager> ExecState<P> {
         self.scope_alias_frames.retain(|frame| frame.depth <= depth);
         Ok(())
     }
-    pub(super) fn declare_var(&mut self, key: String, kind: TypeTag, value: Value) -> Result<()> {
+    pub(super) fn declare_var(
+        &mut self,
+        key: String,
+        kind: TypeTag,
+        value: Value,
+    ) -> DiagnosticResult<()> {
         if self
             .var_scopes
             .last()
             .map(|s| s.contains_key(&key))
             .unwrap_or(false)
         {
-            anyhow::bail!(
-                "redeclaration error: ${} already declared in this scope; use ${} = ... to mutate",
-                key,
-                key
-            );
+            return Err(state_diag::eval_redeclare_var(&key));
         }
         let coerced = super::args::coerce_value(value, &kind)?;
         let scope = self
             .var_scopes
             .last_mut()
-            .ok_or_else(|| anyhow::anyhow!("no variable scope for declaration"))?;
+            .ok_or_else(state_diag::eval_no_var_scope)?;
         scope.insert(key, (kind, coerced));
         Ok(())
     }
@@ -1129,7 +1128,12 @@ impl<P: ProcessManager> ExecState<P> {
     /// mark the frame const and deep-freeze the value, so nested
     /// containers freeze with the binding instead of aliasing a
     /// mutable buffer.
-    pub(super) fn declare_const(&mut self, key: String, kind: TypeTag, value: Value) -> Result<()> {
+    pub(super) fn declare_const(
+        &mut self,
+        key: String,
+        kind: TypeTag,
+        value: Value,
+    ) -> DiagnosticResult<()> {
         let at_entry_top = self.is_entry_top_level();
         if self
             .var_scopes
@@ -1137,17 +1141,14 @@ impl<P: ProcessManager> ExecState<P> {
             .map(|s| s.contains_key(&key))
             .unwrap_or(false)
         {
-            anyhow::bail!(
-                "redeclaration error: {key} already declared in this scope; {kw} bindings are immutable and cannot redeclare it",
-                kw = KEYWORD_CONST,
-            );
+            return Err(state_diag::eval_redeclare_const(&key));
         }
         let coerced = super::args::coerce_value(value, &kind)?;
         let frozen = Value::deep_freeze(&coerced);
         let scope = self
             .var_scopes
             .last_mut()
-            .ok_or_else(|| anyhow::anyhow!("no variable scope for declaration"))?;
+            .ok_or_else(state_diag::eval_no_var_scope)?;
         scope.insert(key.clone(), (kind.clone(), frozen.clone()));
         if let Some(frame) = self.const_scopes.last_mut() {
             frame.insert(key.clone());
@@ -1238,7 +1239,7 @@ impl<P: ProcessManager> ExecState<P> {
         kind: TypeTag,
         value: Value,
         is_const: bool,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         if is_const {
             self.declare_const(key, kind, value)
         } else {
@@ -1246,9 +1247,9 @@ impl<P: ProcessManager> ExecState<P> {
         }
     }
 
-    pub(super) fn mutate_var(&mut self, key: &str, value: Value) -> Result<()> {
+    pub(super) fn mutate_var(&mut self, key: &str, value: Value) -> DiagnosticResult<()> {
         if self.is_const_var(key) {
-            return Err(const_mutation_error(key));
+            return Err(state_diag::eval_const_mutation(key));
         }
         let kind = self
             .var_scopes
@@ -1256,11 +1257,7 @@ impl<P: ProcessManager> ExecState<P> {
             .rev()
             .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
             .or_else(|| self.module_var(key).map(|(k, _)| k.clone()))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "undeclared variable ${key}: declare it first with LET ${key}: TYPE = ..."
-                )
-            })?;
+            .ok_or_else(|| state_diag::eval_undeclared_declare(key, "TYPE"))?;
         let coerced = super::args::coerce_value(value, &kind)?;
         for scope in self.var_scopes.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(key) {
@@ -1274,7 +1271,7 @@ impl<P: ProcessManager> ExecState<P> {
             *stored = coerced;
             return Ok(());
         }
-        anyhow::bail!("undeclared variable ${key}");
+        Err(state_diag::eval_undeclared(key))
     }
 
     /// Append `item` to the LIST binding `key` in place. Copy-on-write:
@@ -1283,9 +1280,9 @@ impl<P: ProcessManager> ExecState<P> {
     /// undeclared names and non-list bindings. Shaped lists validate
     /// the item against the element tag, so a push can never silently
     /// corrupt the shape the declaration promises.
-    pub(super) fn push_into_list(&mut self, key: &str, item: Value) -> Result<()> {
+    pub(super) fn push_into_list(&mut self, key: &str, item: Value) -> DiagnosticResult<()> {
         if self.is_const_var(key) {
-            return Err(const_mutation_error(key));
+            return Err(state_diag::eval_const_mutation(key));
         }
         let kind = self
             .var_scopes
@@ -1293,32 +1290,30 @@ impl<P: ProcessManager> ExecState<P> {
             .rev()
             .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
             .or_else(|| self.module_var(key).map(|(k, _)| k.clone()))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "undeclared variable ${key}: declare it first with LET ${key}: LIST<...> = ..."
-                )
-            })?;
+            .ok_or_else(|| state_diag::eval_undeclared_declare(key, "LIST<...>"))?;
         let element = match kind {
             TypeTag::List => None,
             TypeTag::ListOf(element) => Some(element.as_ref().clone()),
             _ => {
-                anyhow::bail!("LIST_APPEND ${key}: variable is {}, not LIST", kind.name());
+                return Err(state_diag::eval_list_not_list(key, kind.name()));
             }
         };
         for scope in self.var_scopes.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(key) {
                 if slot.1.is_frozen() {
-                    return Err(const_mutation_error(key));
+                    return Err(state_diag::eval_const_mutation(key));
                 }
-                let list = slot.1.as_list_mut().ok_or_else(|| {
-                    anyhow::anyhow!("LIST_APPEND ${key}: variable is not a LIST value")
-                })?;
+                let list = slot
+                    .1
+                    .as_list_mut()
+                    .ok_or_else(|| state_diag::eval_list_value_not_list(key))?;
                 if let Some(expected) = element {
                     oxdock_parser::check_value_at(
                         &expected,
                         &item,
                         &format!("{}[{}]", sigil_var(key), list.len()),
-                    )?;
+                    )
+                    .map_err(|err| state_diag::eval_list_element_failed(&err))?;
                 }
                 list.push(item);
                 return Ok(());
@@ -1329,22 +1324,23 @@ impl<P: ProcessManager> ExecState<P> {
         // module-owned functions with no importer visibility.
         if let Some((_, value)) = self.module_var_mut(key) {
             if value.is_frozen() {
-                return Err(const_mutation_error(key));
+                return Err(state_diag::eval_const_mutation(key));
             }
-            let list = value.as_list_mut().ok_or_else(|| {
-                anyhow::anyhow!("LIST_APPEND ${key}: variable is not a LIST value")
-            })?;
+            let list = value
+                .as_list_mut()
+                .ok_or_else(|| state_diag::eval_list_value_not_list(key))?;
             if let Some(expected) = element {
                 oxdock_parser::check_value_at(
                     &expected,
                     &item,
                     &format!("{}[{}]", sigil_var(key), list.len()),
-                )?;
+                )
+                .map_err(|err| state_diag::eval_list_element_failed(&err))?;
             }
             list.push(item);
             return Ok(());
         }
-        anyhow::bail!("undeclared variable ${key}");
+        Err(state_diag::eval_undeclared(key))
     }
 
     pub(super) fn get_var(&self, key: &str) -> Option<Value> {

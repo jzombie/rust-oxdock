@@ -1663,6 +1663,40 @@ transport, so this phase is mechanical:
    This unblocks the state declare/mutate
    cluster next. Core 409 plus integration 629
    green; clippy and fmt clean.
+   State declare/mutate bulk step 2026-11-26:
+   ten new ctors in exec/diagnostics.rs with
+   key plus wording pins (eval_scope_underflow
+   parameterless; eval_redeclare_var /
+   eval_redeclare_const with key; 
+   eval_no_var_scope parameterless shared by
+   both declare paths; eval_const_mutation
+   single wording owner with CONST from the
+   shared constant; eval_undeclared_declare
+   with key plus expected shape covering both
+   TYPE and LIST hints; eval_undeclared bare;
+   eval_list_not_list with key plus actual;
+   eval_list_value_not_list shared by both
+   stores; eval_list_element_failed verbatim
+   passthrough). Six signatures flip in
+   exec/state.rs: pop_scope plus declare_var
+   plus declare_const plus declare_binding plus
+   mutate_var plus push_into_list return
+   DiagnosticResult (coerce already Diagnostic;
+   check_value_at maps via the new
+   passthrough). const_mutation_error keeps
+   its anyhow return for the func-macro
+   boundary but delegates to
+   eval_const_mutation, so one wording owner
+   serves both. Messages stay byte-identical.
+   Cross-file fallout: seven pop_scope tuple-
+   match holders gain explicit
+   map_err(anyhow::Error::from) (five in
+   handlers, one in import, one in steps)
+   since Diagnostic cannot mix with anyhow in
+   one tuple. Callers otherwise hold via the
+   blanket conversion. Core 409 plus
+   integration 629 green; clippy and fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

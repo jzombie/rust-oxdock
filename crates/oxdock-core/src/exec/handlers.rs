@@ -2477,7 +2477,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
                 cx.stdin_pipe.clone(),
                 false,
             );
-            let pop_res = cx.state.pop_scope();
+            let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
             let flow = match (res, pop_res) {
                 (Ok(flow), Ok(())) => flow,
                 (Err(e), _) => return Err(e),
@@ -2536,7 +2536,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
                 cx.stdin_pipe.clone(),
                 false,
             );
-            let pop_res = cx.state.pop_scope();
+            let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
             let flow = match (res, pop_res) {
                 (Ok(flow), Ok(())) => flow,
                 (Err(e), _) => return Err(e),
@@ -3009,7 +3009,7 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
                     }
                 }
             })();
-            let pop_res = cx.state.pop_scope();
+            let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
             if let Some(saved) = saved_vars {
                 cx.state.var_scopes = saved;
             }
@@ -3093,7 +3093,7 @@ pub(crate) fn block_value<P: ProcessManager>(
             }
         }
     })();
-    let pop_res = cx.state.pop_scope();
+    let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
     match (outcome, pop_res) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(e), _) => Err(e),
@@ -3146,7 +3146,7 @@ pub(crate) fn while_loop<P: ProcessManager>(
             cx.stdin_pipe.clone(),
             false,
         );
-        let pop_res = cx.state.pop_scope();
+        let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
         let flow = match (res, pop_res) {
             (Ok(flow), Ok(())) => flow,
             (Err(e), _) => return Err(e),

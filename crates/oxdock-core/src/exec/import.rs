@@ -1029,7 +1029,7 @@ fn ensure_module_init<P: ProcessManager>(
         });
         Ok(value)
     })();
-    let pop_res = cx.state.pop_scope();
+    let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
     let _ = cx.state.func_floors.pop();
     let init_depth = cx.state.scope_stack.len() + 1;
     cx.state

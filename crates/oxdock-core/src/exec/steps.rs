@@ -1558,7 +1558,7 @@ pub(super) fn execute_scoped_steps<P: ProcessManager>(
     );
     // Restore the scope even when the body failed, but never let an
     // unwinding failure mask the body's own error.
-    let pop_res = state.pop_scope();
+    let pop_res = state.pop_scope().map_err(anyhow::Error::from);
     match (res, pop_res) {
         (Ok(flow), Ok(())) => Ok(flow),
         (Err(e), _) => Err(e),
