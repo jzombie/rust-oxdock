@@ -13,9 +13,10 @@ use oxdock_parser::{
     KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CONST,
     KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT, KEYWORD_ENV, KEYWORD_EXPORT, KEYWORD_FUNC,
     KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND,
-    KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK,
-    KEYWORD_TYPE, KEYWORD_WITH_IO, LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME,
-    SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
+    KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE,
+    KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TYPE, KEYWORD_WITH_IO, KEYWORD_WORKDIR,
+    LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME,
+    STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
 };
 
 use super::function_names::{
@@ -2213,6 +2214,99 @@ pub fn eval_symlink_no_file_name(from: &str) -> Diagnostic {
         message,
         Diagnostic::make_fields(&[("from", from)]),
     )
+}
+
+/// `WORKDIR` resolution failure. Takes the script spelling and the
+/// underlying failure. The message stays the bare outer context and
+/// the failure rides as the chained source, so `err.chain()` keeps
+/// its layers for the snapshot renderer. Per the chain contract:
+/// no interpolation, source attached.
+pub fn eval_workdir_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_WORKDIR} {path}");
+    Diagnostic::new(
+        "dsl.eval.workdir_failed",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `MKDIR` destination-resolution failure. Takes the script spelling
+/// and the underlying failure. Bare outer context plus chained
+/// source, mirroring `eval_symlink_failed`.
+pub fn eval_mkdir_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_MKDIR} {path}");
+    Diagnostic::new(
+        "dsl.eval.mkdir_resolve_failed",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `MKDIR` creation failure. Takes the resolved display and the
+/// underlying failure. The `failed to create dir` wording is kept
+/// byte-identical; only the key plus fields are new.
+pub fn eval_mkdir_create_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to create dir {display}");
+    Diagnostic::new(
+        "dsl.eval.mkdir_create_failed",
+        message,
+        Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `SET_EXECUTABLE` transport failure (resolve or chmod). Takes the
+/// script spelling and the underlying failure; one key covers both
+/// sites since the outer text is identical.
+pub fn eval_set_executable_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_SET_EXECUTABLE} {path}");
+    Diagnostic::new(
+        "dsl.eval.set_executable_failed",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `LS` resolution failure. Takes the optional script spelling (`None`
+/// for the bare `LS` form) and the underlying failure. One key covers
+/// both resolve sites; the bare form renders without a path.
+pub fn eval_ls_resolve_failed(path: Option<&str>, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = match path {
+        Some(p) => format!("{KEYWORD_LS} {p}"),
+        None => KEYWORD_LS.to_string(),
+    };
+    let mut fields: Vec<(&str, &str)> = Vec::with_capacity(2);
+    if let Some(p) = path {
+        fields.push(("path", p));
+    }
+    fields.push(("reason", &reason_text));
+    Diagnostic::new(
+        "dsl.eval.ls_resolve_failed",
+        message,
+        Diagnostic::make_fields(&fields),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `LS` directory-read failure. Takes the resolved display and the
+/// underlying failure. Bare outer context plus chained source.
+pub fn eval_ls_read_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_LS} {display}");
+    Diagnostic::new(
+        "dsl.eval.ls_read_failed",
+        message,
+        Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
 }
 
 /// `int`-typed argument whose resolution failed. Takes the underlying
@@ -5023,6 +5117,12 @@ mod tests {
             eval_copy_destination_escapes("p", &anyhow::anyhow!("x")).key(),
             eval_symlink_failed("a", "b", &anyhow::anyhow!("x")).key(),
             eval_symlink_no_file_name("a").key(),
+            eval_workdir_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_mkdir_resolve_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_mkdir_create_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_set_executable_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_ls_resolve_failed(Some("p"), &anyhow::anyhow!("x")).key(),
+            eval_ls_read_failed("p", &anyhow::anyhow!("x")).key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -5517,6 +5617,34 @@ mod tests {
         assert_eq!(
             eval_symlink_no_file_name("a").message(),
             "SYMLINK source has no file name: a"
+        );
+        assert_eq!(
+            eval_workdir_failed("sub", &anyhow::anyhow!("boom")).message(),
+            "WORKDIR sub"
+        );
+        assert_eq!(
+            eval_mkdir_resolve_failed("d", &anyhow::anyhow!("boom")).message(),
+            "MKDIR d"
+        );
+        assert_eq!(
+            eval_mkdir_create_failed("/x", &anyhow::anyhow!("boom")).message(),
+            "failed to create dir /x"
+        );
+        assert_eq!(
+            eval_set_executable_failed("bin", &anyhow::anyhow!("boom")).message(),
+            "SET_EXECUTABLE bin"
+        );
+        assert_eq!(
+            eval_ls_resolve_failed(Some("dir"), &anyhow::anyhow!("boom")).message(),
+            "LS dir"
+        );
+        assert_eq!(
+            eval_ls_resolve_failed(None, &anyhow::anyhow!("boom")).message(),
+            "LS"
+        );
+        assert_eq!(
+            eval_ls_read_failed("/x", &anyhow::anyhow!("boom")).message(),
+            "LS /x"
         );
         assert!(
             eval_run_exit_status("echo hi", &exit_status_sample())

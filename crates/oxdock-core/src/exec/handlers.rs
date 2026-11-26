@@ -17,9 +17,8 @@ use oxdock_parser::constants::{
     KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASYNC, KEYWORD_AWAIT,
     KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_EXPAND, KEYWORD_FOR,
     KEYWORD_FUNC, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND,
-    KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOVE, KEYWORD_RETURN,
-    KEYWORD_SET_EXECUTABLE, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO,
-    KEYWORD_WORKDIR, KEYWORD_WRITE,
+    KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOVE, KEYWORD_RETURN,
+    KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WRITE,
 };
 use oxdock_parser::{
     Arg, Command, Expr, IoBinding, IoStream, MAP_TYPE_NAME, PIPE_TYPE_NAME, PipeTarget,
@@ -139,7 +138,7 @@ pub(super) fn workdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) ->
         .state
         .fs
         .resolve_workdir(&cx.state.cwd, path)
-        .with_context(|| format!("{KEYWORD_WORKDIR} {}", path))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_workdir_failed(path, &e)))?;
     Ok(())
 }
 
@@ -1310,11 +1309,13 @@ pub(super) fn mkdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> R
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("{KEYWORD_MKDIR} {}", path))?;
-    cx.state
-        .fs
-        .create_dir_all(&target)
-        .with_context(|| format!("failed to create dir {}", target.display()))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_mkdir_resolve_failed(path, &e)))?;
+    cx.state.fs.create_dir_all(&target).map_err(|e| {
+        anyhow::Error::new(diag::eval_mkdir_create_failed(
+            &target.display().to_string(),
+            &e,
+        ))
+    })?;
     Ok(())
 }
 
@@ -1323,11 +1324,11 @@ pub(super) fn set_executable<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("{KEYWORD_SET_EXECUTABLE} {path}"))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_set_executable_failed(path, &e)))?;
     cx.state
         .fs
         .set_executable(&target)
-        .with_context(|| format!("{KEYWORD_SET_EXECUTABLE} {path}"))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_set_executable_failed(path, &e)))?;
     Ok(())
 }
 
@@ -1336,7 +1337,7 @@ pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, p)
-            .with_context(|| format!("LS {}", p))?
+            .map_err(|e| anyhow::Error::new(diag::eval_ls_resolve_failed(Some(p), &e)))?
     } else {
         // Bare `LS` lists the current directory: ride the choke point so a
         // pending snapshot materializes (a snapshot read), matching the
@@ -1344,13 +1345,14 @@ pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, ".")
-            .with_context(|| "LS".to_string())?
+            .map_err(|e| anyhow::Error::new(diag::eval_ls_resolve_failed(None, &e)))?
     };
-    let mut entries = cx
-        .state
-        .fs
-        .read_dir_entries(&target_dir)
-        .with_context(|| format!("LS {}", target_dir.display()))?;
+    let mut entries = cx.state.fs.read_dir_entries(&target_dir).map_err(|e| {
+        anyhow::Error::new(diag::eval_ls_read_failed(
+            &target_dir.display().to_string(),
+            &e,
+        ))
+    })?;
     entries.sort_by_key(|e| e.file_name());
     write_stdout(cx.out.clone(), |writer| {
         writeln!(writer, "{}:", target_dir.display())?;

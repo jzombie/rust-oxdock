@@ -2137,6 +2137,32 @@ transport, so this phase is mechanical:
    test). Core 410 plus integration 629 green;
    clippy at baseline (3 pre-existing), fmt
    clean on both touched files.
+   WORKDIR/MKDIR/SET_EXECUTABLE/LS bulk step
+   2026-11-26 (file-sized batch): six new
+   dsl.eval.* ctors with key plus wording pins
+   (workdir_failed with path; mkdir_resolve_failed
+   with path plus mkdir_create_failed with display
+   keeping the lowercase failed to create dir
+   wording byte-identical; set_executable_failed
+   with path covering both resolve plus chmod
+   sites, one key; ls_resolve_failed with
+   Option path covering the explicit plus bare
+   forms, one key; ls_read_failed with display).
+   Eight sites re-keyed across workdir/mkdir/
+   set_executable/ls via map_err plus anyhow
+   Error new. All six keep the bare outer-context
+   message plus chained source (Other-kind io
+   error carrying the full-chain text), matching
+   the symlink_failed chain shape so the snapshot
+   renderer keeps step N (chain[1]) plus causes.
+   Key-pin list carries ls_resolve_failed once
+   (Some form); the None branch shares the key,
+   mirroring stdin_read_failed/async_exit_status.
+   Unused KEYWORD_MKDIR plus KEYWORD_SET_EXECUTABLE
+   plus KEYWORD_WORKDIR imports dropped from
+   handlers. Bytes identical. Core 410 plus
+   integration 629 green; clippy at baseline (3
+   pre-existing), fmt clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
