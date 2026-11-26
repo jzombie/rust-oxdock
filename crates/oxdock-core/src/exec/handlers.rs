@@ -18,8 +18,8 @@ use oxdock_parser::constants::{
     KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_EXPAND, KEYWORD_FOR,
     KEYWORD_FUNC, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND,
     KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOVE, KEYWORD_RETURN,
-    KEYWORD_SET_EXECUTABLE, KEYWORD_SYMLINK, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE,
-    KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE,
+    KEYWORD_SET_EXECUTABLE, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO,
+    KEYWORD_WORKDIR, KEYWORD_WRITE,
 };
 use oxdock_parser::{
     Arg, Command, Expr, IoBinding, IoStream, MAP_TYPE_NAME, PIPE_TYPE_NAME, PipeTarget,
@@ -1260,17 +1260,17 @@ pub(super) fn symlink<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| format!("{KEYWORD_SYMLINK} {} {}", from, to))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?;
     let from_abs = if let Some(target) = from_workspace {
         cx.state
             .fs
             .resolve_copy_source_from_target(copy_source_root(target), from)
-            .with_context(|| format!("{KEYWORD_SYMLINK} {} {}", from, to))?
+            .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?
     } else {
         cx.state
             .fs
             .resolve_copy_source(from)
-            .with_context(|| format!("{KEYWORD_SYMLINK} {} {}", from, to))?
+            .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?
     };
     // `ln -s` destination semantics: a directory destination (existing,
     // or named with a trailing slash) receives the link under the
@@ -1279,19 +1279,19 @@ pub(super) fn symlink<P: ProcessManager>(
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .with_context(|| format!("{KEYWORD_SYMLINK} {} {}", from, to))?
+            .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?
     } else if matches!(cx.state.fs.entry_kind(&to_abs), Ok(EntryKind::Dir)) {
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .with_context(|| format!("{KEYWORD_SYMLINK} {} {}", from, to))?
+            .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?
     } else {
         to_abs
     };
     cx.state
         .fs
         .symlink(&from_abs, &to_abs)
-        .with_context(|| format!("{KEYWORD_SYMLINK} {} {}", from, to))?;
+        .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?;
     Ok(())
 }
 
@@ -1302,7 +1302,7 @@ fn link_base_name(from_abs: &GuardedPath, from: &str) -> Result<String> {
         .as_path()
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
-        .with_context(|| format!("{KEYWORD_SYMLINK} source has no file name: {from}"))
+        .ok_or_else(|| anyhow::Error::new(diag::eval_symlink_no_file_name(from)))
 }
 
 pub(super) fn mkdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> Result<()> {

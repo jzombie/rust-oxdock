@@ -13,8 +13,8 @@ use oxdock_parser::{
     KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CONST,
     KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT, KEYWORD_ENV, KEYWORD_EXPORT, KEYWORD_FUNC,
     KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND,
-    KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_TYPE,
-    KEYWORD_WITH_IO, LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME,
+    KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK,
+    KEYWORD_TYPE, KEYWORD_WITH_IO, LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME,
     SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
 };
 
@@ -2178,6 +2178,40 @@ pub fn eval_copy_destination_escapes(display: &str, reason: &anyhow::Error) -> D
         "dsl.eval.copy_destination_escapes",
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
+    )
+}
+
+/// `SYMLINK` transport failure (resolve, place, or link). Takes the
+/// source, destination, and the underlying failure; one key covers all
+/// six call sites, mirroring `eval_copy_failed`. The message stays the
+/// bare outer context and the failure rides as the chained source, so
+/// `err.chain()` keeps its layers and the snapshot renderer keeps
+/// printing `step N (SYMLINK from to)` with the cause under `causes:`
+/// (inlining would flatten the chain and move the paren). `anyhow`
+/// carries no `std::error::Error` impl, so the full-chain text rides an
+/// `Other`-kind io error, collapsing deeper layers the same way the
+/// process io ctors collapse to kind plus text. Per the chain contract:
+/// no interpolation, source attached.
+pub fn eval_symlink_failed(from: &str, to: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_SYMLINK} {from} {to}");
+    Diagnostic::new(
+        "dsl.eval.symlink_failed",
+        message,
+        Diagnostic::make_fields(&[("from", from), ("to", to), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `SYMLINK` source with no file name. Takes the script spelling;
+/// quoting lives here. No source rides along (`Option` context, no
+/// underlying error).
+pub fn eval_symlink_no_file_name(from: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_SYMLINK} source has no file name: {from}");
+    Diagnostic::new(
+        "dsl.eval.symlink_no_file_name",
+        message,
+        Diagnostic::make_fields(&[("from", from)]),
     )
 }
 
@@ -4987,6 +5021,8 @@ mod tests {
             eval_copy_git_failed("r", "a", "b", &anyhow::anyhow!("x")).key(),
             eval_copy_no_file_name("p").key(),
             eval_copy_destination_escapes("p", &anyhow::anyhow!("x")).key(),
+            eval_symlink_failed("a", "b", &anyhow::anyhow!("x")).key(),
+            eval_symlink_no_file_name("a").key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -5473,6 +5509,14 @@ mod tests {
             eval_copy_destination_escapes("/x", &anyhow::anyhow!("boom"))
                 .message()
                 .starts_with("COPY destination escapes root: /x: ")
+        );
+        assert_eq!(
+            eval_symlink_failed("a", "b", &anyhow::anyhow!("boom")).message(),
+            "SYMLINK a b"
+        );
+        assert_eq!(
+            eval_symlink_no_file_name("a").message(),
+            "SYMLINK source has no file name: a"
         );
         assert!(
             eval_run_exit_status("echo hi", &exit_status_sample())

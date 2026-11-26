@@ -2098,6 +2098,45 @@ transport, so this phase is mechanical:
    identical. Core 410 plus integration 629
    green; clippy at baseline (3 pre-existing),
    fmt clean on both touched files.
+   SYMLINK transport bulk step 2026-11-26
+   (file-sized batch): two new dsl.eval.*
+   ctors with key plus wording pins
+   (symlink_failed with from plus to covering
+   all six resolve/place/link sites, one key;
+   symlink_no_file_name with from for the
+   Option None arm). Seven sites re-keyed
+   across symlink/link_base_name via map_err
+   plus anyhow Error new (link_base_name uses
+   ok_or_else, source-free like the COPY
+   no-file-name arm). Chain finding: the
+   snapshot renderer (error_with_snapshot)
+   builds step N (chain[1]) plus causes from
+   chain layers, and
+   symlink_errors_report_underlying_cause pins
+   step 2 (SYMLINK taken.txt taken.txt) with
+   the cause under causes. Inlining the reason
+   into the message flattens the chain and
+   moves the paren, so symlink_failed keeps
+   the bare outer-context message and carries
+   the failure as source. anyhow has no std
+   Error impl, so the full-chain text rides an
+   Other-kind io error, collapsing deeper
+   layers the same way the process io ctors
+   collapse to kind plus text. Contract point
+   5 compliant (no interpolation, source
+   attached). Known inconsistency flagged for
+   a later normalization pass: copy_failed,
+   copy_git_failed, run_spawn_failed, and
+   run_argv_spawn_failed inline {reason:#}
+   with no source, which flattens snapshot
+   chains the same way; no test pins their
+   rendering, so they stay as-is in this
+   batch. Unused KEYWORD_SYMLINK import
+   dropped from handlers. Bytes identical
+   (snapshot output verified via the pinning
+   test). Core 410 plus integration 629 green;
+   clippy at baseline (3 pre-existing), fmt
+   clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
