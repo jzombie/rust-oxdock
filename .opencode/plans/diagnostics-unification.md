@@ -3072,6 +3072,24 @@ transport, so this phase is mechanical:
    typing_max_depth leaf via ParseError::from_diagnostic.
    core lib 410 plus 629 plus 12 plus 2 green; clippy
    pre-existing baseline only; fmt clean.
+   cli startup-context bulk 2026-11-27 (errors.rs 10 new
+   cli.* ctors plus lib.rs 11 sites): all runtime bare
+   .context/.with_context become keyed ctors (workspace
+   root, script path x2 shared key, read-at, read-stdin
+   x2 shared, tempdir x2 shared, plus 5 cfg(windows)
+   re-exec ctors). Byte-identical by construction: the
+   binary prints {err:#}, and each message keeps the
+   retired outer text verbatim ahead of {reason:#}.
+   spawn_shell_from deliberately keeps reason:
+   &anyhow::Error (CommandBuilder::spawn already returns
+   DiagnosticResult and spawn_failed carries with_source;
+   by-value would drop the chained io text, same trap as
+   shell.rs:199 which stays unconverted). anyhow::Context
+   import drops from lib.rs (moves into mod tests for the
+   remaining test-only sites). Key list plus exact
+   message pins added (windows pins cfg-gated, mirroring
+   shell_temp_missing_parent). cli 50 plus 12 green;
+   clippy zero; fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

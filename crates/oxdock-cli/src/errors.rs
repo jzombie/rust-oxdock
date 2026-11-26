@@ -321,6 +321,72 @@ pub fn script_stdin_missing() -> anyhow::Error {
     anyhow::Error::new(diag)
 }
 
+/// Workspace root discovery failed. Takes the underlying failure;
+/// the outer text matches the retired bare context byte for byte.
+pub fn guard_workspace_root(reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("guard workspace root: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.guard_workspace_root",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Script path rejected by the workspace guard. Takes the path and
+/// the underlying failure; shared by both parse sites (one key).
+pub fn guard_script_path(path: &str, reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("guard script path {path}: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.guard_script_path",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Script file unreadable. Takes the display path and the underlying
+/// failure; the outer text matches the retired bare context byte
+/// for byte.
+pub fn read_script_at(path: &str, reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to read script at {path}: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.read_script_at",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Piped script unreadable from stdin. Takes the underlying failure;
+/// shared by both read sites (one key).
+pub fn read_script_stdin(reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to read script from stdin: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.read_script_stdin",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Shell snapshot directory failed to materialize. Takes the
+/// underlying failure; shared by both snapshot arms (one key).
+pub fn create_shell_temp_dir(reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to create shell temp dir: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.create_shell_temp_dir",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
 /// `--shell` without a controlling terminal.
 pub fn shell_needs_tty() -> anyhow::Error {
     let diag = Diagnostic::new(
@@ -350,6 +416,79 @@ pub fn shell_temp_missing_parent() -> anyhow::Error {
         "cli.shell_temp_missing_parent",
         "temp path unexpectedly missing parent".to_string(),
         Diagnostic::make_fields(&[]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Windows shell re-exec could not locate the running executable.
+/// Takes the underlying failure.
+#[cfg(windows)]
+pub fn determine_current_exe(reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("determine current executable: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.determine_current_exe",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Windows shell re-exec could not guard the system temp dir.
+/// Takes the underlying failure.
+#[cfg(windows)]
+pub fn guard_system_temp_dir(reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("guard system temp dir: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.guard_system_temp_dir",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Windows shell re-exec could not build the temp shell path.
+/// Takes the underlying failure.
+#[cfg(windows)]
+pub fn construct_temp_shell_path(reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("construct temp shell path: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.construct_temp_shell_path",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Windows shell re-exec could not copy the runner binary. Takes
+/// the destination display path and the underlying failure.
+#[cfg(windows)]
+pub fn copy_shell_runner(dest: &str, reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to copy shell runner to {dest}: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.copy_shell_runner",
+        message,
+        Diagnostic::make_fields(&[("dest", dest), ("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Windows shell re-exec could not spawn the staged runner. Takes
+/// the destination display path and the spawn failure, which rides
+/// `anyhow` (not by value): the `spawn_failed` diagnostic carries
+/// its own chained source, and only the `{:#}` chain walk renders
+/// those bytes.
+#[cfg(windows)]
+pub fn spawn_shell_from(dest: &str, reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to spawn shell from {dest}: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.spawn_shell_from",
+        message,
+        Diagnostic::make_fields(&[("dest", dest), ("reason", &reason_text)]),
     );
     anyhow::Error::new(diag)
 }
@@ -763,6 +902,51 @@ mod tests {
             ("cli.mcp_needs_script_file", mcp_needs_script_file()),
             #[cfg(feature = "mcp")]
             ("cli.mcp_runs_alone", mcp_runs_alone(&["--shell"])),
+            (
+                "cli.guard_workspace_root",
+                guard_workspace_root(&anyhow::anyhow!("boom")),
+            ),
+            (
+                "cli.guard_script_path",
+                guard_script_path("s.ox", &anyhow::anyhow!("boom")),
+            ),
+            (
+                "cli.read_script_at",
+                read_script_at("s.ox", &anyhow::anyhow!("boom")),
+            ),
+            (
+                "cli.read_script_stdin",
+                read_script_stdin(&anyhow::anyhow!("boom")),
+            ),
+            (
+                "cli.create_shell_temp_dir",
+                create_shell_temp_dir(&anyhow::anyhow!("boom")),
+            ),
+            #[cfg(windows)]
+            (
+                "cli.determine_current_exe",
+                determine_current_exe(&anyhow::anyhow!("boom")),
+            ),
+            #[cfg(windows)]
+            (
+                "cli.guard_system_temp_dir",
+                guard_system_temp_dir(&anyhow::anyhow!("boom")),
+            ),
+            #[cfg(windows)]
+            (
+                "cli.construct_temp_shell_path",
+                construct_temp_shell_path(&anyhow::anyhow!("boom")),
+            ),
+            #[cfg(windows)]
+            (
+                "cli.copy_shell_runner",
+                copy_shell_runner("d.exe", &anyhow::anyhow!("boom")),
+            ),
+            #[cfg(windows)]
+            (
+                "cli.spawn_shell_from",
+                spawn_shell_from("d.exe", &anyhow::anyhow!("boom")),
+            ),
         ];
         let mut seen = std::collections::HashSet::new();
         for (key, err) in cases {
@@ -821,6 +1005,67 @@ mod tests {
                 .expect("typed")
                 .message(),
             "--mcp runs alone (no --shell, --remote)"
+        );
+    }
+
+    #[test]
+    fn startup_context_messages_carry_outer_text() {
+        let msg = |err: anyhow::Error| {
+            err.downcast_ref::<Diagnostic>()
+                .expect("typed")
+                .message()
+                .to_string()
+        };
+        assert_eq!(
+            msg(guard_workspace_root(&anyhow::anyhow!("boom"))),
+            "guard workspace root: boom"
+        );
+        assert_eq!(
+            msg(guard_script_path("s.ox", &anyhow::anyhow!("boom"))),
+            "guard script path s.ox: boom"
+        );
+        assert_eq!(
+            msg(read_script_at("s.ox", &anyhow::anyhow!("denied"))),
+            "failed to read script at s.ox: denied"
+        );
+        assert_eq!(
+            msg(read_script_stdin(&anyhow::anyhow!("boom"))),
+            "failed to read script from stdin: boom"
+        );
+        assert_eq!(
+            msg(create_shell_temp_dir(&anyhow::anyhow!("boom"))),
+            "failed to create shell temp dir: boom"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reexec_messages_carry_outer_text() {
+        let msg = |err: anyhow::Error| {
+            err.downcast_ref::<Diagnostic>()
+                .expect("typed")
+                .message()
+                .to_string()
+        };
+        assert_eq!(
+            msg(determine_current_exe(&anyhow::anyhow!("boom"))),
+            "determine current executable: boom"
+        );
+        assert_eq!(
+            msg(guard_system_temp_dir(&anyhow::anyhow!("boom"))),
+            "guard system temp dir: boom"
+        );
+        assert_eq!(
+            msg(construct_temp_shell_path(&anyhow::anyhow!("boom"))),
+            "construct temp shell path: boom"
+        );
+        assert_eq!(
+            msg(copy_shell_runner("d.exe", &anyhow::anyhow!("boom"))),
+            "failed to copy shell runner to d.exe: boom"
+        );
+        assert_eq!(
+            msg(spawn_shell_from("d.exe", &anyhow::anyhow!("boom"))),
+            "failed to spawn shell from d.exe: boom"
         );
     }
 

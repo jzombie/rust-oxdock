@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use oxdock_fs::{
     GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs, discover_workspace_root,
     env as oxdock_env, init_temp_gc,
@@ -299,7 +299,7 @@ fn print_dry_run(
 
 pub fn run() -> Result<()> {
     init_temp_gc();
-    let workspace_root = discover_workspace_root().context("guard workspace root")?;
+    let workspace_root = discover_workspace_root().map_err(|e| errors::guard_workspace_root(&e))?;
 
     let mut args = std::env::args().skip(1);
     // `--help`/`-h` and `--version`/`-V` surface as text in the parse
@@ -475,7 +475,7 @@ impl Options {
                         script = Some(ScriptSource::Path(
                             workspace_root
                                 .join_script(&path)
-                                .with_context(|| format!("guard script path {path}"))?,
+                                .map_err(|e| errors::guard_script_path(&path, &e))?,
                         ));
                     }
                     // After the script, stop option parsing entirely:
@@ -591,7 +591,7 @@ impl Options {
                     script = Some(ScriptSource::Path(
                         workspace_root
                             .join_script(&text)
-                            .with_context(|| format!("guard script path {text}"))?,
+                            .map_err(|e| errors::guard_script_path(&text, &e))?,
                     ));
                     script_args = drain_tail(&mut parser, true)?;
                     break;
@@ -854,14 +854,14 @@ fn read_script(source: &ScriptSource) -> Result<String> {
             let resolver = PathResolver::new(path.root(), path.root())?;
             resolver
                 .read_to_string(path)
-                .with_context(|| format!("failed to read script at {}", path.display()))
+                .map_err(|e| errors::read_script_at(&path.display().to_string(), &e))
         }
         ScriptSource::Stdin => {
             let mut buf = String::new();
             io::stdin()
                 .lock()
                 .read_to_string(&mut buf)
-                .context("failed to read script from stdin")?;
+                .map_err(|e| errors::read_script_stdin(&anyhow::Error::from(e)))?;
             Ok(buf)
         }
     }
@@ -901,7 +901,7 @@ where
                 stdin
                     .lock()
                     .read_to_string(&mut buf)
-                    .context("failed to read script from stdin")?;
+                    .map_err(|e| errors::read_script_stdin(&anyhow::Error::from(e)))?;
                 buf
             }
         }
@@ -990,14 +990,14 @@ where
                 if fs.is_snapshot_pending() {
                     snapshot
                         .materialize()
-                        .context("failed to create shell temp dir")?;
+                        .map_err(|e| errors::create_shell_temp_dir(&e))?;
                 }
                 final_cwd = fs.concretize_cwd(&final_cwd);
             }
             None => {
                 snapshot
                     .materialize()
-                    .context("failed to create shell temp dir")?;
+                    .map_err(|e| errors::create_shell_temp_dir(&e))?;
                 final_cwd = snapshot
                     .get()
                     .cloned()
@@ -1053,16 +1053,17 @@ fn maybe_reexec_shell_to_temp(opts: &Options) -> Result<()> {
         return Ok(());
     }
 
-    let self_path = std::env::current_exe().context("determine current executable")?;
-    let base_temp =
-        GuardedPath::new_root(std::env::temp_dir().as_path()).context("guard system temp dir")?;
+    let self_path = std::env::current_exe()
+        .map_err(|e| errors::determine_current_exe(&anyhow::Error::from(e)))?;
+    let base_temp = GuardedPath::new_root(std::env::temp_dir().as_path())
+        .map_err(|e| errors::guard_system_temp_dir(&e))?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
     let temp_file = base_temp
         .join(&format!("oxdock-shell-{ts}-{}.exe", std::process::id()))
-        .context("construct temp shell path")?;
+        .map_err(|e| errors::construct_temp_shell_path(&e))?;
 
     // Copy the current executable into the temporary location via a
     // resolver whose root is the temp directory. The source may live
@@ -1076,13 +1077,14 @@ fn maybe_reexec_shell_to_temp(opts: &Options) -> Result<()> {
     let source = oxdock_fs::UnguardedPath::external(self_path);
     resolver_temp
         .copy_file_from_unguarded(&source, &dest)
-        .with_context(|| format!("failed to copy shell runner to {}", dest.display()))?;
+        .map_err(|e| errors::copy_shell_runner(&dest.display().to_string(), &e))?;
 
     let mut cmd = CommandBuilder::new(dest.as_path());
     cmd.args(std::env::args_os().skip(1));
     cmd.env(oxdock_env::oxdock::SHELL_REEXEC, "1");
-    cmd.spawn()
-        .with_context(|| format!("failed to spawn shell from {}", dest.display()))?;
+    cmd.spawn().map_err(|e| {
+        errors::spawn_shell_from(&dest.display().to_string(), &anyhow::Error::from(e))
+    })?;
 
     // Exit immediately so the original binary can be rebuilt while the shell child stays running.
     std::process::exit(0);
@@ -1132,6 +1134,7 @@ fn run_shell(cwd: &GuardedPath, workspace_root: &GuardedPath) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
     use indoc::indoc;
     use oxdock_fs::PathResolver;
     use std::cell::{Cell, RefCell};
