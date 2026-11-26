@@ -1430,6 +1430,19 @@ transport, so this phase is mechanical:
    plus call sites use `?` or is_ok with no
    change. Core 409 plus integration 629 green;
    clippy and fmt clean.
+   Module-lets step 2026-11-26: no new ctors, all
+   wordings already pinned. Two signatures flip
+   in static_check.rs: module_lets plus
+   module_lets_indexed return DiagnosticResult.
+   Body drops one anyhow::Error::new wrapper; the
+   resolve_tag site keeps its inner
+   anyhow::Error::new(err) reason wrap (the callee
+   is already Diagnostic, the ctor takes
+   &anyhow::Error) and only sheds the outer wrap.
+   Callers hold via the blanket
+   Diagnostic-into-anyhow conversion with no
+   change. Core 409 plus integration 629 green;
+   clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

@@ -572,7 +572,10 @@ pub(crate) fn harvest_touches_module<P: ProcessManager>(
 /// steps are skipped exactly like collection skips them. Each binding
 /// keeps its declaration guard so guarded top-level `LET`s enforce
 /// path coverage instead of reading as unconditional.
-fn module_lets<P: ProcessManager>(steps: &[Step], exec: &ExecState<P>) -> Result<Vec<GuardedLet>> {
+fn module_lets<P: ProcessManager>(
+    steps: &[Step],
+    exec: &ExecState<P>,
+) -> DiagnosticResult<Vec<GuardedLet>> {
     Ok(module_lets_indexed(steps, exec)?
         .into_iter()
         .map(|(binding, _)| binding)
@@ -586,7 +589,7 @@ fn module_lets<P: ProcessManager>(steps: &[Step], exec: &ExecState<P>) -> Result
 fn module_lets_indexed<P: ProcessManager>(
     steps: &[Step],
     exec: &ExecState<P>,
-) -> Result<Vec<(GuardedLet, usize)>> {
+) -> DiagnosticResult<Vec<(GuardedLet, usize)>> {
     let mut out = Vec::new();
     for (idx, step) in steps.iter().enumerate() {
         if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
@@ -602,9 +605,9 @@ fn module_lets_indexed<P: ProcessManager>(
                 is_const,
                 ..
             } => {
-                let tag = exec.resolve_tag(decl_type).map_err(|err| {
-                    anyhow::Error::new(check_diag::check_var_tag(var, &anyhow::Error::new(err)))
-                })?;
+                let tag = exec
+                    .resolve_tag(decl_type)
+                    .map_err(|err| check_diag::check_var_tag(var, &anyhow::Error::new(err)))?;
                 out.push((
                     GuardedLet {
                         name: clean_var(var),
