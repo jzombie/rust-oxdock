@@ -3030,6 +3030,17 @@ transport, so this phase is mechanical:
    swap anyhow boom for typing_max_depth leaf with full
    message text. core lib 410 plus 629 plus 12 plus 2
    green; clippy pre-existing baseline only; fmt clean.
+   parser command hygiene bulk 2026-11-27 (command.rs only,
+   zero new ctors): use anyhow::Result drops; both
+   validate_positionals_against_meta plus check_one move
+   from Result<(), ParseError> to ParseResult<()> (same
+   type, canonical spelling) and the CommandSpec::lower
+   bound moves from anyhow Result<StepKind> to
+   ParseResult<StepKind> (zero in-repo implementors; parse
+   failures are ParseError by construction). anyhow dep
+   stays (tag.rs generated extractors plus macro_input
+   proc-macro boundary by design). parser 267 plus 303
+   green; clippy zero; fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

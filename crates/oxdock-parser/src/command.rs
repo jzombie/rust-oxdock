@@ -1,11 +1,10 @@
 use crate::ast::{Arg, Expr, StepKind};
 use crate::diagnostics as dsl_diag;
-use crate::error::{ParseError, ParseErrorKind, SpanContext};
+use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 use crate::{
     BOOL_TYPE_NAME, DURATION_TYPE_NAME, INT_TYPE_NAME, LIST_TYPE_NAME, PATH_TYPE_NAME,
     STRING_TYPE_NAME,
 };
-use anyhow::Result;
 use oxdock_diagnostics::DiagnosticResult;
 
 /// Metadata for a single command argument.
@@ -164,7 +163,7 @@ pub fn validate_positionals_against_meta(
     cmd_name: &str,
     specs: &[ArgSpec],
     args: &[Arg],
-) -> Result<(), ParseError> {
+) -> ParseResult<()> {
     let has_rest = specs
         .last()
         .is_some_and(|s| matches!(s.arg_type, ArgType::Rest(_)));
@@ -215,12 +214,7 @@ pub fn validate_positionals_against_meta(
     Ok(())
 }
 
-fn check_one(
-    cmd_name: &str,
-    spec: &ArgSpec,
-    arg_type: &ArgType,
-    arg: &Arg,
-) -> Result<(), ParseError> {
+fn check_one(cmd_name: &str, spec: &ArgSpec, arg_type: &ArgType, arg: &Arg) -> ParseResult<()> {
     match arg_type.check_arg(arg) {
         Ok(_) => Ok(()),
         Err(e) => Err(ParseError::from_diagnostic(
@@ -634,7 +628,7 @@ pub trait CommandSpec {
     const NAME: &'static str;
 
     fn metadata() -> CommandMeta;
-    fn lower(flags: Vec<(String, Arg)>, args: Vec<Arg>) -> Result<StepKind>;
+    fn lower(flags: Vec<(String, Arg)>, args: Vec<Arg>) -> ParseResult<StepKind>;
 }
 
 #[cfg(test)]
