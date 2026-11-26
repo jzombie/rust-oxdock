@@ -2561,6 +2561,17 @@ transport, so this phase is mechanical:
    eval_remote_unrenderable_var layer. Parser 267+303 plus core
    lib 410 plus integration 629 green; parser clippy zero, fmt
    clean on both touched files.
+   token-roundtrip bulk 2026-11-27 (parser-only, two sites):
+   parse_timeout_duration_at and the FAIL code check now carry
+   the check_arg Diagnostic on TokenError instead of None, so
+   stable keys survive the token-stream round trip (entry points
+   reattach verbatim; Display bytes unchanged since fresh leaf
+   diagnostics have no hint or span). kinds untouched (None
+   still maps to Structural statement; FAIL keeps Validation).
+   stable_keys_survive_the_token_round_trip gains both cases
+   (invalid_timeout_duration, expected_int). Parser 267+303 plus
+   core lib 410 plus integration 629 green; parser clippy zero,
+   fmt clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

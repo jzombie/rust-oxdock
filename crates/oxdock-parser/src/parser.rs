@@ -132,10 +132,11 @@ pub struct TokenError {
     /// a parser-native structural failure.
     pub kind: Option<ParseErrorKind>,
     /// Owning keyed diagnostic, when this error wraps a dispatcher
-    /// [`ParseError`] built via `ParseError::from_diagnostic`. The
+    /// [`ParseError`] built via `ParseError::from_diagnostic` or a
+    /// direct `check_arg` failure carrying its own diagnostic. The
     /// entry points reattach it verbatim so stable keys survive the
-    /// token-stream round trip; parser-native errors leave this as
-    /// `None` and rewrap from the message string as before. Boxed:
+    /// token-stream round trip; other parser-native errors leave this
+    /// as `None` and rewrap from the message string as before. Boxed:
     /// diagnostics are cold-path only and `TokenError` travels by
     /// value in every `Result`.
     pub diagnostic: Option<Box<Diagnostic>>,
@@ -3177,13 +3178,13 @@ fn parse_timeout_duration_at(
         _ => 1,
     };
     ArgType::Duration.check_arg(&arg).map_err(|e| TokenError {
-        diagnostic: None,
         hint: None,
         stmt,
         msg: e.to_string(),
         line: 0,
         col: 0,
         kind: None,
+        diagnostic: Some(Box::new(e)),
     })?;
     Ok(Some((arg, used)))
 }
@@ -4190,7 +4191,6 @@ fn parse_fail_single(
                 crate::command::ArgType::Int
                     .check_arg(arg)
                     .map_err(|e| TokenError {
-                        diagnostic: None,
                         hint: None,
                         stmt,
                         msg: e.to_string(),
@@ -4199,6 +4199,7 @@ fn parse_fail_single(
                         kind: Some(ParseErrorKind::Validation {
                             command: KEYWORD_FAIL.to_string(),
                         }),
+                        diagnostic: Some(Box::new(e)),
                     })?;
             }
             (code, message)

@@ -55,6 +55,19 @@ fn stable_keys_survive_the_token_round_trip() {
         "got: {err}"
     );
     assert!(err.hint().is_some(), "structural hint must survive: {err}");
+    // Direct `check_arg` failures keep their keys too: the TIMEOUT
+    // duration lookahead and the FAIL code check preserve the
+    // diagnostic instead of rewrapping from the message string.
+    for (script, key) in [
+        (
+            "TIMEOUT \"banana\" { ECHO hi }\n",
+            "dsl.validation.invalid_timeout_duration",
+        ),
+        ("FAIL banana \"msg\"\n", "dsl.validation.expected_int"),
+    ] {
+        let err = parse_script(script, lower_command).expect_err("must fail");
+        assert_eq!(err.key(), Some(key), "script: {script:?} got: {err}");
+    }
     // Case-hinted unknown command keeps its hint.
     let err = parse_script("Write hi\n", lower_command).expect_err("must fail");
     assert_eq!(err.key(), Some("dsl.unknown_command.unknown"), "got: {err}");
