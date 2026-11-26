@@ -1775,30 +1775,34 @@ pub(super) fn assert_equality<P: ProcessManager>(
             let is_equal = computed.eq_ignore_ascii_case(sha);
             if is_equal != expect_equal {
                 if expect_equal {
-                    bail!("{verb} --hash mismatch: expected {sha}, computed {computed}");
+                    return Err(anyhow::Error::new(diag::eval_assert_hash_mismatch(
+                        verb, sha, &computed,
+                    )));
                 } else {
-                    bail!("{verb} --hash match: content matches {sha}");
+                    return Err(anyhow::Error::new(diag::eval_assert_hash_match(verb, sha)));
                 }
             }
             return Ok(());
         }
         let Some(want) = expected.and_then(|v| v.as_str()) else {
-            bail!(
-                "{verb} stream mismatch\nexpected: {:?}\nactual:   {:?}",
+            return Err(anyhow::Error::new(diag::eval_assert_stream_mismatch(
+                verb,
                 expected,
-                String::from_utf8_lossy(&drained)
-            );
+                &String::from_utf8_lossy(&drained),
+            )));
         };
         let is_equal = drained == want.as_bytes();
         if is_equal != expect_equal {
             if expect_equal {
-                bail!(
-                    "{verb} stream mismatch\nexpected: {:?}\nactual:   {:?}",
+                return Err(anyhow::Error::new(diag::eval_assert_stream_mismatch_text(
+                    verb,
                     want,
-                    String::from_utf8_lossy(&drained)
-                );
+                    &String::from_utf8_lossy(&drained),
+                )));
             } else {
-                bail!("{verb} stream unexpectedly equal: {want:?}");
+                return Err(anyhow::Error::new(
+                    diag::eval_assert_stream_unexpected_equal(verb, want),
+                ));
             }
         }
         return Ok(());
@@ -1808,25 +1812,28 @@ pub(super) fn assert_equality<P: ProcessManager>(
             ResolvedAssertTarget::Value(v) => match v.as_str() {
                 Some(s) => s.as_bytes().to_vec(),
                 None => {
-                    bail!("{verb} --hash needs a string actual, found {v:?}");
+                    return Err(anyhow::Error::new(diag::eval_assert_hash_needs_string(
+                        verb, v,
+                    )));
                 }
             },
             ResolvedAssertTarget::Pipe(bytes) => bytes.clone(),
             ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, generation, verb)?,
             ResolvedAssertTarget::Stderr => {
-                bail!(
-                    "{verb} over stderr is not supported; use {} stderr ...",
-                    Command::AssertContains.as_str()
-                );
+                return Err(anyhow::Error::new(diag::eval_assert_stderr_unsupported(
+                    verb,
+                )));
             }
         };
         let computed = sha256_hex(&actual_bytes);
         let is_equal = computed.eq_ignore_ascii_case(sha);
         if is_equal != expect_equal {
             if expect_equal {
-                bail!("{verb} --hash mismatch: expected {sha}, computed {computed}");
+                return Err(anyhow::Error::new(diag::eval_assert_hash_mismatch(
+                    verb, sha, &computed,
+                )));
             } else {
-                bail!("{verb} --hash match: content matches {sha}");
+                return Err(anyhow::Error::new(diag::eval_assert_hash_match(verb, sha)));
             }
         }
         return Ok(());
@@ -1834,18 +1841,20 @@ pub(super) fn assert_equality<P: ProcessManager>(
     match actual {
         ResolvedAssertTarget::Value(got) => {
             let Some(want) = expected else {
-                bail!("{verb} requires an expected value");
+                return Err(anyhow::Error::new(diag::eval_assert_requires_expected(
+                    verb,
+                )));
             };
             let is_equal = got == want;
             if is_equal != expect_equal {
                 if expect_equal {
-                    bail!("{verb} mismatch\nexpected: {:?}\nactual:   {:?}", want, got);
+                    return Err(anyhow::Error::new(diag::eval_assert_value_mismatch(
+                        verb, want, got,
+                    )));
                 } else {
-                    bail!(
-                        "{verb} mismatch: values are equal\nexpected: {:?}\nactual:   {:?}",
-                        want,
-                        got
-                    )
+                    return Err(anyhow::Error::new(
+                        diag::eval_assert_value_unexpected_equal(verb, want, got),
+                    ));
                 }
             }
             Ok(())
@@ -1853,52 +1862,53 @@ pub(super) fn assert_equality<P: ProcessManager>(
         ResolvedAssertTarget::Stdout => {
             let bytes = exact_stdout_bytes(cx, generation, verb)?;
             let Some(want) = expected.and_then(|v| v.as_str()) else {
-                bail!(
-                    "{verb} stream mismatch\nexpected: {:?}\nactual:   {:?}",
+                return Err(anyhow::Error::new(diag::eval_assert_stream_mismatch(
+                    verb,
                     expected,
-                    String::from_utf8_lossy(&bytes)
-                );
+                    &String::from_utf8_lossy(&bytes),
+                )));
             };
             let is_equal = bytes == want.as_bytes();
             if is_equal != expect_equal {
                 if expect_equal {
-                    bail!(
-                        "{verb} stream mismatch\nexpected: {:?}\nactual:   {:?}",
+                    return Err(anyhow::Error::new(diag::eval_assert_stream_mismatch_text(
+                        verb,
                         want,
-                        String::from_utf8_lossy(&bytes)
-                    );
+                        &String::from_utf8_lossy(&bytes),
+                    )));
                 } else {
-                    bail!("{verb} stream unexpectedly equal: {want:?}");
+                    return Err(anyhow::Error::new(
+                        diag::eval_assert_stream_unexpected_equal(verb, want),
+                    ));
                 }
             }
             Ok(())
         }
-        ResolvedAssertTarget::Stderr => {
-            bail!(
-                "{verb} over stderr is not supported; use {} stderr ...",
-                Command::AssertContains.as_str()
-            );
-        }
+        ResolvedAssertTarget::Stderr => Err(anyhow::Error::new(
+            diag::eval_assert_stderr_unsupported(verb),
+        )),
         ResolvedAssertTarget::Pipe(bytes) => {
             let actual_str = String::from_utf8(bytes.clone())
                 .with_context(|| format!("{verb} pipe content is not UTF-8"))?;
             let Some(want) = expected.and_then(|v| v.as_str()) else {
-                bail!(
-                    "{verb} pipe mismatch\nexpected: {:?}\nactual:   {:?}",
+                return Err(anyhow::Error::new(diag::eval_assert_pipe_mismatch(
+                    verb,
                     expected,
-                    actual_str
-                );
+                    &actual_str,
+                )));
             };
             let is_equal = actual_str == want;
             if is_equal != expect_equal {
                 if expect_equal {
-                    bail!(
-                        "{verb} pipe mismatch\nexpected: {:?}\nactual:   {:?}",
+                    return Err(anyhow::Error::new(diag::eval_assert_pipe_mismatch_text(
+                        verb,
                         want,
-                        actual_str
-                    );
+                        &actual_str,
+                    )));
                 } else {
-                    bail!("{verb} pipe unexpectedly equal: {want:?}");
+                    return Err(anyhow::Error::new(diag::eval_assert_pipe_unexpected_equal(
+                        verb, want,
+                    )));
                 }
             }
             Ok(())

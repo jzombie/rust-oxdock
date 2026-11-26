@@ -10,11 +10,11 @@ use oxdock_diagnostics::Diagnostic;
 use oxdock_parser::template::{bare_sigil_error, qualified_keypath_error};
 use oxdock_parser::{
     ANY_TYPE_NAME, BOOL_TYPE_NAME, Expr, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
-    KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_ENV,
-    KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED,
-    KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_SWITCH, KEYWORD_TYPE,
-    KEYWORD_WITH_IO, LIST_TYPE_NAME, MAP_TYPE_NAME, PIPE_TYPE_NAME, STRING_TYPE_NAME, Spelled,
-    TypeTag, VOID_TYPE_NAME, render_structural,
+    KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CONST,
+    KEYWORD_CONTINUE, KEYWORD_ENV, KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_IMPORT,
+    KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_REMOTE,
+    KEYWORD_RETURN, KEYWORD_SWITCH, KEYWORD_TYPE, KEYWORD_WITH_IO, LIST_TYPE_NAME, MAP_TYPE_NAME,
+    PIPE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
 };
 
 use super::function_names::{
@@ -1582,6 +1582,198 @@ pub fn eval_assert_no_exact_capture(verb: &str) -> Diagnostic {
         "dsl.eval.assert_no_exact_capture",
         message,
         Diagnostic::make_fields(&[("verb", verb)]),
+    )
+}
+
+/// Assert `--hash` digest mismatch. Takes the invoking verb, the
+/// expected hex digest, and the computed hex digest; `Debug`
+/// rendering is not needed, both sides are hex text. No source
+/// rides along.
+pub fn eval_assert_hash_mismatch(verb: &str, expected: &str, computed: &str) -> Diagnostic {
+    let message = format!("{verb} --hash mismatch: expected {expected}, computed {computed}");
+    Diagnostic::new(
+        "dsl.eval.assert_hash_mismatch",
+        message,
+        Diagnostic::make_fields(&[
+            ("verb", verb),
+            ("expected", expected),
+            ("computed", computed),
+        ]),
+    )
+}
+
+/// Assert `--hash` unexpected match under `ASSERT_NE`. Takes the
+/// invoking verb and the matching digest. No source rides along.
+pub fn eval_assert_hash_match(verb: &str, sha: &str) -> Diagnostic {
+    let message = format!("{verb} --hash match: content matches {sha}");
+    Diagnostic::new(
+        "dsl.eval.assert_hash_match",
+        message,
+        Diagnostic::make_fields(&[("verb", verb), ("sha", sha)]),
+    )
+}
+
+/// Assert `--hash` with a non-string actual. Takes the invoking verb
+/// and the offending value; `Debug` rendering lives here.
+pub fn eval_assert_hash_needs_string(verb: &str, actual: &super::Value) -> Diagnostic {
+    let message = format!("{verb} --hash needs a string actual, found {actual:?}");
+    Diagnostic::new(
+        "dsl.eval.assert_hash_needs_string",
+        message,
+        Diagnostic::make_fields(&[("verb", verb), ("actual", &format!("{actual:?}"))]),
+    )
+}
+
+/// Assert stream mismatch when the expected side is an optional
+/// value (missing or non-string). Takes the invoking verb, the
+/// optional expected value, and the actual text; `Debug` rendering
+/// lives here for both sides.
+pub fn eval_assert_stream_mismatch(
+    verb: &str,
+    expected: Option<&super::Value>,
+    actual: &str,
+) -> Diagnostic {
+    let message = format!("{verb} stream mismatch\nexpected: {expected:?}\nactual:   {actual:?}");
+    Diagnostic::new(
+        "dsl.eval.assert_stream_mismatch",
+        message,
+        Diagnostic::make_fields(&[
+            ("verb", verb),
+            ("expected", &format!("{expected:?}")),
+            ("actual", actual),
+        ]),
+    )
+}
+
+/// Assert stream mismatch when both sides are text. Takes the
+/// invoking verb, the expected text, and the actual text; `Debug`
+/// rendering lives here.
+pub fn eval_assert_stream_mismatch_text(verb: &str, expected: &str, actual: &str) -> Diagnostic {
+    let message = format!("{verb} stream mismatch\nexpected: {expected:?}\nactual:   {actual:?}");
+    Diagnostic::new(
+        "dsl.eval.assert_stream_mismatch_text",
+        message,
+        Diagnostic::make_fields(&[("verb", verb), ("expected", expected), ("actual", actual)]),
+    )
+}
+
+/// Assert stream unexpectedly equal under `ASSERT_NE`. Takes the
+/// invoking verb and the duplicated text; `Debug` rendering lives
+/// here.
+pub fn eval_assert_stream_unexpected_equal(verb: &str, expected: &str) -> Diagnostic {
+    let message = format!("{verb} stream unexpectedly equal: {expected:?}");
+    Diagnostic::new(
+        "dsl.eval.assert_stream_unexpected_equal",
+        message,
+        Diagnostic::make_fields(&[("verb", verb), ("expected", expected)]),
+    )
+}
+
+/// Assert over `stderr`, which exact equality does not support.
+/// Takes the invoking verb; the remediation names the shared
+/// `ASSERT_CONTAINS` keyword constant so bytes stay identical.
+pub fn eval_assert_stderr_unsupported(verb: &str) -> Diagnostic {
+    let message =
+        format!("{verb} over stderr is not supported; use {KEYWORD_ASSERT_CONTAINS} stderr ...");
+    Diagnostic::new(
+        "dsl.eval.assert_stderr_unsupported",
+        message,
+        Diagnostic::make_fields(&[("verb", verb)]),
+    )
+}
+
+/// Assert without an expected value. Takes the invoking verb; no
+/// source rides along.
+pub fn eval_assert_requires_expected(verb: &str) -> Diagnostic {
+    let message = format!("{verb} requires an expected value");
+    Diagnostic::new(
+        "dsl.eval.assert_requires_expected",
+        message,
+        Diagnostic::make_fields(&[("verb", verb)]),
+    )
+}
+
+/// Assert value mismatch. Takes the invoking verb and both values;
+/// `Debug` rendering lives here.
+pub fn eval_assert_value_mismatch(
+    verb: &str,
+    expected: &super::Value,
+    actual: &super::Value,
+) -> Diagnostic {
+    let message = format!("{verb} mismatch\nexpected: {expected:?}\nactual:   {actual:?}");
+    Diagnostic::new(
+        "dsl.eval.assert_value_mismatch",
+        message,
+        Diagnostic::make_fields(&[
+            ("verb", verb),
+            ("expected", &format!("{expected:?}")),
+            ("actual", &format!("{actual:?}")),
+        ]),
+    )
+}
+
+/// Assert values unexpectedly equal under `ASSERT_NE`. Takes the
+/// invoking verb and both values; `Debug` rendering lives here.
+pub fn eval_assert_value_unexpected_equal(
+    verb: &str,
+    expected: &super::Value,
+    actual: &super::Value,
+) -> Diagnostic {
+    let message =
+        format!("{verb} mismatch: values are equal\nexpected: {expected:?}\nactual:   {actual:?}");
+    Diagnostic::new(
+        "dsl.eval.assert_value_unexpected_equal",
+        message,
+        Diagnostic::make_fields(&[
+            ("verb", verb),
+            ("expected", &format!("{expected:?}")),
+            ("actual", &format!("{actual:?}")),
+        ]),
+    )
+}
+
+/// Assert pipe mismatch when the expected side is an optional
+/// value (missing or non-string). Takes the invoking verb, the
+/// optional expected value, and the actual text; `Debug` rendering
+/// lives here for the expected side.
+pub fn eval_assert_pipe_mismatch(
+    verb: &str,
+    expected: Option<&super::Value>,
+    actual: &str,
+) -> Diagnostic {
+    let message = format!("{verb} pipe mismatch\nexpected: {expected:?}\nactual:   {actual:?}");
+    Diagnostic::new(
+        "dsl.eval.assert_pipe_mismatch",
+        message,
+        Diagnostic::make_fields(&[
+            ("verb", verb),
+            ("expected", &format!("{expected:?}")),
+            ("actual", actual),
+        ]),
+    )
+}
+
+/// Assert pipe mismatch when both sides are text. Takes the invoking
+/// verb, the expected text, and the actual text; `Debug` rendering
+/// lives here.
+pub fn eval_assert_pipe_mismatch_text(verb: &str, expected: &str, actual: &str) -> Diagnostic {
+    let message = format!("{verb} pipe mismatch\nexpected: {expected:?}\nactual:   {actual:?}");
+    Diagnostic::new(
+        "dsl.eval.assert_pipe_mismatch_text",
+        message,
+        Diagnostic::make_fields(&[("verb", verb), ("expected", expected), ("actual", actual)]),
+    )
+}
+
+/// Assert pipe unexpectedly equal under `ASSERT_NE`. Takes the
+/// invoking verb and the duplicated text; `Debug` rendering lives
+/// here.
+pub fn eval_assert_pipe_unexpected_equal(verb: &str, expected: &str) -> Diagnostic {
+    let message = format!("{verb} pipe unexpectedly equal: {expected:?}");
+    Diagnostic::new(
+        "dsl.eval.assert_pipe_unexpected_equal",
+        message,
+        Diagnostic::make_fields(&[("verb", verb), ("expected", expected)]),
     )
 }
 
@@ -4327,6 +4519,30 @@ mod tests {
             eval_assert_stdin_overflow("ASSERT_EQ").key(),
             eval_assert_stdout_overflow("ASSERT_EQ").key(),
             eval_assert_no_exact_capture("ASSERT_EQ").key(),
+            eval_assert_hash_mismatch("ASSERT_EQ", "a", "b").key(),
+            eval_assert_hash_match("ASSERT_EQ", "a").key(),
+            eval_assert_hash_needs_string("ASSERT_EQ", &crate::Value::string("x".to_string()))
+                .key(),
+            eval_assert_stream_mismatch("ASSERT_EQ", None, "a").key(),
+            eval_assert_stream_mismatch_text("ASSERT_EQ", "a", "b").key(),
+            eval_assert_stream_unexpected_equal("ASSERT_NE", "a").key(),
+            eval_assert_stderr_unsupported("ASSERT_EQ").key(),
+            eval_assert_requires_expected("ASSERT_EQ").key(),
+            eval_assert_value_mismatch(
+                "ASSERT_EQ",
+                &crate::Value::string("a".to_string()),
+                &crate::Value::string("b".to_string()),
+            )
+            .key(),
+            eval_assert_value_unexpected_equal(
+                "ASSERT_NE",
+                &crate::Value::string("a".to_string()),
+                &crate::Value::string("a".to_string()),
+            )
+            .key(),
+            eval_assert_pipe_mismatch("ASSERT_EQ", None, "a").key(),
+            eval_assert_pipe_mismatch_text("ASSERT_EQ", "a", "b").key(),
+            eval_assert_pipe_unexpected_equal("ASSERT_NE", "a").key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -4666,6 +4882,42 @@ mod tests {
         assert_eq!(
             eval_assert_no_exact_capture("ASSERT_EQ").message(),
             "ASSERT_EQ stdout has no exact capture registered"
+        );
+        assert_eq!(
+            eval_assert_hash_mismatch("ASSERT_EQ", "a", "b").message(),
+            "ASSERT_EQ --hash mismatch: expected a, computed b"
+        );
+        assert_eq!(
+            eval_assert_hash_match("ASSERT_NE", "a").message(),
+            "ASSERT_NE --hash match: content matches a"
+        );
+        assert_eq!(
+            eval_assert_stream_mismatch("ASSERT_EQ", None, "a").message(),
+            "ASSERT_EQ stream mismatch\nexpected: None\nactual:   \"a\""
+        );
+        assert_eq!(
+            eval_assert_stream_mismatch_text("ASSERT_EQ", "a", "b").message(),
+            "ASSERT_EQ stream mismatch\nexpected: \"a\"\nactual:   \"b\""
+        );
+        assert_eq!(
+            eval_assert_stream_unexpected_equal("ASSERT_NE", "a").message(),
+            "ASSERT_NE stream unexpectedly equal: \"a\""
+        );
+        assert_eq!(
+            eval_assert_stderr_unsupported("ASSERT_EQ").message(),
+            "ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ..."
+        );
+        assert_eq!(
+            eval_assert_requires_expected("ASSERT_EQ").message(),
+            "ASSERT_EQ requires an expected value"
+        );
+        assert_eq!(
+            eval_assert_pipe_mismatch_text("ASSERT_EQ", "a", "b").message(),
+            "ASSERT_EQ pipe mismatch\nexpected: \"a\"\nactual:   \"b\""
+        );
+        assert_eq!(
+            eval_assert_pipe_unexpected_equal("ASSERT_NE", "a").message(),
+            "ASSERT_NE pipe unexpectedly equal: \"a\""
         );
         assert!(
             eval_async_exit_status(None, &exit_status_sample())

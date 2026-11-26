@@ -1925,6 +1925,35 @@ transport, so this phase is mechanical:
    integration 629 green; clippy at
    baseline, fmt clean on both touched
    files.
+   Assert-equality bulk step 2026-11-26
+   (file-sized batch): thirteen new
+   dsl.eval.assert_* ctors with key plus
+   wording pins (hash_mismatch, hash_match,
+   hash_needs_string, stream_mismatch for
+   Option-Value expected, stream_mismatch_text
+   for str expected, stream_unexpected_equal,
+   stderr_unsupported via shared
+   KEYWORD_ASSERT_CONTAINS, requires_expected,
+   value_mismatch, value_unexpected_equal,
+   pipe_mismatch for Option-Value expected,
+   pipe_mismatch_text for str expected,
+   pipe_unexpected_equal; verb is the invoker
+   field throughout, Debug rendering lives in
+   the ctors). All 19 bail sites in
+   assert_equality re-keyed through
+   anyhow::Error::new shims (enclosing fn
+   stays anyhow::Result); the two pipe
+   UTF-8 with_context sites deliberately held
+   for a later io-ctor batch. Let-else and
+   if-statement positions keep explicit
+   return Err (must diverge); the Stderr tail
+   arm uses bare Err (avoids needless_return);
+   fmt normalized the shared hash indent.
+   Bytes identical (integration only checks
+   substrings). Core 410 plus integration 629
+   green; clippy at baseline (3 pre-existing
+   static_check needless_borrow), fmt clean
+   on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
