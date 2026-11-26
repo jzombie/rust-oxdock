@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::diagnostics as net_diag;
 
@@ -63,12 +63,12 @@ fn is_loopback_host(host: &str) -> bool {
 
 /// Split `scheme://rest`. Missing or malformed schemes bail before any
 /// socket opens.
-fn split_scheme(url: &str) -> Result<(&str, &str)> {
+fn split_scheme(url: &str) -> DiagnosticResult<(&str, &str)> {
     let (scheme, rest) = url
         .split_once("://")
-        .ok_or_else(|| anyhow::Error::new(net_diag::fetch_url_missing_scheme(url)))?;
+        .ok_or_else(|| net_diag::fetch_url_missing_scheme(url))?;
     if scheme.is_empty() || rest.is_empty() {
-        return Err(anyhow::Error::new(net_diag::fetch_url_not_https(url)));
+        return Err(net_diag::fetch_url_not_https(url));
     }
     Ok((scheme, rest))
 }
@@ -100,20 +100,16 @@ fn authority_host(authority: &str) -> &str {
 /// hosts, before any socket opens. Runs per redirect hop, not just on
 /// the initial URL, so a `Location` pointing at cleartext never slips
 /// through automatic following (which stays disabled).
-fn check_url(url: &str) -> Result<()> {
+fn check_url(url: &str) -> DiagnosticResult<()> {
     let (scheme, rest) = split_scheme(url)?;
     if scheme != "https" {
         if scheme == "http" {
             let host = authority_host(rest).to_lowercase();
             if !is_loopback_host(&host) {
-                return Err(anyhow::Error::new(net_diag::fetch_refuses_cleartext_http(
-                    &host,
-                )));
+                return Err(net_diag::fetch_refuses_cleartext_http(&host));
             }
         } else {
-            return Err(anyhow::Error::new(net_diag::fetch_unsupported_scheme(
-                scheme,
-            )));
+            return Err(net_diag::fetch_unsupported_scheme(scheme));
         }
     }
     Ok(())
@@ -128,7 +124,10 @@ fn check_url(url: &str) -> Result<()> {
 /// as does a redirect without a `Location` header. Custom headers
 /// apply to every hop; the deadline covers the whole chain; bodies
 /// over `options.max_body_bytes` bail naming the limit.
-pub fn fetch_text_with_options(initial_url: &str, options: &FetchOptions) -> Result<String> {
+pub fn fetch_text_with_options(
+    initial_url: &str,
+    options: &FetchOptions,
+) -> DiagnosticResult<String> {
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(options.timeout))
         .max_redirects(0)
@@ -145,32 +144,30 @@ pub fn fetch_text_with_options(initial_url: &str, options: &FetchOptions) -> Res
         let response = match request.call() {
             Ok(response) => response,
             Err(err) => {
-                return Err(anyhow::Error::from(err))
-                    .with_context(|| format!("NET_FETCH({current_url:?}) failed"));
+                return Err(net_diag::fetch_request_failed(
+                    &current_url,
+                    &anyhow::Error::from(err),
+                ));
             }
         };
         let status = response.status().as_u16();
         if (300..400).contains(&status) {
             if redirects >= options.max_redirects {
-                return Err(anyhow::Error::new(net_diag::fetch_too_many_redirects(
-                    initial_url,
-                )));
+                return Err(net_diag::fetch_too_many_redirects(initial_url));
             }
-            let location = response.headers().get("location").ok_or_else(|| {
-                anyhow::Error::new(net_diag::fetch_redirect_missing_location(&current_url))
-            })?;
-            let location = location.to_str().with_context(|| {
-                format!("NET_FETCH({current_url:?}) redirect Location is not visible ASCII")
+            let location = response
+                .headers()
+                .get("location")
+                .ok_or_else(|| net_diag::fetch_redirect_missing_location(&current_url))?;
+            let location = location.to_str().map_err(|err| {
+                net_diag::fetch_redirect_location_not_ascii(&current_url, &anyhow::Error::new(err))
             })?;
             current_url = location.to_string();
             redirects += 1;
             continue;
         }
         if !(200..300).contains(&status) {
-            return Err(anyhow::Error::new(net_diag::fetch_http_status(
-                &current_url,
-                status,
-            )));
+            return Err(net_diag::fetch_http_status(&current_url, status));
         }
         let mut response = response;
         let body = response
@@ -179,7 +176,9 @@ pub fn fetch_text_with_options(initial_url: &str, options: &FetchOptions) -> Res
             .limit(options.max_body_bytes)
             .lossy_utf8(false)
             .read_to_string()
-            .with_context(|| format!("NET_FETCH({current_url:?}) failed"))?;
+            .map_err(|err| {
+                net_diag::fetch_request_failed(&current_url, &anyhow::Error::from(err))
+            })?;
         return Ok(body);
     }
 }

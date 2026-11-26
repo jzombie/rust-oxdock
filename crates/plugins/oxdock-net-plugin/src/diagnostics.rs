@@ -325,6 +325,35 @@ pub fn fetch_http_status(current_url: &str, status: u16) -> Diagnostic {
     )
 }
 
+/// Transport or body-read failure. Takes the current URL plus the
+/// wrapped ureq failure; the chain renders inline. Shared by the
+/// initial call and the body read, which retire the same context
+/// text: one key, one mode. The `&anyhow::Error` carries ureq's own
+/// source chain into `{err:#}` so the bytes match the retired
+/// `.with_context` layer exactly.
+pub fn fetch_request_failed(current_url: &str, err: &anyhow::Error) -> Diagnostic {
+    let err_text = format!("{err:#}");
+    let message = format!("NET_FETCH({current_url:?}) failed: {err_text}");
+    Diagnostic::new(
+        "net.fetch.request_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_URL, current_url), (FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Non-ASCII redirect `Location`. Takes the current URL plus the
+/// wrapped header-decode failure; the chain renders inline.
+pub fn fetch_redirect_location_not_ascii(current_url: &str, err: &anyhow::Error) -> Diagnostic {
+    let err_text = format!("{err:#}");
+    let message =
+        format!("NET_FETCH({current_url:?}) redirect Location is not visible ASCII: {err_text}");
+    Diagnostic::new(
+        "net.fetch.redirect_location_not_ascii",
+        message,
+        Diagnostic::make_fields(&[(FIELD_URL, current_url), (FIELD_ERR, err_text.as_str())]),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Endpoints (`net.endpoint.*`, `endpoints.rs`)
 // ---------------------------------------------------------------------------
@@ -1093,6 +1122,8 @@ mod tests {
             fetch_too_many_redirects("https://a/x").key(),
             fetch_redirect_missing_location("https://a/x").key(),
             fetch_http_status("https://a/x", 500).key(),
+            fetch_request_failed("https://a/x", &chain).key(),
+            fetch_redirect_location_not_ascii("https://a/x", &chain).key(),
             no_cli_mapping("NET_LISTEN", &VirtualEndpoint::Name("web".to_string())).key(),
             duplicate_mapping(&tcp_key).key(),
             endpoint_not_bound(&tcp_key).key(),
@@ -1295,6 +1326,14 @@ mod tests {
         assert_eq!(
             fetch_http_status("https://a/x", 500).message(),
             "NET_FETCH(\"https://a/x\") failed: http status: 500"
+        );
+        assert_eq!(
+            fetch_request_failed("https://a/x", &chain).message(),
+            "NET_FETCH(\"https://a/x\") failed: boom"
+        );
+        assert_eq!(
+            fetch_redirect_location_not_ascii("https://a/x", &chain).message(),
+            "NET_FETCH(\"https://a/x\") redirect Location is not visible ASCII: boom"
         );
         assert_eq!(
             no_cli_mapping("NET_LISTEN", &VirtualEndpoint::Name("web".to_string())).message(),

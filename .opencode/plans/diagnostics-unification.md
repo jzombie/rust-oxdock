@@ -2752,6 +2752,27 @@ transport, so this phase is mechanical:
    green; net plus ssh clippy zero on touched files
    (remaining warnings pre-existing in process/core),
    fmt clean on three files.
+   fetch bulk 2026-11-27 (net fetch.rs plus net diagnostics,
+   2 new net.fetch.* ctors): split_scheme plus check_url plus
+   fetch_text_with_options flip to DiagnosticResult; all
+   anyhow::Error::new wrappers and every with_context layer
+   drop; anyhow import drops from fetch.rs (three
+   fully-qualified anyhow::Error::from/new wraps remain as
+   the grandfathered foreign-error shape for the
+   &anyhow::Error ctor params). New ctors follow the net
+   inline family: fetch_request_failed (shared by the
+   initial call and the body read, which retire the same
+   "failed" context text: one key, one mode) plus
+   fetch_redirect_location_not_ascii. &anyhow::Error is
+   deliberate here, not a bridge to normalize: ureq::Error
+   carries chained sources, so anyhow's {:#} chain walk is
+   the only rendering proven byte-identical to the retired
+   layers; a concrete &ureq::Error param would risk
+   flattening via ureq's own Display. Test pins added to the
+   key-uniqueness plus canonical-wording tests. The
+   funcs.rs NET_FETCH caller stays anyhow by design and
+   holds via blanket From. net lib 38 plus net integration
+   38 green; net clippy zero, fmt clean on both files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
