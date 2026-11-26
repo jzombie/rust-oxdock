@@ -11,10 +11,10 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use oxdock_diagnostics::DiagnosticResult;
 
 use super::command::format_duration;
-use super::tag::FLOAT_TYPE_NAME;
+use super::diagnostics::{render_no_literal_form, render_non_finite_float};
 use super::value::Value;
 
 /// Canonical DSL string escaping: the exact inverse of the runtime string
@@ -52,9 +52,9 @@ pub fn escape_dsl_string(raw: &str) -> String {
 /// `MAP` rendered of scalars. `DURATION` renders quoted in its `30s`
 /// shape; a nested duration arrives as `STRING` on reparse (only a
 /// top-level `LET $d: DURATION` declaration drives coercion), which the
-/// renderer documents rather than hides. Everything else bails naming
+/// renderer documents rather than hides. Everything else fails naming
 /// the type.
-pub fn render_dsl_literal(value: &Value) -> Result<String> {
+pub fn render_dsl_literal(value: &Value) -> DiagnosticResult<String> {
     match value {
         _ if value.as_i64().is_some() => Ok(value.as_i64().unwrap_or(0).to_string()),
         _ if value.as_f64().is_some() => render_float(value.as_f64().unwrap_or(0.0)),
@@ -82,19 +82,16 @@ pub fn render_dsl_literal(value: &Value) -> Result<String> {
             }
             Ok(format!("{{{}}}", entries.join(", ")))
         }
-        _ => bail!(
-            "value of type {} has no DSL literal form",
-            value.type_name()
-        ),
+        _ => Err(render_no_literal_form(value.type_name())),
     }
 }
 
 /// Render one float so it reparses as `FLOAT`: Rust prints integral
 /// floats without a point (`3`), which the parser reads as `INT`.
-/// Non-finite values have no literal form and bail loudly.
-fn render_float(raw: f64) -> Result<String> {
+/// Non-finite values have no literal form and fail loudly.
+fn render_float(raw: f64) -> DiagnosticResult<String> {
     if !raw.is_finite() {
-        bail!("non-finite {FLOAT_TYPE_NAME} has no DSL literal form");
+        return Err(render_non_finite_float());
     }
     let mut text = format!("{raw}");
     if !text.contains('.') {
@@ -111,7 +108,7 @@ pub fn render_quoted(raw: &str) -> String {
     format!("\"{}\"", escape_dsl_string(raw))
 }
 
-fn render_compound_item(value: &Value) -> Result<String> {
+fn render_compound_item(value: &Value) -> DiagnosticResult<String> {
     if value.as_duration().is_some() {
         let text = format_duration(&value.as_duration().unwrap_or(Duration::from_secs(0)));
         return Ok(render_quoted(&text));

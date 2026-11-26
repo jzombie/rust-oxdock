@@ -2549,6 +2549,18 @@ transport, so this phase is mechanical:
    via e.to_string. Parser 267+303 plus core lib 410 plus
    integration 629 green; parser clippy zero, fmt clean on all
    three touched files.
+   literal-render bulk 2026-11-27 (parser-only, file-sized): two
+   new dsl.render.* ctors with key plus wording pins
+   (render_no_literal_form, render_non_finite_float).
+   literal.rs render_dsl_literal, render_compound_item, and
+   render_float flip to DiagnosticResult; anyhow and bail imports
+   drop, as does the now-unused FLOAT_TYPE_NAME import (the type
+   name lives in the ctor now). The remote.rs with_context site
+   holds unchanged: anyhow Context covers DiagnosticResult, and
+   the closure already returns the typed
+   eval_remote_unrenderable_var layer. Parser 267+303 plus core
+   lib 410 plus integration 629 green; parser clippy zero, fmt
+   clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

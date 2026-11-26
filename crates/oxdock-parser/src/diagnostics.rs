@@ -1070,6 +1070,29 @@ pub fn assignment_requires_key_value() -> Diagnostic {
     )
 }
 
+/// Value whose type has no DSL literal form. Takes the runtime type
+/// name; wording lives here. Bytes stay identical to the legacy
+/// bail.
+pub fn render_no_literal_form(actual: &str) -> Diagnostic {
+    let message = format!("value of type {actual} has no DSL literal form");
+    Diagnostic::new(
+        "dsl.render.no_literal_form",
+        message,
+        Diagnostic::make_fields(&[("actual", actual)]),
+    )
+}
+
+/// Non-finite float, which cannot round-trip through the parser.
+/// Parameterless: the type name is a shared constant.
+pub fn render_non_finite_float() -> Diagnostic {
+    let message = format!("non-finite {FLOAT_TYPE_NAME} has no DSL literal form");
+    Diagnostic::new(
+        "dsl.render.non_finite_float",
+        message,
+        Diagnostic::make_fields(&[]),
+    )
+}
+
 /// `LIST_APPEND` without a LIST variable.
 pub fn list_append_requires_list() -> Diagnostic {
     Diagnostic::new(
@@ -1406,6 +1429,8 @@ mod tests {
             expected_one_of(&["A", "B"], "x").key(),
             expected_var_expression("f()").key(),
             assignment_requires_key_value().key(),
+            render_no_literal_form("HANDLE").key(),
+            render_non_finite_float().key(),
             needs_value("ECHO").key(),
             env_requires_assignment().key(),
             env_bad_format().key(),
@@ -1583,6 +1608,14 @@ mod tests {
         assert_eq!(
             assignment_requires_key_value().message(),
             "assignment requires KEY=value format"
+        );
+        assert_eq!(
+            render_no_literal_form("HANDLE").message(),
+            "value of type HANDLE has no DSL literal form"
+        );
+        assert_eq!(
+            render_non_finite_float().message(),
+            "non-finite FLOAT has no DSL literal form"
         );
     }
 
