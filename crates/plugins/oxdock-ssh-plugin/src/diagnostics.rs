@@ -423,6 +423,132 @@ pub fn authentication_rejected(func: &str) -> Diagnostic {
     )
 }
 
+/// Dial failed. Takes the invoking func (`SSH_EXEC` /
+/// `SSH_CONNECT`: same failure mode, one key) plus the underlying
+/// failure; the russh connect boundary surfaces `anyhow::Error`,
+/// so the outer stays bare while the cause rides an I/O-chained
+/// source. Call sites stay `format!`-free.
+pub fn dial_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "ssh.dial_failed",
+        format!("{func} dial failed"),
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// Authentication exchange failed. Takes the invoking func
+/// (`SSH_EXEC` / `SSH_CONNECT`: same failure mode, one key) plus
+/// the concrete failure by value; bare outer plus chained source.
+pub fn auth_exchange_failed(
+    func: &str,
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.auth.exchange_failed",
+        format!("{func} authentication exchange failed"),
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// Channel open failed. Takes the invoking func (`SSH_EXEC` /
+/// `SSH_CONNECT`: same failure mode, one key) plus the concrete
+/// failure by value; bare outer plus chained source.
+pub fn channel_open_failed(
+    func: &str,
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.channel.open_failed",
+        format!("{func} channel open failed"),
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// `SSH_EXEC` exec request failed. Takes the concrete failure by
+/// value; bare outer plus chained source.
+pub fn exec_request_failed(reason: impl std::error::Error + Send + Sync + 'static) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.exec.request_failed",
+        "SSH_EXEC exec request failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// `SSH_CONNECT` shell request failed. Takes the concrete failure
+/// by value; bare outer plus chained source.
+pub fn shell_request_failed(reason: impl std::error::Error + Send + Sync + 'static) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.connect.shell_request_failed",
+        "SSH_CONNECT shell request failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// Listener socket cannot go non-blocking for the runtime. Takes
+/// the concrete failure by value; bare outer plus chained source.
+/// The legacy wording stays byte-identical (no func prefix).
+pub fn listener_prepare_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.serve.listener_prepare_failed",
+        "prepare listener for the runtime".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// Listener socket cannot hand to the runtime. Takes the concrete
+/// failure by value; bare outer plus chained source.
+pub fn listener_handoff_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.serve.listener_handoff_failed",
+        "hand listener to the runtime".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// SSH listener failed. Takes the concrete failure by value; bare
+/// outer plus chained source.
+pub fn listener_failed(reason: impl std::error::Error + Send + Sync + 'static) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.serve.listener_failed",
+        "SSH listener failed".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// SSH client runtime failed to build. Takes the concrete failure
+/// by value; bare outer plus chained source.
+pub fn client_runtime_build_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.client_runtime.build_failed",
+        "build SSH client runtime".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
 /// Session pump ends already taken by `SSH_SEND_EXIT_STATUS`.
 /// Parameterless: the wording is fixed.
 pub fn session_pump_already_finished() -> Diagnostic {
@@ -849,6 +975,15 @@ mod tests {
             pump_target_write_failed(io_err("boom")).key(),
             pump_target_flush_failed(io_err("boom")).key(),
             authentication_rejected("SSH_EXEC").key(),
+            dial_failed("SSH_EXEC", &anyhow::anyhow!("boom")).key(),
+            auth_exchange_failed("SSH_EXEC", io_err("boom")).key(),
+            channel_open_failed("SSH_EXEC", io_err("boom")).key(),
+            exec_request_failed(io_err("boom")).key(),
+            shell_request_failed(io_err("boom")).key(),
+            listener_prepare_failed(io_err("boom")).key(),
+            listener_handoff_failed(io_err("boom")).key(),
+            listener_failed(io_err("boom")).key(),
+            client_runtime_build_failed(io_err("boom")).key(),
             session_pump_already_finished().key(),
             session_wire_queue_saturated().key(),
             session_wire_writer_gone().key(),
@@ -897,6 +1032,18 @@ mod tests {
         assert_eq!(
             authentication_rejected("SSH_EXEC").key(),
             authentication_rejected("SSH_CONNECT").key()
+        );
+        assert_eq!(
+            dial_failed("SSH_EXEC", &anyhow::anyhow!("boom")).key(),
+            dial_failed("SSH_CONNECT", &anyhow::anyhow!("boom")).key()
+        );
+        assert_eq!(
+            auth_exchange_failed("SSH_EXEC", io_err("boom")).key(),
+            auth_exchange_failed("SSH_CONNECT", io_err("boom")).key()
+        );
+        assert_eq!(
+            channel_open_failed("SSH_EXEC", io_err("boom")).key(),
+            channel_open_failed("SSH_CONNECT", io_err("boom")).key()
         );
         assert_eq!(
             dequeue_task_cancelled("SSH_DEQUEUE").key(),
@@ -1168,6 +1315,102 @@ mod tests {
         assert_eq!(
             authentication_rejected("SSH_EXEC").message(),
             "SSH_EXEC authentication rejected"
+        );
+        assert_eq!(
+            dial_failed("SSH_EXEC", &anyhow::anyhow!("boom")).message(),
+            "SSH_EXEC dial failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(dial_failed("SSH_EXEC", &anyhow::anyhow!("boom")))
+            ),
+            "SSH_EXEC dial failed: boom"
+        );
+        assert_eq!(
+            auth_exchange_failed("SSH_EXEC", io_err("boom")).message(),
+            "SSH_EXEC authentication exchange failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(auth_exchange_failed("SSH_EXEC", io_err("boom")))
+            ),
+            "SSH_EXEC authentication exchange failed: boom"
+        );
+        assert_eq!(
+            channel_open_failed("SSH_EXEC", io_err("boom")).message(),
+            "SSH_EXEC channel open failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(channel_open_failed("SSH_EXEC", io_err("boom")))
+            ),
+            "SSH_EXEC channel open failed: boom"
+        );
+        assert_eq!(
+            exec_request_failed(io_err("boom")).message(),
+            "SSH_EXEC exec request failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(exec_request_failed(io_err("boom")))
+            ),
+            "SSH_EXEC exec request failed: boom"
+        );
+        assert_eq!(
+            shell_request_failed(io_err("boom")).message(),
+            "SSH_CONNECT shell request failed"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(shell_request_failed(io_err("boom")))
+            ),
+            "SSH_CONNECT shell request failed: boom"
+        );
+        assert_eq!(
+            listener_prepare_failed(io_err("boom")).message(),
+            "prepare listener for the runtime"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(listener_prepare_failed(io_err("boom")))
+            ),
+            "prepare listener for the runtime: boom"
+        );
+        assert_eq!(
+            listener_handoff_failed(io_err("boom")).message(),
+            "hand listener to the runtime"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(listener_handoff_failed(io_err("boom")))
+            ),
+            "hand listener to the runtime: boom"
+        );
+        assert_eq!(
+            listener_failed(io_err("boom")).message(),
+            "SSH listener failed"
+        );
+        assert_eq!(
+            format!("{:#}", anyhow::Error::new(listener_failed(io_err("boom")))),
+            "SSH listener failed: boom"
+        );
+        assert_eq!(
+            client_runtime_build_failed(io_err("boom")).message(),
+            "build SSH client runtime"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(client_runtime_build_failed(io_err("boom")))
+            ),
+            "build SSH client runtime: boom"
         );
         assert_eq!(
             session_pump_already_finished().message(),

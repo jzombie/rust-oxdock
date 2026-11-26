@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::diagnostics as ssh_diag;
 use bytes::Bytes;
@@ -59,7 +59,7 @@ pub async fn run_remote_exec(
     command: Vec<u8>,
     timeout: Duration,
     max_bytes: usize,
-) -> Result<ExecOutcome> {
+) -> DiagnosticResult<ExecOutcome> {
     #[derive(Default)]
     struct Shared {
         stdout: Vec<u8>,
@@ -76,24 +76,22 @@ pub async fn run_remote_exec(
         });
         let mut session = russh::client::connect(config, *target, AcceptAnyHostKey)
             .await
-            .context("SSH_EXEC dial failed")?;
+            .map_err(|e| ssh_diag::dial_failed("SSH_EXEC", &e))?;
         let authenticated = session
             .authenticate_password(username, password)
             .await
-            .context("SSH_EXEC authentication exchange failed")?;
+            .map_err(|e| ssh_diag::auth_exchange_failed("SSH_EXEC", e))?;
         if !matches!(authenticated, russh::client::AuthResult::Success) {
-            return Err(anyhow::Error::new(ssh_diag::authentication_rejected(
-                "SSH_EXEC",
-            )));
+            return Err(ssh_diag::authentication_rejected("SSH_EXEC"));
         }
         let mut channel = session
             .channel_open_session()
             .await
-            .context("SSH_EXEC channel open failed")?;
+            .map_err(|e| ssh_diag::channel_open_failed("SSH_EXEC", e))?;
         channel
             .exec(true, command)
             .await
-            .context("SSH_EXEC exec request failed")?;
+            .map_err(ssh_diag::exec_request_failed)?;
         let mut eof = false;
         // Messages arrive in channel order, so everything before
         // `ExitStatus` is already collected when it lands. Success acks
@@ -145,7 +143,7 @@ pub async fn run_remote_exec(
         let _ = session
             .disconnect(russh::Disconnect::ByApplication, "", "")
             .await;
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, oxdock_diagnostics::Diagnostic>(())
     })
     .await;
     let mut guard = shared.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -212,7 +210,7 @@ async fn serve_async(
     queue: Arc<SessionQueue>,
     shutdown_rx: std::sync::mpsc::Receiver<ShutdownSignal>,
     inactivity_timeout: Option<Duration>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let config = Arc::new(russh::server::Config {
         inactivity_timeout,
         // Rejection padding stays (user-enumeration resistance), but
@@ -227,9 +225,9 @@ async fn serve_async(
     let mut factory = ServerFactory::new(user, password, queue);
     listener
         .set_nonblocking(true)
-        .context("prepare listener for the runtime")?;
+        .map_err(ssh_diag::listener_prepare_failed)?;
     let listener =
-        tokio::net::TcpListener::from_std(listener).context("hand listener to the runtime")?;
+        tokio::net::TcpListener::from_std(listener).map_err(ssh_diag::listener_handoff_failed)?;
     let running = factory.run_on_socket(config, &listener);
     let handle = running.handle();
     // `spawn_blocking` bridges the sync shutdown signal into the runtime.
@@ -238,7 +236,7 @@ async fn serve_async(
         tokio::task::spawn_blocking(move || shutdown_rx.recv().map(|_| ()).map_err(|_| ()));
     tokio::select! {
         result = running => {
-            result.context("SSH listener failed")?;
+            result.map_err(ssh_diag::listener_failed)?;
         }
         _ = waiter => {
             handle.shutdown("SSH_CLOSE".to_string());
@@ -257,7 +255,7 @@ impl russh::client::Handler for AcceptAnyHostKey {
     async fn check_server_key(
         &mut self,
         _server_public_key: &russh::keys::PublicKeyOrCertificate,
-    ) -> Result<bool> {
+    ) -> anyhow::Result<bool> {
         Ok(true)
     }
 }
@@ -284,12 +282,12 @@ pub struct OutboundSession {
 /// A single-worker multi-thread runtime (not current-thread) is required:
 /// `block_on` runs setup from the calling thread while spawned wire tasks
 /// keep driving the queues during the synchronous pump.
-pub fn connect_runtime() -> Result<tokio::runtime::Runtime> {
+pub fn connect_runtime() -> DiagnosticResult<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .build()
-        .context("build SSH client runtime")
+        .map_err(ssh_diag::client_runtime_build_failed)
 }
 
 /// Connect to `target` with `username`/`password` and open a shell
@@ -298,31 +296,29 @@ pub async fn connect_session(
     target: &SocketAddr,
     username: &str,
     password: &str,
-) -> Result<OutboundSession> {
+) -> DiagnosticResult<OutboundSession> {
     let config = Arc::new(russh::client::Config {
         inactivity_timeout: Some(DEFAULT_INACTIVITY_TIMEOUT),
         ..Default::default()
     });
     let mut session = russh::client::connect(config, *target, AcceptAnyHostKey)
         .await
-        .context("SSH_CONNECT dial failed")?;
+        .map_err(|e| ssh_diag::dial_failed("SSH_CONNECT", &e))?;
     let authenticated = session
         .authenticate_password(username, password)
         .await
-        .context("SSH_CONNECT authentication exchange failed")?;
+        .map_err(|e| ssh_diag::auth_exchange_failed("SSH_CONNECT", e))?;
     if !matches!(authenticated, russh::client::AuthResult::Success) {
-        return Err(anyhow::Error::new(ssh_diag::authentication_rejected(
-            "SSH_CONNECT",
-        )));
+        return Err(ssh_diag::authentication_rejected("SSH_CONNECT"));
     }
     let channel = session
         .channel_open_session()
         .await
-        .context("SSH_CONNECT channel open failed")?;
+        .map_err(|e| ssh_diag::channel_open_failed("SSH_CONNECT", e))?;
     channel
         .request_shell(true)
         .await
-        .context("SSH_CONNECT shell request failed")?;
+        .map_err(ssh_diag::shell_request_failed)?;
     let (mut reader, writer) = channel.split();
 
     let (up_tx, up_rx) = mpsc::channel(CHANNEL_CAPACITY);

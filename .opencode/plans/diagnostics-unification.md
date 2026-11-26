@@ -2611,6 +2611,22 @@ transport, so this phase is mechanical:
    ssh lib 13 plus invalid_host_key pin plus parser 267+303
    plus core lib 410 plus integration 629 green; ssh clippy
    zero, fmt clean on three touched files.
+   ssh-runtime bulk 2026-11-27 (runtime.rs plus ssh
+   diagnostics): nine new ssh.* ctors with key plus wording
+   plus {:#} chain pins (dial/auth/channel shared across
+   SSH_EXEC/SSH_CONNECT via func field, exec/shell request,
+   listener prepare/handoff/failed, client runtime build).
+   All twelve runtime .context sites go bare-outer plus
+   chained source (concrete russh/io by value via Arc,
+   anyhow connect inners by borrow via io::Error::other).
+   Shared-mode pins prove dial/auth/channel keep one key
+   across legs. runtime flips run_remote_exec/serve_async/
+   connect_runtime/connect_session to DiagnosticResult;
+   Handler keeps anyhow::Error (russh boundary). funcs.rs
+   callers hold via blanket From. ssh lib 13 plus
+   invalid_host_key pin plus parser 267+303 plus core lib
+   410 plus integration 629 green; ssh clippy zero, fmt
+   clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
