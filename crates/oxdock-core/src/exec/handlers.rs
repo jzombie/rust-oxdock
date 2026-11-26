@@ -1409,8 +1409,10 @@ pub(super) fn read<P: ProcessManager>(
             let n = {
                 let mut guard = input_stream
                     .lock()
-                    .map_err(|_| anyhow!("failed to lock stdin for {KEYWORD_READ}"))?;
-                guard.read(&mut buf).context("failed to read from stdin")?
+                    .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_READ)))?;
+                guard
+                    .read(&mut buf)
+                    .map_err(|e| anyhow::Error::new(diag::eval_stdin_read_failed(None, &e)))?
             };
             if n == 0 {
                 break;
@@ -1438,8 +1440,10 @@ pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -
         let n = {
             let mut guard = input_stream
                 .lock()
-                .map_err(|_| anyhow!("failed to lock stdin for {KEYWORD_READ_LINE}"))?;
-            guard.read(&mut byte).context("failed to read from stdin")?
+                .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_READ_LINE)))?;
+            guard
+                .read(&mut byte)
+                .map_err(|e| anyhow::Error::new(diag::eval_stdin_read_failed(None, &e)))?
         };
         if n == 0 {
             break;
@@ -1567,7 +1571,7 @@ pub(super) fn write<P: ProcessManager>(
         };
         let mut guard = input_stream
             .lock()
-            .map_err(|_| anyhow!("failed to lock stdin for {KEYWORD_WRITE}"))?;
+            .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_WRITE)))?;
         let mut writer = cx
             .state
             .fs
@@ -1575,9 +1579,9 @@ pub(super) fn write<P: ProcessManager>(
             .with_context(|| format!("failed to open {} for writing", target.display()))?;
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
-            let n = guard
-                .read(&mut buf)
-                .with_context(|| format!("failed to read from stdin for {KEYWORD_WRITE}"))?;
+            let n = guard.read(&mut buf).map_err(|e| {
+                anyhow::Error::new(diag::eval_stdin_read_failed(Some(KEYWORD_WRITE), &e))
+            })?;
             if n == 0 {
                 break;
             }
@@ -1618,7 +1622,7 @@ pub(super) fn append<P: ProcessManager>(
         };
         let mut guard = input_stream
             .lock()
-            .map_err(|_| anyhow!("failed to lock stdin for {KEYWORD_APPEND}"))?;
+            .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_APPEND)))?;
         let mut writer = cx
             .state
             .fs
@@ -1626,9 +1630,9 @@ pub(super) fn append<P: ProcessManager>(
             .with_context(|| format!("failed to open {} for appending", target.display()))?;
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
-            let n = guard
-                .read(&mut buf)
-                .with_context(|| format!("failed to read from stdin for {KEYWORD_APPEND}"))?;
+            let n = guard.read(&mut buf).map_err(|e| {
+                anyhow::Error::new(diag::eval_stdin_read_failed(Some(KEYWORD_APPEND), &e))
+            })?;
             if n == 0 {
                 break;
             }
@@ -1706,10 +1710,12 @@ pub(super) fn replace<P: ProcessManager>(
             };
             let mut guard = input_stream
                 .lock()
-                .map_err(|_| anyhow!("failed to lock stdin for {KEYWORD_EXPAND}"))?;
+                .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_EXPAND)))?;
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
-                let n = guard.read(&mut buf).context("failed to read from stdin")?;
+                let n = guard
+                    .read(&mut buf)
+                    .map_err(|e| anyhow::Error::new(diag::eval_stdin_read_failed(None, &e)))?;
                 if n == 0 {
                     break;
                 }
@@ -1905,13 +1911,13 @@ pub(super) fn assert_equality<P: ProcessManager>(
 fn drain_stdin_bounded(input_stream: SharedInput, verb: &str) -> Result<Vec<u8>> {
     let mut guard = input_stream
         .lock()
-        .map_err(|_| anyhow!("failed to lock stdin for {verb}"))?;
+        .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(verb)))?;
     let mut out = Vec::new();
     let mut buf = [0u8; super::io::CHUNK_SIZE];
     loop {
         let n = guard
             .read(&mut buf)
-            .with_context(|| format!("failed to read from stdin for {verb}"))?;
+            .map_err(|e| anyhow::Error::new(diag::eval_stdin_read_failed(Some(verb), &e)))?;
         if n == 0 {
             break;
         }
@@ -1994,14 +2000,14 @@ pub(super) fn assert_contains<P: ProcessManager>(
             if let CommandStdin::Stream(input_stream) = cx.stdin.clone() {
                 let mut guard = input_stream
                     .lock()
-                    .map_err(|_| anyhow!("failed to lock stdin for {verb}"))?;
+                    .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(verb)))?;
                 let mut window = super::io::SlidingWindow::new(needle_str.as_bytes().to_vec());
                 let mut buf = [0u8; super::io::CHUNK_SIZE];
                 let mut read_any = false;
                 loop {
-                    let n = guard
-                        .read(&mut buf)
-                        .context(format!("failed to read from stdin for {verb}"))?;
+                    let n = guard.read(&mut buf).map_err(|e| {
+                        anyhow::Error::new(diag::eval_stdin_read_failed(Some(verb), &e))
+                    })?;
                     if n == 0 {
                         break;
                     }

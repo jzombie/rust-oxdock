@@ -1509,6 +1509,43 @@ pub fn eval_flow_crosses_remote(step: usize, word: &str) -> Diagnostic {
     )
 }
 
+/// Stdin stream lock poisoned (a worker thread panicked while holding
+/// it). Takes the invoking verb; every site reports the same shape,
+/// so one key covers READ, READ_LINE, WRITE, APPEND, EXPAND, and the
+/// assert drain paths. The poison flag carries no detail, so no
+/// source rides along.
+pub fn eval_stdin_lock_failed(func: &str) -> Diagnostic {
+    let message = format!("failed to lock stdin for {func}");
+    Diagnostic::new(
+        "dsl.eval.stdin_lock_failed",
+        message,
+        Diagnostic::make_fields(&[("func", func)]),
+    )
+}
+
+/// Stdin chunk read failure. Takes the invoking verb when the message
+/// names one (`None` for the bare READ/READ_LINE/EXPAND paths) and
+/// the underlying I/O failure; the text is inlined, so no source
+/// rides along. One key covers both shapes, mirroring
+/// `eval_async_exit_status` and its optional task field.
+pub fn eval_stdin_read_failed(func: Option<&str>, reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = match func {
+        Some(verb) => format!("failed to read from stdin for {verb}: {reason_text}"),
+        None => format!("failed to read from stdin: {reason_text}"),
+    };
+    let mut fields: Vec<(&str, &str)> = Vec::with_capacity(2);
+    if let Some(verb) = func {
+        fields.push(("func", verb));
+    }
+    fields.push(("reason", &reason_text));
+    Diagnostic::new(
+        "dsl.eval.stdin_read_failed",
+        message,
+        Diagnostic::make_fields(&fields),
+    )
+}
+
 /// `int`-typed argument whose resolution failed. Takes the underlying
 /// failure verbatim: its message already names the argument and the
 /// cause, so no wrapper is added.
@@ -4246,6 +4283,8 @@ mod tests {
             eval_with_io_unexpanded().key(),
             eval_async_cancelled().key(),
             eval_flow_crosses_remote(1, "BREAK").key(),
+            eval_stdin_lock_failed("READ").key(),
+            eval_stdin_read_failed(None, &std::io::Error::other("x")).key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -4561,6 +4600,18 @@ mod tests {
         assert_eq!(
             eval_flow_crosses_remote(3, "BREAK").message(),
             "step 3: BREAK cannot cross a REMOTE boundary"
+        );
+        assert_eq!(
+            eval_stdin_lock_failed("READ").message(),
+            "failed to lock stdin for READ"
+        );
+        assert_eq!(
+            eval_stdin_read_failed(None, &std::io::Error::other("boom")).message(),
+            "failed to read from stdin: boom"
+        );
+        assert_eq!(
+            eval_stdin_read_failed(Some("WRITE"), &std::io::Error::other("boom")).message(),
+            "failed to read from stdin for WRITE: boom"
         );
         assert!(
             eval_async_exit_status(None, &exit_status_sample())

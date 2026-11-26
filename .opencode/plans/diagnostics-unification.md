@@ -1877,6 +1877,34 @@ transport, so this phase is mechanical:
    process 121, fs 71 green; clippy at
    baseline, fmt clean on all touched
    files.
+   Stdin failure-cluster bulk step 2026-11-26
+   (file-sized batch): two new dsl.eval.*
+   ctors with key plus wording pins
+   (eval_stdin_lock_failed with func field
+   covers all 7 poison sites: READ,
+   READ_LINE, WRITE, APPEND, EXPAND plus
+   the two verb-generic assert drains;
+   eval_stdin_read_failed with optional
+   func plus io reason covers all 7 read
+   sites, mirroring the
+   eval_async_exit_status Option-field
+   precedent: bare READ/READ_LINE/EXPAND
+   paths pass None, WRITE/APPEND/drain/
+   assert paths pass Some(verb)). All 14
+   sites re-keyed through anyhow::Error::new
+   shims (enclosing fns stay anyhow::Result
+   until the execute_steps chain flips;
+   matches the std_assert_lock_poisoned
+   precedent). Io ctors render {reason}
+   inline with no with_source (text
+   inlined per contract); lock ctor takes
+   no source (poison flag carries no
+   detail). Bytes identical (no test pins
+   the strings; anyhow chain Display
+   matches the inlined rendering). Core
+   410 plus integration 629 green; clippy
+   at baseline (core 3 pre-existing),
+   fmt clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
