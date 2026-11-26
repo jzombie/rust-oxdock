@@ -19,7 +19,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use oxdock_core::{FuncMeta, McpSession, StreamChunk, StreamHook, TeeStream, Value};
 use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::{GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs};
@@ -336,7 +336,8 @@ impl OxDockHandler {
 /// Build the lazy session filesystem plus its backing-dir hold. The hold
 /// must outlive the session, so it rides in `HandlerInner`.
 pub fn session_fs(root: &GuardedPath) -> Result<(Box<dyn WorkspaceFs>, Arc<LazyGuardedTempDir>)> {
-    let mut resolver = PathResolver::new_lazy(root.clone()).context("guard workspace root")?;
+    let mut resolver = PathResolver::new_lazy(root.clone())
+        .map_err(|err| anyhow::Error::new(mcp_diag::session_guard_workspace_root(&err)))?;
     resolver.set_workspace_root(root.clone());
     let hold = resolver.snapshot_handle();
     Ok((Box::new(resolver), hold))
@@ -348,7 +349,8 @@ pub fn session_fs(root: &GuardedPath) -> Result<(Box<dyn WorkspaceFs>, Arc<LazyG
 /// rooting the read at the path itself keeps reload working there.
 fn read_guarded(path: &GuardedPath) -> Result<String> {
     let anchor = path.root();
-    let resolver = PathResolver::new(anchor, anchor).context("guard script root")?;
+    let resolver = PathResolver::new(anchor, anchor)
+        .map_err(|err| anyhow::Error::new(mcp_diag::session_guard_script_root(&err)))?;
     resolver.read_to_string(path)
 }
 

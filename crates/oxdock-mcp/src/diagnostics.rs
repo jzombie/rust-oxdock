@@ -145,6 +145,30 @@ pub fn session_lock_poisoned_reload() -> Diagnostic {
     )
 }
 
+/// Session filesystem guard root rejected. Takes the underlying
+/// failure and renders its chain inline.
+pub fn session_guard_workspace_root(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("guard workspace root: {reason_text}");
+    Diagnostic::new(
+        "mcp.session.guard_workspace_root",
+        message,
+        Diagnostic::make_fields(&[(FIELD_REASON, &reason_text)]),
+    )
+}
+
+/// Script-read guard root rejected. Takes the underlying failure and
+/// renders its chain inline.
+pub fn session_guard_script_root(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("guard script root: {reason_text}");
+    Diagnostic::new(
+        "mcp.session.guard_script_root",
+        message,
+        Diagnostic::make_fields(&[(FIELD_REASON, &reason_text)]),
+    )
+}
+
 /// MCP session lock poisoned during a tool call. Takes the tool name;
 /// quoting lives here.
 pub fn session_lock_poisoned_call(name: &str) -> Diagnostic {
@@ -212,6 +236,8 @@ mod tests {
             export_no_entries().key(),
             session_lock_poisoned_reload().key(),
             session_lock_poisoned_call("FOO").key(),
+            session_guard_workspace_root(&err).key(),
+            session_guard_script_root(&err).key(),
             stdio_serve_failed(&err).key(),
             stdio_service_failed(&err).key(),
             serve_runtime_build_failed(&err).key(),
@@ -224,6 +250,7 @@ mod tests {
 
     #[test]
     fn messages_match_canonical_wording() {
+        let err = anyhow::anyhow!("boom");
         assert_eq!(
             tool_duplicate_name("FOO").message(),
             "duplicate MCP tool name `FOO`"
@@ -269,10 +296,22 @@ mod tests {
             session_lock_poisoned_call("FOO").message(),
             "MCP session lock poisoned during `FOO`"
         );
+        assert_eq!(
+            session_guard_workspace_root(&err).message(),
+            "guard workspace root: boom"
+        );
+        assert_eq!(
+            session_guard_script_root(&err).message(),
+            "guard script root: boom"
+        );
         let err = anyhow::anyhow!("gone");
         assert_eq!(
             stdio_serve_failed(&err).message(),
             "MCP stdio serve failed: gone"
+        );
+        assert_eq!(
+            stdio_service_failed(&err).message(),
+            "MCP stdio service failed: gone"
         );
     }
 }

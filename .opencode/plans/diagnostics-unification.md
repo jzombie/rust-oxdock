@@ -2898,6 +2898,20 @@ transport, so this phase is mechanical:
    (key-uniqueness rides the existing table's seen-set).
    cli lib 49 green; cli clippy zero, fmt clean on both files;
    anyhow Context import drops from serve.rs.
+   mcp guards bulk 2026-11-27 (oxdock-mcp server.rs plus
+   diagnostics, 2 new mcp.session.* ctors): converts both
+   bare-string guard contexts (session_fs plus read_guarded);
+   every site is a map_err to Error::new(ctor) (signatures stay
+   anyhow: session_fs is a pub boundary re-exported for CLI
+   wiring, and bare ? propagations need no change). New ctors
+   follow the file's inline family ({reason:#}):
+   session_guard_workspace_root plus session_guard_script_root
+   (both &anyhow::Error: PathResolver construction chains).
+   Pins added to key-uniqueness plus canonical-wording tests
+   (plus a bonus stdio_service_failed wording pin alongside
+   the existing serve pin). mcp lib 11 plus session 26 plus
+   tools 13 green; mcp clippy zero, fmt clean on both files;
+   anyhow Context import drops from server.rs.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
