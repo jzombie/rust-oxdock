@@ -2061,6 +2061,31 @@ pub fn eval_workdir_resolve_failed(reason: &anyhow::Error) -> Diagnostic {
     )
 }
 
+/// Session scratch hierarchy failing to materialize (root plus
+/// `tmp` for seeded `HOME`/`TMPDIR`). Takes the underlying failure
+/// verbatim; every spawn choke point shares this one key.
+pub fn eval_scratch_materialize_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.eval.scratch_materialize_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// Live-task cap refusing a spawn. Takes the configured maximum;
+/// the call site passes the shared constant, so no number is
+/// hardcoded here.
+pub fn eval_task_cap_exceeded(max: u64) -> Diagnostic {
+    let message =
+        format!("concurrency limit exceeded: maximum of {max} running background tasks allowed");
+    Diagnostic::new(
+        "dsl.eval.task_cap_exceeded",
+        message,
+        Diagnostic::make_fields(&[("max", &max.to_string())]),
+    )
+}
+
 /// `FORMAT_BYTE_COUNT` with a negative count.
 pub fn std_format_byte_count_negative(bytes: i64) -> Diagnostic {
     let message = format!("{FUNC_FORMAT_BYTE_COUNT} needs a non-negative byte count, got {bytes}");
@@ -4086,6 +4111,8 @@ mod tests {
             eval_list_not_list("x", "STRING").key(),
             eval_list_value_not_list("x").key(),
             eval_list_element_failed(&anyhow::anyhow!("x")).key(),
+            eval_scratch_materialize_failed(&anyhow::anyhow!("x")).key(),
+            eval_task_cap_exceeded(64).key(),
             eval_const_arg_keypath().key(),
             eval_const_arg_bare_sigil("foo").key(),
             eval_template_missing_key("foo", false).key(),
@@ -4426,6 +4453,14 @@ mod tests {
         assert_eq!(
             eval_list_element_failed(&anyhow::anyhow!("x")).message(),
             "x"
+        );
+        assert_eq!(
+            eval_scratch_materialize_failed(&anyhow::anyhow!("x")).message(),
+            "x"
+        );
+        assert_eq!(
+            eval_task_cap_exceeded(64).message(),
+            "concurrency limit exceeded: maximum of 64 running background tasks allowed"
         );
         assert_eq!(
             eval_const_arg_keypath().message(),

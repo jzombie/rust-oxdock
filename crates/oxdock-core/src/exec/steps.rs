@@ -486,8 +486,11 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     /// spawn sites that stage children without a `CommandContext`
     /// (PTY): the seeded `HOME`/`TMPDIR` paths must exist when the
     /// guest writes them, even when no `RUN` step ran first.
-    pub fn ensure_scratch_materialized(&self) -> Result<()> {
-        self.state.cargo_scratch.ensure_materialized()
+    pub fn ensure_scratch_materialized(&self) -> DiagnosticResult<()> {
+        self.state
+            .cargo_scratch
+            .ensure_materialized()
+            .map_err(|err| super::diagnostics::eval_scratch_materialize_failed(&err))
     }
 
     /// Current working directory (guarded; stays inside the workspace).

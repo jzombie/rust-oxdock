@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use super::diagnostics as state_diag;
-use anyhow::Result;
 use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs, WorkspaceSelection};
 use oxdock_parser::{Field, GuardExpr, Step, TypeDescriptor, TypeTag, Value, sigil_var};
@@ -804,15 +803,20 @@ impl<P: ProcessManager> ExecState<P> {
         None
     }
 
-    pub(super) fn command_ctx(&self) -> Result<CommandContext> {
+    pub(super) fn command_ctx(&self) -> DiagnosticResult<CommandContext> {
         // Resolve the working directory through the snapshot choke point: a
         // snapshot-rooted cwd materializes here (so `RUN` executes against a
         // real directory) while a local cwd resolves purely lexically with
         // zero I/O. The seeded scratch materializes alongside: `HOME` and
         // `TMPDIR` point at it, so children writing temp or profile data
         // must observe real directories, never lexical candidates.
-        let cwd = self.fs.resolve_write(&self.cwd, ".")?;
-        self.cargo_scratch.ensure_materialized()?;
+        let cwd = self
+            .fs
+            .resolve_write(&self.cwd, ".")
+            .map_err(|err| state_diag::eval_workdir_resolve_failed(&err))?;
+        self.cargo_scratch
+            .ensure_materialized()
+            .map_err(|err| state_diag::eval_scratch_materialize_failed(&err))?;
         Ok(CommandContext::new(
             &cwd.into(),
             Arc::clone(&self.envs),
@@ -829,7 +833,7 @@ impl<P: ProcessManager> ExecState<P> {
     /// so nested spawns cannot bypass the cap that a per-state scan
     /// would miss. Refusal is backpressure: a full host fails the spawn
     /// loudly instead of wedging.
-    pub(super) fn alloc_task_id(&mut self) -> anyhow::Result<u64> {
+    pub(super) fn alloc_task_id(&mut self) -> DiagnosticResult<u64> {
         // Purge cleanly-finished anonymous children first: their threads
         // are gone and a zero exit has no reporter, so retaining them
         // only grows the vec. Failed handles stay for the end-pipeline
@@ -844,11 +848,7 @@ impl<P: ProcessManager> ExecState<P> {
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 (n < MAX_RUNNING_TASKS as u64).then_some(n + 1)
             })
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "concurrency limit exceeded: maximum of {MAX_RUNNING_TASKS} running background tasks allowed"
-                )
-            })?;
+            .map_err(|_| state_diag::eval_task_cap_exceeded(MAX_RUNNING_TASKS as u64))?;
         let id = self.next_task_id.fetch_add(1, Ordering::SeqCst);
         self.sweep_finished_tasks();
         Ok(id)

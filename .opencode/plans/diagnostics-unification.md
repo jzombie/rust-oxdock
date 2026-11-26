@@ -1697,6 +1697,31 @@ transport, so this phase is mechanical:
    blanket conversion. Core 409 plus
    integration 629 green; clippy and fmt
    clean.
+   State tails bulk step 2026-11-26: closes
+   state.rs, two new ctors in
+   exec/diagnostics.rs with key plus wording
+   pins (eval_scratch_materialize_failed
+   verbatim passthrough shared by both spawn
+   choke points; eval_task_cap_exceeded
+   taking the configured maximum from the
+   shared constant at the call site). Three
+   signatures flip: state.rs command_ctx plus
+   alloc_task_id plus steps.rs
+   ensure_scratch_materialized return
+   DiagnosticResult. command_ctx reuses the
+   existing eval_workdir_resolve_failed for
+   the resolve leg; the scratch leg maps via
+   the new passthrough; the cap maps via the
+   new max-taking ctor (test expectation on
+   the concurrency prefix still holds).
+   Drops the now-unused anyhow::Result import
+   from state.rs (const_mutation_error keeps
+   fully-qualified anyhow::Error for the
+   macro boundary). All callers (handlers
+   spawn paths, SSH bridges, alloc tests)
+   hold via ? and expect. Core 409 plus
+   integration 629 green; clippy and fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
