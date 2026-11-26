@@ -78,7 +78,7 @@ use std::collections::{HashMap, HashSet};
 type HomeFuncs = HashMap<(String, String), Vec<(Option<GuardExpr>, FuncInfo)>>;
 
 use anyhow::Result;
-use oxdock_diagnostics::DiagnosticResult;
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::constants::{
     KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_IMPORT, KEYWORD_LET, MODULE_SEPARATOR,
@@ -1446,8 +1446,8 @@ fn coercible_pair(actual: &TypeTag, expected: &TypeTag) -> bool {
 /// sides structurally. The three call sites below reported
 /// byte-identical text before; they share this now so a wording fix
 /// lands once.
-fn exact_mismatch(ctx: &str, expected: &TypeTag, actual: &TypeTag) -> anyhow::Error {
-    anyhow::Error::new(check_diag::check_exact_mismatch(ctx, expected, actual))
+fn exact_mismatch(ctx: &str, expected: &TypeTag, actual: &TypeTag) -> Diagnostic {
+    check_diag::check_exact_mismatch(ctx, expected, actual)
 }
 
 /// Map-kind tags: bare words, fixed shapes, and value shapes alike.
@@ -4722,17 +4722,20 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// value; `Err` where it provably fails — plus the `ANY` gate:
     /// an untyped value into a concrete parameter names the
     /// `LET $x: T` binding that would coerce it.
-    fn check_arg(&mut self, expected: &TypeTag, actual: StaticTy, ctx: &str) -> Result<()> {
+    fn check_arg(
+        &mut self,
+        expected: &TypeTag,
+        actual: StaticTy,
+        ctx: &str,
+    ) -> DiagnosticResult<()> {
         let StaticTy::Ty(actual) = actual else {
-            return Err(anyhow::Error::new(check_diag::check_arg_void(ctx)));
+            return Err(check_diag::check_arg_void(ctx));
         };
         if matches!(expected, TypeTag::Any) {
             return Ok(());
         }
         if matches!(actual, TypeTag::Any) {
-            return Err(anyhow::Error::new(check_diag::check_any_into_concrete(
-                ctx, expected,
-            )));
+            return Err(check_diag::check_any_into_concrete(ctx, expected));
         }
         if tags_equal(expected, &actual) {
             return Ok(());
@@ -4810,7 +4813,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// checks exactly), so mismatches fail here naming the position.
     /// Record comparison is order-free: same names with compatible
     /// types satisfy regardless of declaration order.
-    fn check_exact(expected: &TypeTag, actual: &TypeTag, ctx: &str) -> Result<()> {
+    fn check_exact(expected: &TypeTag, actual: &TypeTag, ctx: &str) -> DiagnosticResult<()> {
         if tags_equal(expected, actual) {
             return Ok(());
         }
@@ -4846,19 +4849,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         // absence here only fails required fields.
                         None if field.optional || field.default.is_some() => {}
                         None => {
-                            return Err(anyhow::Error::new(check_diag::check_missing_field(
-                                ctx,
-                                &field.name,
-                            )));
+                            return Err(check_diag::check_missing_field(ctx, &field.name));
                         }
                     }
                 }
                 for field in a_fields.iter() {
                     if !e_fields.iter().any(|known| known.name == field.name) {
-                        return Err(anyhow::Error::new(check_diag::check_record_unknown_field(
-                            ctx,
-                            &field.name,
-                        )));
+                        return Err(check_diag::check_record_unknown_field(ctx, &field.name));
                     }
                 }
                 Ok(())
