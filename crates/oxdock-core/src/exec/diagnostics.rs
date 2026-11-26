@@ -1410,6 +1410,20 @@ pub fn eval_expected_int(got: &str) -> Diagnostic {
     )
 }
 
+/// Dispatch into a not-yet-migrated `anyhow` layer (placeholder
+/// calls, block bodies, statement/RPN call entries) that returned an
+/// error carrying no keyed diagnostic. Takes the failure verbatim:
+/// keyed diagnostics keep their keys through `lift_dispatch_error`
+/// downcast and never reach here, so this is the rare unkeyed tail.
+pub fn eval_dispatch_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.eval.dispatch_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
 /// `int`-typed argument whose resolution failed. Takes the underlying
 /// failure verbatim: its message already names the argument and the
 /// cause, so no wrapper is added.
@@ -4103,6 +4117,7 @@ mod tests {
             eval_condition_needs_bool(&crate::Value::string("x".to_string())).key(),
             eval_expected_int("x").key(),
             eval_int_arg_resolve(&anyhow::anyhow!("x")).key(),
+            eval_dispatch_failed(&anyhow::anyhow!("x")).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
             coerce_type_mismatch(
@@ -4400,6 +4415,10 @@ mod tests {
         assert_eq!(
             eval_int_arg_resolve(&anyhow::anyhow!("undefined variable `$x`")).message(),
             "undefined variable `$x`"
+        );
+        assert_eq!(
+            eval_dispatch_failed(&anyhow::anyhow!("boom")).message(),
+            "boom"
         );
         assert_eq!(
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).message(),

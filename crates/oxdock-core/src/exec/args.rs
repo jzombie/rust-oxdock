@@ -1,5 +1,5 @@
 use anyhow::Result;
-use oxdock_diagnostics::DiagnosticResult;
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 use oxdock_fs::EntryKind;
 use oxdock_fs::env as oxdock_env;
 use oxdock_fs::to_forward_slashes;
@@ -331,17 +331,16 @@ pub(crate) fn resolve_arg_state<P: ProcessManager>(
 ) -> DiagnosticResult<String> {
     match arg {
         Arg::String(s, _) => Ok(expand_string(s, &state.envs, state)
-            .map_err(|err| args_diag::eval_arg_expand_failed(&err))?),
+            .map_err(|err| args_diag::eval_arg_expand_failed(&anyhow::Error::from(err)))?),
         Arg::Expr(e) => Err(args_diag::eval_arg_expr_needs_step_ctx(e)),
         Arg::Parts(parts) => {
             let mut out = String::new();
             for part in parts {
                 match part {
                     ArgPart::Text(s, _) => {
-                        out.push_str(
-                            &expand_string(s, &state.envs, state)
-                                .map_err(|err| args_diag::eval_arg_expand_failed(&err))?,
-                        );
+                        out.push_str(&expand_string(s, &state.envs, state).map_err(|err| {
+                            args_diag::eval_arg_expand_failed(&anyhow::Error::from(err))
+                        })?);
                     }
                     ArgPart::Expr(e) => {
                         return Err(args_diag::eval_arg_expr_needs_step_ctx(e));
@@ -353,8 +352,25 @@ pub(crate) fn resolve_arg_state<P: ProcessManager>(
     }
 }
 
+/// Lift a dispatch-layer `anyhow` failure into a `Diagnostic`: keyed
+/// diagnostics riding in the chain return with their key intact, so
+/// placeholder-unknown listings and handler errors render exactly as
+/// before; anything else renders verbatim through the shared
+/// fallback. Single owner for the anyhow-to-Diagnostic direction:
+/// every dispatch site in this file routes here instead of restating
+/// the downcast.
+fn lift_dispatch_error(err: anyhow::Error) -> Diagnostic {
+    match err.downcast::<Diagnostic>() {
+        Ok(diag) => diag,
+        Err(err) => args_diag::eval_dispatch_failed(&err),
+    }
+}
+
 /// Resolve an [`Arg`] : handles all variants.
-pub(crate) fn resolve_arg<P: ProcessManager>(arg: &Arg, cx: &mut StepCtx<'_, P>) -> Result<String> {
+pub(crate) fn resolve_arg<P: ProcessManager>(
+    arg: &Arg,
+    cx: &mut StepCtx<'_, P>,
+) -> DiagnosticResult<String> {
     match arg {
         Arg::String(s, _) => Ok(expand_string(s, &cx.state.envs, cx.state)?),
         Arg::Expr(e) => {
@@ -383,7 +399,7 @@ pub(crate) fn resolve_arg<P: ProcessManager>(arg: &Arg, cx: &mut StepCtx<'_, P>)
 pub(crate) fn resolve_arg_opt<P: ProcessManager>(
     arg: &Option<Arg>,
     cx: &mut StepCtx<'_, P>,
-) -> Result<Option<String>> {
+) -> DiagnosticResult<Option<String>> {
     match arg {
         Some(a) => resolve_arg(a, cx).map(Some),
         None => Ok(None),
@@ -397,7 +413,7 @@ pub(crate) fn resolve_arg_opt<P: ProcessManager>(
 pub(crate) fn evaluate_assert_operand<P: ProcessManager>(
     arg: &Arg,
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     match arg {
         Arg::Expr(expr) => evaluate_expr(expr, cx),
         _ => Ok(Value::string(resolve_arg(arg, cx)?)),
@@ -408,7 +424,7 @@ pub(crate) fn evaluate_assert_operand<P: ProcessManager>(
 pub(crate) fn resolve_overrides<P: ProcessManager>(
     overrides: &[(String, Arg)],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Vec<(String, String)>> {
+) -> DiagnosticResult<Vec<(String, String)>> {
     overrides
         .iter()
         .map(|(k, v)| resolve_arg(v, cx).map(|val| (k.clone(), val)))
@@ -422,7 +438,8 @@ pub(crate) fn resolve_arg_as_int<P: ProcessManager>(
     arg: &Arg,
     cx: &mut StepCtx<'_, P>,
 ) -> DiagnosticResult<i64> {
-    let resolved = resolve_arg(arg, cx).map_err(|err| args_diag::eval_int_arg_resolve(&err))?;
+    let resolved = resolve_arg(arg, cx)
+        .map_err(|err| args_diag::eval_int_arg_resolve(&anyhow::Error::from(err)))?;
     oxdock_parser::command::strip_digit_separators(&resolved)
         .parse::<i64>()
         .map_err(|_| args_diag::eval_expected_int(&resolved))
@@ -456,7 +473,7 @@ pub(crate) fn load_var_binding<P: ProcessManager>(
 pub(crate) fn evaluate_expr<P: ProcessManager>(
     expr: &Expr,
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     match expr {
         Expr::Literal(v) => {
             if let Some(s) = v.as_str() {
@@ -498,8 +515,10 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         // Inline block (`LET $a: STRING = { ... }`): run the steps in a
         // fresh scope and yield the boundary value, mirroring a zero-arg
         // function body (see `handlers::block_value`).
-        Expr::Block(body) => super::handlers::block_value(cx, body),
-        Expr::Call { name, args } => super::handlers::call_func_value(cx, name, args),
+        Expr::Block(body) => super::handlers::block_value(cx, body).map_err(lift_dispatch_error),
+        Expr::Call { name, args } => {
+            super::handlers::call_func_value(cx, name, args).map_err(lift_dispatch_error)
+        }
         // Variable inspection carries the binding name unevaluated (see
         // `Expr::Inspect`): no function-name matching happens here.
         // Gates through the single owner so reads fail exactly like
@@ -519,9 +538,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             Ok(apply_arith(*op, left_val, right_val)?)
         }
         Expr::CompiledMath(ops) => evaluate_compiled_math(ops, cx),
-        Expr::UnsignedIntBoundary(n) => Err(anyhow::Error::new(
-            args_diag::eval_unstaged_int_boundary(*n),
-        )),
+        Expr::UnsignedIntBoundary(n) => Err(args_diag::eval_unstaged_int_boundary(*n)),
         Expr::Compare { op, left, right } => {
             let lv = evaluate_expr(left, cx)?;
             let rv = evaluate_expr(right, cx)?;
@@ -1286,7 +1303,7 @@ fn descend_value(current: Value, keys: &[String]) -> DiagnosticResult<Value> {
 fn evaluate_compiled_math<P: ProcessManager>(
     ops: &[MathOp],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     let mut stack: Vec<Value> = Vec::with_capacity(8);
     for op in ops {
         match op {
@@ -1323,10 +1340,12 @@ fn evaluate_compiled_math<P: ProcessManager>(
                 // in `resolve_call_entry`/`gate_call`/`execute_call_entry`
                 // (`rpn_only`), shared with expression and statement
                 // calls. Stateful fns run only when opted into `rpn`.
-                let entry = super::handlers::resolve_call_entry(cx, name.as_str())?;
-                super::handlers::gate_call(cx, name.as_str(), &entry, args.len())?;
-                let val =
-                    super::handlers::execute_call_entry(cx, name.as_str(), entry, args, true)?;
+                let entry = super::handlers::resolve_call_entry(cx, name.as_str())
+                    .map_err(lift_dispatch_error)?;
+                super::handlers::gate_call(cx, name.as_str(), &entry, args.len())
+                    .map_err(lift_dispatch_error)?;
+                let val = super::handlers::execute_call_entry(cx, name.as_str(), entry, args, true)
+                    .map_err(lift_dispatch_error)?;
                 stack.push(val);
             }
             MathOp::Inspect { name } => {
@@ -1390,11 +1409,9 @@ fn evaluate_compiled_math<P: ProcessManager>(
         }
     }
     if stack.len() != 1 {
-        return Err(anyhow::Error::from(args_diag::eval_math_stack_len(
-            stack.len(),
-        )));
+        return Err(args_diag::eval_math_stack_len(stack.len()));
     }
-    Ok(pop_stack(&mut stack)?)
+    pop_stack(&mut stack)
 }
 
 /// Value-semantics core of `GLOB()`: operates on an already-evaluated
@@ -1764,7 +1781,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
     input: &str,
     env: &std::collections::HashMap<String, String>,
     state: &ExecState<P>,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     use oxdock_parser::template::{
         PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
     };
@@ -1775,23 +1792,21 @@ pub(crate) fn expand_string<P: ProcessManager>(
     // bridges that name).
     let missing_key = |key: &str| {
         let env_hint = env.contains_key(key) || state.get_env(key).is_some();
-        anyhow::Error::from(args_diag::eval_template_missing_key(key, env_hint))
+        args_diag::eval_template_missing_key(key, env_hint)
     };
     for segment in TemplateSegments::new(input) {
         match segment {
             TemplateSegment::Text(text) => push_escaped_text(&mut output, text),
             TemplateSegment::Placeholder { key, .. } => match classify_placeholder_key(key) {
                 PlaceholderKey::Empty => {
-                    return Err(anyhow::Error::from(
-                        args_diag::eval_template_empty_placeholder(),
-                    ));
+                    return Err(args_diag::eval_template_empty_placeholder());
                 }
                 PlaceholderKey::DollarQualified { alias, name, keys } => {
                     if keys.is_empty() {
                         let value = super::import::resolve_const_ref(state, alias, name)?;
                         output.push_str(&format_value_for_string(&value)?);
                     } else {
-                        return Err(anyhow::Error::from(args_diag::eval_template_keypath()));
+                        return Err(args_diag::eval_template_keypath());
                     }
                 }
                 PlaceholderKey::Dollar(rest) => {
@@ -1800,9 +1815,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     // templates and code agree on every error. Bare
                     // $var never reads the environment; use {{ env:KEY }}.
                     let Some(parts) = oxdock_parser::template::parse_var_path(rest) else {
-                        return Err(anyhow::Error::from(args_diag::eval_template_invalid_key(
-                            rest,
-                        )));
+                        return Err(args_diag::eval_template_invalid_key(rest));
                     };
                     let (base, segs) = parts.split_first().expect("split always yields one");
                     let base_value = load_var_binding(state, base)?;
@@ -1824,7 +1837,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     // step runs.
                     let env_key = env_key.trim();
                     if env_key.is_empty() {
-                        return Err(anyhow::Error::from(args_diag::eval_template_empty_env()));
+                        return Err(args_diag::eval_template_empty_env());
                     }
                     let val = env
                         .get(env_key)
@@ -1843,7 +1856,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                 PlaceholderKey::ScriptEnv(env_key) => {
                     let env_key = env_key.trim();
                     if env_key.is_empty() {
-                        return Err(anyhow::Error::from(args_diag::eval_template_empty_env()));
+                        return Err(args_diag::eval_template_empty_env());
                     }
                     if let Some(v) = env.get(env_key).map(String::as_str) {
                         output.push_str(v);
@@ -1854,9 +1867,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                 PlaceholderKey::ConstRef { .. }
                 | PlaceholderKey::KeyPath { .. }
                 | PlaceholderKey::Var(_) => {
-                    return Err(anyhow::Error::from(args_diag::eval_template_bare_sigil(
-                        key.trim(),
-                    )));
+                    return Err(args_diag::eval_template_bare_sigil(key.trim()));
                 }
                 PlaceholderKey::Bare(key) => {
                     return Err(missing_key(key));
@@ -1900,11 +1911,9 @@ pub(crate) fn expand_string<P: ProcessManager>(
                                 module,
                                 call.name,
                             ) {
-                                return Err(anyhow::Error::from(
-                                    args_diag::eval_template_placeholder_miss(&text),
-                                ));
+                                return Err(args_diag::eval_template_placeholder_miss(&text));
                             }
-                            return Err(err);
+                            return Err(lift_dispatch_error(err));
                         }
                     };
                     output.push_str(&format_value_for_string(&result)?);
@@ -1930,7 +1939,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
 pub(crate) fn expand_dsl_vars<P: ProcessManager>(
     input: &str,
     state: &ExecState<P>,
-) -> anyhow::Result<String> {
+) -> DiagnosticResult<String> {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
@@ -2759,6 +2768,19 @@ pub(crate) fn text_list_value(items: Vec<String>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lift_dispatch_error_keeps_keyed_diagnostics() {
+        let keyed = args_diag::eval_undefined_var("x");
+        let key = keyed.key().to_string();
+        let text = keyed.message().to_string();
+        let lifted = lift_dispatch_error(anyhow::Error::new(keyed));
+        assert_eq!(lifted.key(), key);
+        assert_eq!(lifted.message(), text);
+        let fallback = lift_dispatch_error(anyhow::anyhow!("boom"));
+        assert_eq!(fallback.key(), "dsl.eval.dispatch_failed");
+        assert_eq!(fallback.message(), "boom");
+    }
 
     #[test]
     fn pop_stack_underflow_returns_error() {

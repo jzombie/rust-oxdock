@@ -1775,6 +1775,41 @@ transport, so this phase is mechanical:
    use that shape). Core 409 plus
    integration 629 green; clippy and fmt
    clean.
+   Template/arg cluster bulk step 2026-11-26:
+   eight signatures flip in exec/args.rs
+   (expand_string, evaluate_expr,
+   resolve_arg, resolve_arg_opt,
+   evaluate_assert_operand,
+   resolve_overrides, evaluate_compiled_math,
+   expand_dsl_vars) plus two holder fixes in
+   already-Diagnostic fns. One new ctor
+   (eval_dispatch_failed verbatim fallback)
+   with key plus wording pins. The
+   anyhow-to-Diagnostic direction gets one
+   owner: lift_dispatch_error downcasts
+   keyed diagnostics riding in the chain so
+   placeholder-unknown listings and handler
+   errors keep their keys, and wraps only
+   the rare unkeyed tail verbatim; all six
+   dispatch sites (placeholder resolve,
+   block/call tails, RPN
+   resolve/gate/execute) route here. Bodies
+   drop all anyhow::Error::from/new wraps.
+   The two reverse-direction holders
+   (resolve_arg_state expand legs,
+   resolve_arg_as_int resolve leg) gain the
+   inner anyhow::Error::from(err) wrap since
+   those ctors take &anyhow::Error. One
+   needless Ok(? ) shed at the compiled-math
+   tail. Deliberately held: resolve_arg_as_
+   duration (parse_duration needs
+   parser-side duration keys, separate
+   slice) and the pump-thread internals
+   (downcast discrimination, permanent).
+   New lift round-trip test pins key
+   preservation plus the verbatim fallback.
+   Core 410 plus integration 629 green;
+   clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
