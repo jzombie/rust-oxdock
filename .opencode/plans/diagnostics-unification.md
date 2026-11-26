@@ -2816,6 +2816,15 @@ transport, so this phase is mechanical:
    funcs.rs. Test pins added to the key-uniqueness plus
    canonical-wording tests. net lib 38 plus net integration
    38 green; net clippy zero, fmt clean on both files.
+   remote flags/inventory bulk 2026-11-27 (net remote/flags.rs
+   plus remote/inventory.rs, no new ctors): parse_remote_arg
+   plus RemoteInventory::build plus validate_script flip to
+   DiagnosticResult; all anyhow::Error::new wrappers drop;
+   anyhow imports drop from both files (now anyhow-free). All
+   ctors pre-existed. CLI callers (flag parse plus two
+   inventory build plus validate sites) hold via blanket From
+   (? auto-converts). net lib 38 plus net integration 38 plus
+   cli lib 49 green; net clippy zero, fmt clean on both files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

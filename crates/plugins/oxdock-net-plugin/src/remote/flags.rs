@@ -6,7 +6,7 @@
 //! `-o "ProxyCommand=ssh -W %h:%p jump"`). DSL scripts keep target-only
 //! identifiers; every transport byte stays in the CLI invocation.
 
-use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::diagnostics as net_diag;
 
@@ -14,21 +14,19 @@ use crate::diagnostics as net_diag;
 /// Returns the target name plus the raw command string; tokenization
 /// happens at inventory build so quoting errors fail fast with the flag
 /// text attached.
-pub fn parse_remote_arg(raw: &str) -> Result<(String, String)> {
+pub fn parse_remote_arg(raw: &str) -> DiagnosticResult<(String, String)> {
     let Some((target, command)) = raw.split_once('=') else {
-        return Err(anyhow::Error::new(net_diag::remote_arg_malformed(raw)));
+        return Err(net_diag::remote_arg_malformed(raw));
     };
     let target = target.trim();
     if !oxdock_parser::commands::is_valid_remote_target(target) {
-        return Err(anyhow::Error::new(net_diag::remote_target_invalid(target)));
+        return Err(net_diag::remote_target_invalid(target));
     }
     if command.trim().is_empty() {
-        return Err(anyhow::Error::new(net_diag::remote_command_empty(target)));
+        return Err(net_diag::remote_command_empty(target));
     }
     if let Err(err) = shell_words::split(command) {
-        return Err(anyhow::Error::new(net_diag::remote_tokenize_failed(
-            target, &err,
-        )));
+        return Err(net_diag::remote_tokenize_failed(target, &err));
     }
     Ok((target.to_string(), command.to_string()))
 }

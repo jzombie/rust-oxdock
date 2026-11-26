@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_parser::StepKind;
 
 use crate::diagnostics as net_diag;
@@ -29,21 +29,16 @@ impl RemoteInventory {
     /// Build from parsed `(target, command)` pairs. Duplicate targets and
     /// commands tokenizing to zero argv bail; quoting was already validated
     /// at flag parse time.
-    pub fn build(pairs: Vec<(String, String)>) -> Result<Self> {
+    pub fn build(pairs: Vec<(String, String)>) -> DiagnosticResult<Self> {
         let mut targets = BTreeMap::new();
         for (target, command) in pairs {
             if targets.contains_key(&target) {
-                return Err(anyhow::Error::new(net_diag::inventory_duplicate_target(
-                    &target,
-                )));
+                return Err(net_diag::inventory_duplicate_target(&target));
             }
-            let argv = shell_words::split(&command).map_err(|err| {
-                anyhow::Error::new(net_diag::inventory_tokenize_failed(&target, &err))
-            })?;
+            let argv = shell_words::split(&command)
+                .map_err(|err| net_diag::inventory_tokenize_failed(&target, &err))?;
             if argv.is_empty() {
-                return Err(anyhow::Error::new(net_diag::inventory_no_executable(
-                    &target,
-                )));
+                return Err(net_diag::inventory_no_executable(&target));
             }
             targets.insert(target, RemoteTarget { argv });
         }
@@ -79,13 +74,10 @@ impl RemoteInventory {
     /// Fail fast before execution: every script target must be bound.
     /// Scripts without remote blocks always pass, so local-only runs stay
     /// hermetic and never consult the network.
-    pub fn validate_script(&self, steps: &[oxdock_parser::Step]) -> Result<()> {
+    pub fn validate_script(&self, steps: &[oxdock_parser::Step]) -> DiagnosticResult<()> {
         for target in Self::collect_targets(steps) {
             if !self.targets.contains_key(&target) {
-                return Err(anyhow::Error::new(net_diag::inventory_unknown_target(
-                    &target,
-                    &self.targets(),
-                )));
+                return Err(net_diag::inventory_unknown_target(&target, &self.targets()));
             }
         }
         Ok(())
