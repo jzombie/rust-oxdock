@@ -22,6 +22,9 @@ build = []
 [features]
 mock-fs = []
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
+
 [dependencies]
 anyhow.workspace = true
 cache-manager.workspace = true
@@ -30,9 +33,6 @@ indoc.workspace = true
 oxdock-diagnostics.workspace = true
 tempfile.workspace = true
 tracing = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 oxdock-sys-test-utils.workspace = true
