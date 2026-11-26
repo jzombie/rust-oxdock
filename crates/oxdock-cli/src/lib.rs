@@ -1070,7 +1070,7 @@ fn maybe_reexec_shell_to_temp(opts: &Options) -> Result<()> {
     // outside the temp dir, so use `copy_file_from_external`.
     let temp_root_guard = temp_file
         .parent()
-        .ok_or_else(|| errors::shell_temp_missing_parent())?;
+        .ok_or_else(errors::shell_temp_missing_parent)?;
     let resolver_temp = PathResolver::new(temp_root_guard.as_path(), temp_root_guard.as_path())?;
     let dest = temp_file;
     #[allow(clippy::disallowed_types)]
