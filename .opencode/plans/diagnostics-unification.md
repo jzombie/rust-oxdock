@@ -3041,6 +3041,22 @@ transport, so this phase is mechanical:
    stays (tag.rs generated extractors plus macro_input
    proc-macro boundary by design). parser 267 plus 303
    green; clippy zero; fmt clean.
+   core import-unknown-type normalization bulk 2026-11-27
+   (diagnostics.rs 1 ctor plus static_check.rs 1 site plus
+   import.rs 4 sites): import_unknown_type normalizes from
+   reason: Option<&anyhow::Error> to Option<Diagnostic> by
+   value; all 5 Some-sites drop the anyhow::Error::new
+   round-trip (None-sites untouched). Byte-identical by
+   construction: every inner flows from resolve_tag and
+   the whole typing_* family carries zero with_source, so
+   bare {:#} equals the retired chain text. Completes the
+   import cluster's typed half; remaining import.rs sites
+   stay: import_bad_utf8/import_parse_failed (fs anyhow
+   plus ParseError foreign callers), import_failed_validation
+   (check_value_at stays anyhow by design),
+   import_const_forward_failed (ForwardError redesign).
+   core lib 410 plus 629 plus 12 plus 2 green; clippy
+   pre-existing baseline only; fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

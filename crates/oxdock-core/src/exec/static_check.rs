@@ -693,9 +693,8 @@ fn merge_harvest<P: ProcessManager>(
     else {
         if exec.module_table.modules.contains_key(path) {
             for name in type_names {
-                exec.resolve_tag(name).map_err(|err| {
-                    check_diag::import_unknown_type(path, name, Some(&anyhow::Error::new(err)))
-                })?;
+                exec.resolve_tag(name)
+                    .map_err(|err| check_diag::import_unknown_type(path, name, Some(err)))?;
             }
             return Ok(());
         }

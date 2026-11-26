@@ -464,11 +464,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         if !file_exists && cx.state.module_table.modules.contains_key(path) {
             for name in type_names {
                 cx.state.resolve_tag(name).map_err(|e| {
-                    anyhow::Error::new(import_diag::import_unknown_type(
-                        path,
-                        name,
-                        Some(&anyhow::Error::new(e)),
-                    ))
+                    anyhow::Error::new(import_diag::import_unknown_type(path, name, Some(e)))
                 })?;
             }
             if let Some(alias) = alias {
@@ -789,11 +785,7 @@ fn resolve_own_type_harvests_inner<P: ProcessManager>(
             if !file_exists && cx.state.module_table.modules.contains_key(harvest_path) {
                 for name in harvest_types {
                     cx.state.resolve_tag(name).map_err(|e| {
-                        import_diag::import_unknown_type(
-                            harvest_path,
-                            name,
-                            Some(&anyhow::Error::new(e)),
-                        )
+                        import_diag::import_unknown_type(harvest_path, name, Some(e))
                     })?;
                 }
                 continue;
@@ -1289,11 +1281,7 @@ fn expand_walk<P: ProcessManager>(
                     if !file_exists && state.module_table.modules.contains_key(path) {
                         for name in type_names {
                             state.resolve_tag(name).map_err(|e| {
-                                import_diag::import_unknown_type(
-                                    path,
-                                    name,
-                                    Some(&anyhow::Error::new(e)),
-                                )
+                                import_diag::import_unknown_type(path, name, Some(e))
                             })?;
                         }
                         // No file body to recurse into; still walk nested
@@ -1365,11 +1353,7 @@ fn expand_walk_top<P: ProcessManager>(
                     if !file_exists && state.module_table.modules.contains_key(path) {
                         for name in type_names {
                             state.resolve_tag(name).map_err(|e| {
-                                import_diag::import_unknown_type(
-                                    path,
-                                    name,
-                                    Some(&anyhow::Error::new(e)),
-                                )
+                                import_diag::import_unknown_type(path, name, Some(e))
                             })?;
                         }
                         continue;

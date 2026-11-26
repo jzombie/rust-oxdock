@@ -531,8 +531,11 @@ pub fn import_unknown_member(path: &str, noun: &str, name: &str) -> Diagnostic {
 }
 
 /// IMPORT file with no such `TYPE`. Takes the optional resolution
-/// failure; chained and bare are the same failure mode.
-pub fn import_unknown_type(path: &str, name: &str, reason: Option<&anyhow::Error>) -> Diagnostic {
+/// failure; chained and bare are the same failure mode. By value:
+/// every caller passes a `resolve_tag` failure, and the whole
+/// typing_* family carries zero `with_source`, so the bare render
+/// matches the retired anyhow-chain bytes exactly.
+pub fn import_unknown_type(path: &str, name: &str, reason: Option<Diagnostic>) -> Diagnostic {
     let message = match reason {
         Some(reason) => {
             format!("{KEYWORD_IMPORT} `{path}` has no such {KEYWORD_TYPE} `{name}`: {reason:#}")
@@ -8361,9 +8364,9 @@ mod tests {
             "IMPORT `f` has no such TYPE `T`"
         );
         assert!(
-            import_unknown_type("f", "T", Some(&anyhow::anyhow!("root")))
+            import_unknown_type("f", "T", Some(typing_max_depth(8, "X")))
                 .message()
-                .contains(": root")
+                .contains(": type spelling exceeds maximum generic depth of 8: `X`")
         );
         assert!(
             import_failed_validation("f", &anyhow::anyhow!("root"))
