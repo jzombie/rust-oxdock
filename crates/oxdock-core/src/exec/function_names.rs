@@ -1,7 +1,7 @@
 //! Canonical DSL names of the compiled-in STD functions.
 //!
 //! Single source of truth for every user-visible function name that
-//! appears in a diagnostic message, a hand-built [`HostRegistration`],
+//! appears in a diagnostic message, a hand-built [`HostRegistration`](super::HostRegistration),
 //! or an argument-prefix string. `#[oxdock_func]` derives the registry
 //! name from the Rust function name by uppercasing (`path_type` becomes
 //! `PATH_TYPE`, overridable with `name = "..."` for `BOOL`), so a rename
