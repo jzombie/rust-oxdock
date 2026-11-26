@@ -152,16 +152,12 @@ impl ProcessManager for SyntheticProcessManager {
                 }
             }
             CommandMode::Background => match stdout {
-                CommandStdout::Capture => {
-                    return Err(anyhow::Error::new(
-                        proc_diag::run_bg_capture_unsupported_miri(),
-                    ));
-                }
-                CommandStdout::Stream(_) => {
-                    return Err(anyhow::Error::new(
-                        proc_diag::run_bg_stdout_stream_unsupported_miri(),
-                    ));
-                }
+                CommandStdout::Capture => Err(anyhow::Error::new(
+                    proc_diag::run_bg_capture_unsupported_miri(),
+                )),
+                CommandStdout::Stream(_) => Err(anyhow::Error::new(
+                    proc_diag::run_bg_stdout_stream_unsupported_miri(),
+                )),
                 CommandStdout::Inherit => {
                     if matches!(stderr, CommandStderr::Stream(_)) {
                         return Err(anyhow::Error::new(
@@ -225,16 +221,12 @@ impl ProcessManager for SyntheticProcessManager {
                 }
             }
             CommandMode::Background => match stdout {
-                CommandStdout::Capture => {
-                    return Err(anyhow::Error::new(
-                        proc_diag::run_bg_capture_unsupported_miri(),
-                    ));
-                }
-                CommandStdout::Stream(_) => {
-                    return Err(anyhow::Error::new(
-                        proc_diag::run_bg_stdout_stream_unsupported_miri(),
-                    ));
-                }
+                CommandStdout::Capture => Err(anyhow::Error::new(
+                    proc_diag::run_bg_capture_unsupported_miri(),
+                )),
+                CommandStdout::Stream(_) => Err(anyhow::Error::new(
+                    proc_diag::run_bg_stdout_stream_unsupported_miri(),
+                )),
                 CommandStdout::Inherit => {
                     if matches!(stderr, CommandStderr::Stream(_)) {
                         return Err(anyhow::Error::new(
@@ -501,11 +493,9 @@ fn parse_command(
 fn resolve_write(resolver: &PathResolver, ctx: &CommandContext, path: &str) -> Result<GuardedPath> {
     match ctx.cwd() {
         PolicyPath::Guarded(p) => resolver.resolve_write(p, path),
-        PolicyPath::Unguarded(_) => {
-            return Err(anyhow::Error::new(
-                proc_diag::run_unguarded_writes_unsupported_miri(),
-            ));
-        }
+        PolicyPath::Unguarded(_) => Err(anyhow::Error::new(
+            proc_diag::run_unguarded_writes_unsupported_miri(),
+        )),
     }
 }
 

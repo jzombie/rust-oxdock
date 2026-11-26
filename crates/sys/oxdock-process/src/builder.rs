@@ -141,7 +141,7 @@ impl CommandBuilder {
     pub fn spawn(&mut self) -> DiagnosticResult<ChildHandle> {
         #[cfg(miri)]
         {
-            return Err(proc_diag::run_spawn_unsupported_miri());
+            Err(proc_diag::run_spawn_unsupported_miri())
         }
 
         #[cfg(not(miri))]
@@ -165,7 +165,7 @@ impl CommandBuilder {
         #[cfg(miri)]
         {
             let _ = self;
-            return Err(proc_diag::run_spawn_unsupported_miri());
+            Err(proc_diag::run_spawn_unsupported_miri())
         }
 
         #[cfg(not(miri))]
@@ -202,7 +202,7 @@ impl CommandBuilder {
         #[cfg(miri)]
         {
             let _ = self;
-            return Err(proc_diag::run_spawn_unsupported_miri());
+            Err(proc_diag::run_spawn_unsupported_miri())
         }
 
         #[cfg(not(miri))]

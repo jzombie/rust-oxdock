@@ -31,7 +31,7 @@ pub fn shell_program() -> String {
 pub fn interpreter_exe() -> DiagnosticResult<String> {
     #[cfg(miri)]
     {
-        return Err(proc_diag::run_interpreter_unsupported_miri());
+        Err(proc_diag::run_interpreter_unsupported_miri())
     }
     #[cfg(not(miri))]
     {
