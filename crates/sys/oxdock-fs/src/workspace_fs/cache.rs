@@ -15,6 +15,7 @@
 use anyhow::Result;
 
 use super::GuardedPath;
+#[cfg(not(miri))]
 use crate::diagnostics as fs_diag;
 use crate::env::cargo::PKG_NAME as CARGO_PKG_NAME;
 use crate::env::oxdock::{CACHE_APP, CACHE_DIR, FALLBACK_APP_NAME};

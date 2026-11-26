@@ -2737,7 +2737,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             scope.label,
                             &qualified,
                             &param.name,
-                            &allowed,
+                            allowed,
                             &s,
                         ));
                     }
@@ -5271,14 +5271,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             if required == total {
                 return Err(check_diag::check_call_arity_exact(
                     idx + 1,
-                    &base_name(name),
+                    base_name(name),
                     total,
                     args.len(),
                 ));
             }
             return Err(check_diag::check_call_arity_range(
                 idx + 1,
-                &base_name(name),
+                base_name(name),
                 required,
                 total,
                 args.len(),

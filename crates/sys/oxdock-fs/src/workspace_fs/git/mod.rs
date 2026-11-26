@@ -9,6 +9,7 @@ use std::process::{Command, Output};
 use super::AccessMode;
 use super::PathResolver;
 use crate::GuardedPath;
+#[cfg(not(miri))]
 use crate::diagnostics as fs_diag;
 
 pub mod config;

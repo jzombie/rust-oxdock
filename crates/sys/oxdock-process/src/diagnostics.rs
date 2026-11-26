@@ -64,9 +64,11 @@ fn did_you_mean(spelling: &str, scope: &str) -> String {
 /// Undefined `env:KEY`. Takes the key plus whether a same-named script
 /// variable exists; the hint shape lives here.
 pub fn undefined_env_var(key: &str, suggest_script_var: bool) -> Diagnostic {
-    let hint = suggest_script_var
-        .then(|| did_you_mean(&format!("${key}"), "script variable"))
-        .unwrap_or_default();
+    let hint = if suggest_script_var {
+        did_you_mean(&format!("${key}"), "script variable")
+    } else {
+        String::new()
+    };
     let message = format!("undefined environment variable: '{key}'{hint}");
     Diagnostic::new(
         "proc.expand.undefined_env_var",
