@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- `oxdock-diagnostics` crate (#168): one keyed constructor per user-facing DSL/CLI failure (stable dotted key, structured fields, whole-sentence template). New `Diagnostic` / `DiagnosticResult` types with staged `anyhow` interop (`anyhow` stays only as the carrier where a boundary forces it).
+
+### Changed
+
+- Engine, parser, CLI, build, MCP, and plugin error sites construct their messages through the keyed constructors (#168). Passthrough chains stay byte-identical; direct diagnostic messages use normalized wording (keyword/type constants, backtick-quoted names, no trailing punctuation). Signature migration to `DiagnosticResult` is tracked as a follow-up via #350; `oxdock-fs` keeps its literals.
+
 ## [0.44.1-alpha] - 2026-11-23
 
 ### Changed
