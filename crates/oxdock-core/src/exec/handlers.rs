@@ -14,10 +14,9 @@ use oxdock_fs::command_path;
 use oxdock_fs::to_forward_slashes;
 use oxdock_parser::constants::KEYWORD_RUN;
 use oxdock_parser::constants::{
-    KEYWORD_APPEND, KEYWORD_ARCHIVE, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL,
-    KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_EXPAND, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_READ,
-    KEYWORD_READ_LINE, KEYWORD_RETURN, KEYWORD_TIMEOUT, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO,
-    KEYWORD_WRITE,
+    KEYWORD_APPEND, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONST,
+    KEYWORD_CONTINUE, KEYWORD_EXPAND, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_READ,
+    KEYWORD_READ_LINE, KEYWORD_RETURN, KEYWORD_TIMEOUT, KEYWORD_WITH_IO, KEYWORD_WRITE,
 };
 use oxdock_parser::{
     Arg, Command, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value,
@@ -838,7 +837,7 @@ pub(super) fn copy_git<P: ProcessManager>(
 fn resolve_archive_src<P: ProcessManager>(
     cx: &StepCtx<'_, P>,
     src: &str,
-    tag: &str,
+    dst: &str,
 ) -> Result<GuardedPath> {
     let trimmed = to_forward_slashes(src).trim_end_matches('/').to_string();
     // A leading slash roots the parent at `/` itself: without the
@@ -856,7 +855,7 @@ fn resolve_archive_src<P: ProcessManager>(
             .state
             .fs
             .resolve_read(&cx.state.cwd, src)
-            .with_context(|| tag.to_string());
+            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)));
     }
     let parent_abs = if parent.is_empty() {
         cx.state.cwd.clone()
@@ -864,14 +863,14 @@ fn resolve_archive_src<P: ProcessManager>(
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, &parent)
-            .with_context(|| tag.to_string())?
+            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?
     };
     let mut matched = false;
     for entry in cx
         .state
         .fs
         .read_dir_entries(&parent_abs)
-        .with_context(|| tag.to_string())?
+        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?
     {
         if entry
             .file_name()
@@ -884,7 +883,9 @@ fn resolve_archive_src<P: ProcessManager>(
                 .map(|kind| kind.is_symlink())
                 .unwrap_or(true);
             if is_link {
-                bail!("{tag}: refuses to pack symlink source {src:?}");
+                return Err(anyhow::Error::new(
+                    diag::eval_archive_refuses_symlink_source(src, dst),
+                ));
             }
         }
     }
@@ -894,9 +895,11 @@ fn resolve_archive_src<P: ProcessManager>(
             .state
             .fs
             .resolve_read(&cx.state.cwd, src)
-            .with_context(|| tag.to_string());
+            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)));
     }
-    parent_abs.join(&name).with_context(|| tag.to_string())
+    parent_abs
+        .join(&name)
+        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))
 }
 
 /// Collected packable tree: `(rel, guard)` files plus `(rel, guard)`
@@ -914,17 +917,29 @@ fn collect_archive_tree(
     src: &str,
     dst: &str,
 ) -> Result<ArchiveTree> {
-    let tag = format!("{KEYWORD_ARCHIVE} {src} {dst}");
-    match fs.entry_kind(src_abs).with_context(|| tag.clone())? {
+    match fs
+        .entry_kind(src_abs)
+        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?
+    {
         EntryKind::File => {
             let base = src_abs
                 .as_path()
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
-                .with_context(|| {
-                    format!("{tag}: source has no file name: {}", src_abs.display())
+                .ok_or_else(|| {
+                    anyhow::Error::new(diag::eval_archive_no_file_name(
+                        src,
+                        dst,
+                        &src_abs.display().to_string(),
+                    ))
                 })?;
-            let rel = sanitize_rel(&to_forward_slashes(&base)).with_context(|| tag.clone())?;
+            let rel = sanitize_rel(&to_forward_slashes(&base)).map_err(|err| {
+                anyhow::Error::new(diag::eval_archive_failed(
+                    src,
+                    dst,
+                    &anyhow::Error::new(err),
+                ))
+            })?;
             Ok((vec![(rel, src_abs.clone())], Vec::new()))
         }
         EntryKind::Dir => {
@@ -936,8 +951,10 @@ fn collect_archive_tree(
                 // subtree walk: the rel prefixes must be real
                 // directories before listing.
                 PathResolver::refuse_link_ancestors(src_abs, &dir_rel)
-                    .with_context(|| tag.clone())?;
-                let mut entries = fs.read_dir_entries(&dir_abs).with_context(|| tag.clone())?;
+                    .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+                let mut entries = fs
+                    .read_dir_entries(&dir_abs)
+                    .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
                 entries.sort_by_key(|entry| entry.file_name());
                 for entry in entries {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -952,10 +969,17 @@ fn collect_archive_tree(
                         .map(|kind| kind.is_symlink())
                         .unwrap_or(true);
                     if is_link {
-                        bail!("{tag}: refuses to pack symlink {child_rel:?}");
+                        return Err(anyhow::Error::new(diag::eval_archive_refuses_symlink(
+                            src, dst, &child_rel,
+                        )));
                     }
-                    let child = dir_abs.join(&name).with_context(|| tag.clone())?;
-                    match fs.entry_kind(&child).with_context(|| tag.clone())? {
+                    let child = dir_abs
+                        .join(&name)
+                        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+                    match fs
+                        .entry_kind(&child)
+                        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?
+                    {
                         EntryKind::Dir => {
                             dirs.push((child_rel.clone(), child.clone()));
                             stack.push((child, child_rel));
@@ -984,14 +1008,21 @@ fn append_archive_tree<W: std::io::Write>(
     files: &[(String, GuardedPath)],
     dirs: &[(String, GuardedPath)],
     src_abs: &GuardedPath,
-    tag: &str,
+    src: &str,
+    dst: &str,
 ) -> Result<()> {
     for (rel, guard) in dirs {
-        let rel = sanitize_rel(rel).with_context(|| tag.to_string())?;
+        let rel = sanitize_rel(rel).map_err(|err| {
+            anyhow::Error::new(diag::eval_archive_failed(
+                src,
+                dst,
+                &anyhow::Error::new(err),
+            ))
+        })?;
         let mode = fs
             .archive_member_stat(guard)
             .map(|(_, mode)| mode.unwrap_or(0o755))
-            .with_context(|| tag.to_string())?;
+            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
         let mut header = tar::Header::new_gnu();
         header.set_mode(mode);
         header.set_entry_type(tar::EntryType::Directory);
@@ -999,26 +1030,36 @@ fn append_archive_tree<W: std::io::Write>(
         header.set_cksum();
         builder
             .append_data(&mut header, &rel, std::io::empty())
-            .with_context(|| tag.to_string())?;
+            .map_err(|e| {
+                anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
+            })?;
     }
     for (rel, guard) in files {
-        let rel = sanitize_rel(rel).with_context(|| tag.to_string())?;
+        let rel = sanitize_rel(rel).map_err(|err| {
+            anyhow::Error::new(diag::eval_archive_failed(
+                src,
+                dst,
+                &anyhow::Error::new(err),
+            ))
+        })?;
         let (len, mode) = fs
             .archive_member_stat(guard)
-            .with_context(|| tag.to_string())?;
+            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
         // Link-refusing open: a symlink planted after the listing
         // probe fails here instead of packing its target's bytes, and
         // the descriptor must stay under the packed tree.
         let mut reader = fs
             .open_read_nofollow(guard, src_abs)
-            .with_context(|| tag.to_string())?;
+            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
         let mut header = tar::Header::new_gnu();
         header.set_mode(mode.unwrap_or(0o644));
         header.set_size(len);
         header.set_cksum();
         builder
             .append_data(&mut header, &rel, &mut reader)
-            .with_context(|| tag.to_string())?;
+            .map_err(|e| {
+                anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
+            })?;
     }
     Ok(())
 }
@@ -1029,13 +1070,12 @@ pub(super) fn archive<P: ProcessManager>(
     dst: &str,
     raw: bool,
 ) -> Result<()> {
-    let tag = format!("{KEYWORD_ARCHIVE} {src} {dst}");
-    let src_abs = resolve_archive_src(cx, src, &tag)?;
+    let src_abs = resolve_archive_src(cx, src, dst)?;
     let dst_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, dst)
-        .with_context(|| tag.clone())?;
+        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
     // Opening the destination truncates it: an archive landing on its
     // own source would destroy inputs before their bytes stream, so
     // equal paths fail closed. A pre-existing destination inside the
@@ -1044,21 +1084,25 @@ pub(super) fn archive<P: ProcessManager>(
     // cannot be a member) which keeps whole-tree archives like
     // `ARCHIVE project project.tar.gz` working.
     if dst_abs == src_abs {
-        bail!("{tag}: destination {dst:?} cannot be the source itself");
+        return Err(anyhow::Error::new(
+            diag::eval_archive_destination_is_source(src, dst),
+        ));
     }
     if dst_abs.as_path().starts_with(src_abs.as_path()) && dst_abs.exists() {
-        bail!("{tag}: destination {dst:?} cannot overwrite inside the packed tree");
+        return Err(anyhow::Error::new(
+            diag::eval_archive_destination_inside_tree(src, dst),
+        ));
     }
     let (files, dirs) = collect_archive_tree(cx.state.fs.as_ref(), &src_abs, src, dst)?;
     cx.state
         .fs
         .ensure_parent_dir(&dst_abs)
-        .with_context(|| tag.clone())?;
+        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
     let out = cx
         .state
         .fs
         .open_write(&dst_abs)
-        .with_context(|| tag.clone())?;
+        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
     if raw {
         let mut builder = tar::Builder::new(out);
         append_archive_tree(
@@ -1067,10 +1111,15 @@ pub(super) fn archive<P: ProcessManager>(
             &files,
             &dirs,
             &src_abs,
-            &tag,
+            src,
+            dst,
         )?;
-        let mut out = builder.into_inner().with_context(|| tag.clone())?;
-        std::io::Write::flush(&mut out).with_context(|| tag.clone())?;
+        let mut out = builder.into_inner().map_err(|e| {
+            anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
+        })?;
+        std::io::Write::flush(&mut out).map_err(|e| {
+            anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
+        })?;
     } else {
         let encoder = GzEncoder::new(out, Compression::default());
         let mut builder = tar::Builder::new(encoder);
@@ -1080,13 +1129,18 @@ pub(super) fn archive<P: ProcessManager>(
             &files,
             &dirs,
             &src_abs,
-            &tag,
+            src,
+            dst,
         )?;
         builder
             .into_inner()
-            .with_context(|| tag.clone())?
+            .map_err(|e| {
+                anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
+            })?
             .try_finish()
-            .with_context(|| tag.clone())?;
+            .map_err(|e| {
+                anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
+            })?;
     }
     Ok(())
 }
@@ -1097,31 +1151,31 @@ pub(super) fn unarchive<P: ProcessManager>(
     dst: &str,
     max_bytes: Option<&str>,
 ) -> Result<()> {
-    let tag = format!("{KEYWORD_UNARCHIVE} {src} {dst}");
     let cap = match max_bytes {
-        Some(raw) => oxdock_parser::command::parse_byte_count(raw)
-            .with_context(|| format!("{tag}: --max-bytes {raw:?}"))?,
+        Some(raw) => oxdock_parser::command::parse_byte_count(raw).map_err(|e| {
+            anyhow::Error::new(diag::eval_unarchive_bad_max_bytes(src, dst, raw, &e))
+        })?,
         None => DEFAULT_UNARCHIVE_MAX_BYTES,
     };
     let src_abs = cx
         .state
         .fs
         .resolve_read(&cx.state.cwd, src)
-        .with_context(|| tag.clone())?;
+        .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
     let dst_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, dst)
-        .with_context(|| tag.clone())?;
+        .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
     cx.state
         .fs
         .create_dir_all(&dst_abs)
-        .with_context(|| tag.clone())?;
+        .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
     let reader = cx
         .state
         .fs
         .open_read(&src_abs)
-        .with_context(|| tag.clone())?;
+        .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
     let fs = cx.state.fs.as_ref();
     // Directory modes apply after every member lands: a read-only
     // header (e.g. 0555) would otherwise lock its own children out
@@ -1132,7 +1186,6 @@ pub(super) fn unarchive<P: ProcessManager>(
     // bomb split across many just-under-cap members must still trip it.
     let mut remaining = cap;
     unpack_auto_from(reader, &mut |entry| {
-        let entry_tag = format!("{tag}: member");
         match entry {
             StreamedEntry::Dir { path, mode } => {
                 // Re-validate the decoder's rel at the write site: a
@@ -1141,26 +1194,47 @@ pub(super) fn unarchive<P: ProcessManager>(
                 // domain (verbatim, short names, slashes). Escapes via
                 // planted links stay the filesystem layers' job, and
                 // those run next, on every member, in every mode.
-                let rel = sanitize_rel(&path).with_context(|| entry_tag.clone())?;
-                PathResolver::refuse_link_ancestors(&dst_abs, &rel)
-                    .with_context(|| entry_tag.clone())?;
-                let dir = dst_abs.join(&rel).with_context(|| entry_tag.clone())?;
-                fs.create_dir_all(&dir).with_context(|| entry_tag.clone())?;
+                let rel = sanitize_rel(&path).map_err(|err| {
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(
+                        src,
+                        dst,
+                        &anyhow::Error::new(err),
+                    ))
+                })?;
+                PathResolver::refuse_link_ancestors(&dst_abs, &rel).map_err(|e| {
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                })?;
+                let dir = dst_abs.join(&rel).map_err(|e| {
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                })?;
+                fs.create_dir_all(&dir).map_err(|e| {
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                })?;
                 deferred_dir_modes.push((dir, mode));
             }
             StreamedEntry::File { path, mode, reader } => {
-                let rel = sanitize_rel(&path).with_context(|| entry_tag.clone())?;
-                PathResolver::refuse_link_ancestors(&dst_abs, &rel)
-                    .with_context(|| entry_tag.clone())?;
-                let file = dst_abs.join(&rel).with_context(|| entry_tag.clone())?;
-                fs.ensure_parent_dir(&file)
-                    .with_context(|| entry_tag.clone())?;
+                let rel = sanitize_rel(&path).map_err(|err| {
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(
+                        src,
+                        dst,
+                        &anyhow::Error::new(err),
+                    ))
+                })?;
+                PathResolver::refuse_link_ancestors(&dst_abs, &rel).map_err(|e| {
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                })?;
+                let file = dst_abs.join(&rel).map_err(|e| {
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                })?;
+                fs.ensure_parent_dir(&file).map_err(|e| {
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                })?;
                 // Link-refusing open: a symlink planted at the member
                 // path fails here instead of truncating its target,
                 // and the descriptor must stay under the destination.
-                let mut out = fs
-                    .open_write_nofollow(&file, &dst_abs)
-                    .with_context(|| entry_tag.clone())?;
+                let mut out = fs.open_write_nofollow(&file, &dst_abs).map_err(|e| {
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                })?;
                 // Metered copy: bombs read small and write huge, so the
                 // cap counts member bytes out, not archive bytes in. The
                 // tripped member stays truncated while the step fails.
@@ -1170,26 +1244,40 @@ pub(super) fn unarchive<P: ProcessManager>(
                 };
                 std::io::copy(&mut capped, &mut out).map_err(|e| {
                     if e.kind() == std::io::ErrorKind::QuotaExceeded {
-                        anyhow!(
-                            "{entry_tag}: archive exceeds the {cap}-byte expansion cap at {path:?}"
-                        )
+                        anyhow::Error::new(diag::eval_unarchive_expansion_cap(src, dst, cap, &path))
                     } else {
-                        anyhow::Error::new(e).context(entry_tag.clone())
+                        anyhow::Error::new(diag::eval_unarchive_member_failed(
+                            src,
+                            dst,
+                            &anyhow::Error::new(e),
+                        ))
                     }
                 })?;
                 remaining = capped.remaining;
-                std::io::Write::flush(&mut out).with_context(|| entry_tag.clone())?;
-                restore_archive_mode(fs, &file, mode).with_context(|| entry_tag.clone())?;
+                std::io::Write::flush(&mut out).map_err(|e| {
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(
+                        src,
+                        dst,
+                        &anyhow::Error::new(e),
+                    ))
+                })?;
+                restore_archive_mode(fs, &file, mode).map_err(|e| {
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                })?;
             }
             StreamedEntry::Symlink { path, target } => {
-                bail!("{entry_tag}: refuses symlink member {path:?} -> {target:?}");
+                return Err(anyhow::Error::new(diag::eval_unarchive_refuses_symlink(
+                    src, dst, &path, &target,
+                )));
             }
         }
         Ok(())
     })
-    .with_context(|| tag.clone())?;
+    .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
     for (dir, mode) in deferred_dir_modes.into_iter().rev() {
-        restore_archive_mode(fs, &dir, mode).with_context(|| format!("{tag}: restoring mode"))?;
+        restore_archive_mode(fs, &dir, mode).map_err(|e| {
+            anyhow::Error::new(diag::eval_unarchive_restore_mode_failed(src, dst, &e))
+        })?;
     }
     Ok(())
 }

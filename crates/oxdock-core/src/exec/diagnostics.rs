@@ -10,15 +10,16 @@ use oxdock_diagnostics::Diagnostic;
 use oxdock_parser::template::{bare_sigil_error, qualified_keypath_error};
 use oxdock_parser::{
     ANY_TYPE_NAME, BOOL_TYPE_NAME, Expr, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
-    KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT,
-    KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT, KEYWORD_ENV,
-    KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV,
-    KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR,
-    KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE,
-    KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH,
-    KEYWORD_SYMLINK, KEYWORD_TYPE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE, LIST_TYPE_NAME,
-    MAP_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME,
-    Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
+    KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC,
+    KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
+    KEYWORD_ENV, KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IMPORT,
+    KEYWORD_INHERIT_ENV, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND,
+    KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOTE,
+    KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP,
+    KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO,
+    KEYWORD_WORKDIR, KEYWORD_WRITE, LIST_TYPE_NAME, MAP_TYPE_NAME, PERMIT_TYPE_NAME,
+    PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME,
+    render_structural,
 };
 
 use super::function_names::{
@@ -2458,6 +2459,205 @@ pub fn eval_symlink_no_file_name(from: &str) -> Diagnostic {
         message,
         Diagnostic::make_fields(&[("from", from)]),
     )
+}
+
+/// `ARCHIVE` step failure. Takes the script spellings and the
+/// underlying failure. Bare outer context plus chained source,
+/// matching `eval_symlink_failed`, so `err.chain()` keeps its layers
+/// for the snapshot renderer. One key covers every fallible op under
+/// the pack path (resolve, listing, join, stat, open, append,
+/// flush); call sites pass decoded spellings, never `format!`.
+pub fn eval_archive_failed(src: &str, dst: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_ARCHIVE} {src} {dst}");
+    Diagnostic::new(
+        "dsl.eval.archive_failed",
+        message,
+        Diagnostic::make_fields(&[("src", src), ("dst", dst), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `ARCHIVE` source with no file name. Takes the script spellings
+/// and the resolved display; quoting lives here. No source rides
+/// along (`Option` context, no underlying error).
+pub fn eval_archive_no_file_name(src: &str, dst: &str, display: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_ARCHIVE} {src} {dst}: source has no file name: {display}");
+    Diagnostic::new(
+        "dsl.eval.archive_no_file_name",
+        message,
+        Diagnostic::make_fields(&[("src", src), ("dst", dst), ("display", display)]),
+    )
+}
+
+/// `ARCHIVE` source that resolves to a symlink. Takes the script
+/// spellings; `Debug` rendering of the spelling lives here. The probe
+/// fails closed before any packing, so no source rides along.
+pub fn eval_archive_refuses_symlink_source(src: &str, dst: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_ARCHIVE} {src} {dst}: refuses to pack symlink source {src:?}");
+    Diagnostic::new(
+        "dsl.eval.archive_refuses_symlink_source",
+        message,
+        Diagnostic::make_fields(&[("src", src), ("dst", dst)]),
+    )
+}
+
+/// `ARCHIVE` tree member that is a symlink. Takes the script
+/// spellings and the child rel; `Debug` rendering lives here. The
+/// listing probe fails closed, so no source rides along.
+pub fn eval_archive_refuses_symlink(src: &str, dst: &str, child: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_ARCHIVE} {src} {dst}: refuses to pack symlink {child:?}");
+    Diagnostic::new(
+        "dsl.eval.archive_refuses_symlink",
+        message,
+        Diagnostic::make_fields(&[("src", src), ("dst", dst), ("child", child)]),
+    )
+}
+
+/// `ARCHIVE` destination equal to the source. Takes the script
+/// spellings; `Debug` rendering of the destination lives here. The
+/// guard fails before truncation, so no source rides along.
+pub fn eval_archive_destination_is_source(src: &str, dst: &str) -> Diagnostic {
+    let message =
+        format!("{KEYWORD_ARCHIVE} {src} {dst}: destination {dst:?} cannot be the source itself");
+    Diagnostic::new(
+        "dsl.eval.archive_destination_is_source",
+        message,
+        Diagnostic::make_fields(&[("src", src), ("dst", dst)]),
+    )
+}
+
+/// `ARCHIVE` destination inside the packed tree. Takes the script
+/// spellings; `Debug` rendering of the destination lives here. The
+/// guard fails before truncation, so no source rides along.
+pub fn eval_archive_destination_inside_tree(src: &str, dst: &str) -> Diagnostic {
+    let message = format!(
+        "{KEYWORD_ARCHIVE} {src} {dst}: destination {dst:?} cannot overwrite inside the packed tree"
+    );
+    Diagnostic::new(
+        "dsl.eval.archive_destination_inside_tree",
+        message,
+        Diagnostic::make_fields(&[("src", src), ("dst", dst)]),
+    )
+}
+
+/// `UNARCHIVE` step failure. Takes the script spellings and the
+/// underlying failure. Bare outer context plus chained source,
+/// matching `eval_symlink_failed`. One key covers every fallible op
+/// on the unpack path outside per-member apply (resolve, mkdir,
+/// open, driver, deferred mode restore call).
+pub fn eval_unarchive_failed(src: &str, dst: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_UNARCHIVE} {src} {dst}");
+    Diagnostic::new(
+        "dsl.eval.unarchive_failed",
+        message,
+        Diagnostic::make_fields(&[("src", src), ("dst", dst), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `UNARCHIVE` per-member apply failure. Takes the script spellings
+/// and the underlying failure. Bare `member` outer plus chained
+/// source; one key covers every fallible op inside the apply
+/// callback (sanitize via round-trip, link-ancestor refusal, join,
+/// mkdir, open, flush, mode restore).
+pub fn eval_unarchive_member_failed(src: &str, dst: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_UNARCHIVE} {src} {dst}: member");
+    Diagnostic::new(
+        "dsl.eval.unarchive_member_failed",
+        message,
+        Diagnostic::make_fields(&[("src", src), ("dst", dst), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `UNARCHIVE` `--max-bytes` parse failure. Takes the script
+/// spellings, the raw flag spelling, and the underlying failure.
+/// Bare outer plus chained source; `Debug` rendering of the raw
+/// spelling lives here.
+pub fn eval_unarchive_bad_max_bytes(
+    src: &str,
+    dst: &str,
+    raw: &str,
+    reason: &anyhow::Error,
+) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_UNARCHIVE} {src} {dst}: --max-bytes {raw:?}");
+    Diagnostic::new(
+        "dsl.eval.unarchive_bad_max_bytes",
+        message,
+        Diagnostic::make_fields(&[
+            ("src", src),
+            ("dst", dst),
+            ("raw", raw),
+            ("reason", &reason_text),
+        ]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// `UNARCHIVE` member tripping the expansion cap. Takes the script
+/// spellings, the byte cap, and the member path; `Debug` rendering
+/// of the path lives here. The meter fails the step with no
+/// underlying error, so no source rides along.
+pub fn eval_unarchive_expansion_cap(src: &str, dst: &str, cap: u64, path: &str) -> Diagnostic {
+    let message = format!(
+        "{KEYWORD_UNARCHIVE} {src} {dst}: member: archive exceeds the {cap}-byte expansion cap at {path:?}"
+    );
+    Diagnostic::new(
+        "dsl.eval.unarchive_expansion_cap",
+        message,
+        Diagnostic::make_fields(&[
+            ("src", src),
+            ("dst", dst),
+            ("cap", &cap.to_string()),
+            ("path", path),
+        ]),
+    )
+}
+
+/// `UNARCHIVE` member that is a symlink. Takes the script spellings
+/// plus the member path and target; `Debug` rendering lives here.
+/// The apply callback fails closed, so no source rides along.
+pub fn eval_unarchive_refuses_symlink(
+    src: &str,
+    dst: &str,
+    path: &str,
+    target: &str,
+) -> Diagnostic {
+    let message = format!(
+        "{KEYWORD_UNARCHIVE} {src} {dst}: member: refuses symlink member {path:?} -> {target:?}"
+    );
+    Diagnostic::new(
+        "dsl.eval.unarchive_refuses_symlink",
+        message,
+        Diagnostic::make_fields(&[
+            ("src", src),
+            ("dst", dst),
+            ("path", path),
+            ("target", target),
+        ]),
+    )
+}
+
+/// `UNARCHIVE` deferred directory-mode restore failure. Takes the
+/// script spellings and the underlying failure. Bare outer plus
+/// chained source.
+pub fn eval_unarchive_restore_mode_failed(
+    src: &str,
+    dst: &str,
+    reason: &anyhow::Error,
+) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{KEYWORD_UNARCHIVE} {src} {dst}: restoring mode");
+    Diagnostic::new(
+        "dsl.eval.unarchive_restore_mode_failed",
+        message,
+        Diagnostic::make_fields(&[("src", src), ("dst", dst), ("reason", &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
 }
 
 /// `WORKDIR` resolution failure. Takes the script spelling and the
@@ -5854,6 +6054,18 @@ mod tests {
             eval_copy_destination_escapes("p", &anyhow::anyhow!("x")).key(),
             eval_symlink_failed("a", "b", &anyhow::anyhow!("x")).key(),
             eval_symlink_no_file_name("a").key(),
+            eval_archive_failed("a", "b", &anyhow::anyhow!("x")).key(),
+            eval_archive_no_file_name("a", "b", "d").key(),
+            eval_archive_refuses_symlink_source("a", "b").key(),
+            eval_archive_refuses_symlink("a", "b", "c").key(),
+            eval_archive_destination_is_source("a", "a").key(),
+            eval_archive_destination_inside_tree("a", "b").key(),
+            eval_unarchive_failed("a", "b", &anyhow::anyhow!("x")).key(),
+            eval_unarchive_member_failed("a", "b", &anyhow::anyhow!("x")).key(),
+            eval_unarchive_bad_max_bytes("a", "b", "r", &anyhow::anyhow!("x")).key(),
+            eval_unarchive_expansion_cap("a", "b", 8, "p").key(),
+            eval_unarchive_refuses_symlink("a", "b", "p", "t").key(),
+            eval_unarchive_restore_mode_failed("a", "b", &anyhow::anyhow!("x")).key(),
             eval_workdir_failed("p", &anyhow::anyhow!("x")).key(),
             eval_mkdir_resolve_failed("p", &anyhow::anyhow!("x")).key(),
             eval_mkdir_create_failed("p", &anyhow::anyhow!("x")).key(),
@@ -6462,6 +6674,54 @@ mod tests {
         assert_eq!(
             eval_symlink_no_file_name("a").message(),
             "SYMLINK source has no file name: a"
+        );
+        assert_eq!(
+            eval_archive_failed("a", "b", &anyhow::anyhow!("boom")).message(),
+            "ARCHIVE a b"
+        );
+        assert_eq!(
+            eval_archive_no_file_name("a", "b", "d").message(),
+            "ARCHIVE a b: source has no file name: d"
+        );
+        assert_eq!(
+            eval_archive_refuses_symlink_source("a", "b").message(),
+            "ARCHIVE a b: refuses to pack symlink source \"a\""
+        );
+        assert_eq!(
+            eval_archive_refuses_symlink("a", "b", "c").message(),
+            "ARCHIVE a b: refuses to pack symlink \"c\""
+        );
+        assert_eq!(
+            eval_archive_destination_is_source("a", "a").message(),
+            "ARCHIVE a a: destination \"a\" cannot be the source itself"
+        );
+        assert_eq!(
+            eval_archive_destination_inside_tree("a", "a/b").message(),
+            "ARCHIVE a a/b: destination \"a/b\" cannot overwrite inside the packed tree"
+        );
+        assert_eq!(
+            eval_unarchive_failed("a", "b", &anyhow::anyhow!("boom")).message(),
+            "UNARCHIVE a b"
+        );
+        assert_eq!(
+            eval_unarchive_member_failed("a", "b", &anyhow::anyhow!("boom")).message(),
+            "UNARCHIVE a b: member"
+        );
+        assert_eq!(
+            eval_unarchive_bad_max_bytes("a", "b", "r", &anyhow::anyhow!("boom")).message(),
+            "UNARCHIVE a b: --max-bytes \"r\""
+        );
+        assert_eq!(
+            eval_unarchive_expansion_cap("a", "b", 8, "p").message(),
+            "UNARCHIVE a b: member: archive exceeds the 8-byte expansion cap at \"p\""
+        );
+        assert_eq!(
+            eval_unarchive_refuses_symlink("a", "b", "p", "t").message(),
+            "UNARCHIVE a b: member: refuses symlink member \"p\" -> \"t\""
+        );
+        assert_eq!(
+            eval_unarchive_restore_mode_failed("a", "b", &anyhow::anyhow!("boom")).message(),
+            "UNARCHIVE a b: restoring mode"
         );
         assert_eq!(
             eval_workdir_failed("sub", &anyhow::anyhow!("boom")).message(),

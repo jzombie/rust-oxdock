@@ -2356,6 +2356,30 @@ transport, so this phase is mechanical:
    corrected to bare outer plus chained source; entry moved below
    WITH_IO so PROMPT-bind stays adjacent to its AMEND. Gates stay
    green.
+   Archive/unarchive bulk step 2026-11-27 (file-sized batch):
+   twelve new dsl.eval.* ctors with key plus wording pins.
+   Pack side: archive_failed bare outer plus chained source (one
+   key for every fallible op under the pack path), no-file-name
+   with display, refuses-symlink-source and refuses-symlink with
+   Debug in ctor, destination-is-source and destination-inside
+   guards parameterless over spellings. Unpack side:
+   unarchive_failed bare outer plus source, member_failed bare
+   member outer plus source (one key for the whole apply
+   callback, Diagnostic sanitize inners ride via anyhow
+   round-trip per the func_param_type precedent),
+   bad-max-bytes with raw plus source, expansion-cap with cap
+   plus path, refuses-symlink with path plus target,
+   restore-mode-failed with source. resolve_archive_src now takes
+   (src, dst) and append_archive_tree takes (src, dst) instead of
+   a preformatted tag; unpack closure drops entry_tag and captures
+   spellings. Forty-plus sites re-keyed across resolve, collect,
+   append, archive, and unarchive. Bytes identical (tests pin via
+   err.chain() needles: cannot be the source itself, cannot
+   overwrite inside, expansion cap, refuses to pack symlink,
+   refuses symlink member). Unused KEYWORD_ARCHIVE and
+   KEYWORD_UNARCHIVE imports dropped from handlers. Core lib 410
+   plus integration 629 green; clippy at baseline
+   (3 pre-existing), fmt clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
