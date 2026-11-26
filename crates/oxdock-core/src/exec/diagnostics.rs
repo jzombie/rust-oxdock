@@ -1479,6 +1479,30 @@ pub fn coerce_pipe_to_string() -> Diagnostic {
     )
 }
 
+/// Shaped-type shape failure inside coercion. Takes the underlying
+/// parser failure verbatim: its indexed path already names the
+/// expected tag and the offending position, so no wrapper is added.
+pub fn coerce_check_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.coerce.check_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// Host return value failing its declared shape. Takes the underlying
+/// shape failure verbatim: the caller-supplied context already names
+/// the function, so no wrapper is added.
+pub fn eval_host_return_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.eval.host_return_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
 /// Key path on `$ALIAS::NAME` in a placeholder call arg. Parameterless:
 /// the parser owns the wording through its template helper, so every
 /// phase agrees word for word; this constructor only adds the key.
@@ -3928,6 +3952,8 @@ mod tests {
             .key(),
             coerce_string_to_pipe("x").key(),
             coerce_pipe_to_string().key(),
+            coerce_check_failed(&anyhow::anyhow!("x")).key(),
+            eval_host_return_failed(&anyhow::anyhow!("x")).key(),
             eval_const_arg_keypath().key(),
             eval_const_arg_bare_sigil("foo").key(),
             eval_template_missing_key("foo", false).key(),
@@ -4226,6 +4252,11 @@ mod tests {
         assert_eq!(
             coerce_pipe_to_string().message(),
             "coercion: TypeMismatch: expected STRING, got PIPE: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: STRING = ... instead."
+        );
+        assert_eq!(coerce_check_failed(&anyhow::anyhow!("x")).message(), "x");
+        assert_eq!(
+            eval_host_return_failed(&anyhow::anyhow!("x")).message(),
+            "x"
         );
         assert_eq!(
             eval_const_arg_keypath().message(),

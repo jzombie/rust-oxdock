@@ -1641,6 +1641,28 @@ transport, so this phase is mechanical:
    op holds via the blanket conversion. Core
    409 plus integration 629 green; clippy and
    fmt clean.
+   Coercion bulk step 2026-11-26: two new
+   verbatim passthrough ctors in
+   exec/diagnostics.rs with key plus wording
+   pins (coerce_check_failed for shaped-type
+   shape failures inside coercion;
+   eval_host_return_failed for host return
+   shape failures; both render {reason:#}
+   inline with no with_source per contract).
+   Three signatures flip in exec/args.rs:
+   check_host_return_value plus coerce_value
+   plus coerce_scalar return DiagnosticResult.
+   Bodies drop eleven .into() conversions on
+   the already-keyed mismatch arms
+   (coerce_type_mismatch, string_to_pipe,
+   pipe_to_string); parser shape paths map
+   via the new passthroughs. Callers hold via
+   the blanket conversion (state declare /
+   mutate / push paths, handlers call
+   dispatch, conformance lying-returns check).
+   This unblocks the state declare/mutate
+   cluster next. Core 409 plus integration 629
+   green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

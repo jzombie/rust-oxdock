@@ -57,12 +57,13 @@ pub(crate) fn check_host_return_value(
     ctx: &str,
     returns: &Option<TypeTag>,
     value: &Value,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let Some(slot) = returns else {
         return Ok(());
     };
     let filled = fill_record_defaults(slot, value);
     oxdock_parser::check_value_at(slot, &filled, ctx)
+        .map_err(|err| args_diag::eval_host_return_failed(&err))
 }
 
 /// Narrow a `STRING|PATH` word to display text: strings verbatim,
@@ -158,7 +159,7 @@ fn fill_record(expected: &TypeTag, value: &Value) -> Option<Value> {
 /// run's name directory here (not at parse time, where host descriptors
 /// are not visible). Pipe targets validate against the live PipeRegistry
 /// via ExecState.
-pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
+pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> DiagnosticResult<Value> {
     // `ANY` accepts every word: the boundary already let it through,
     // so coercion is a passthrough, never a second opinion.
     if matches!(expected, TypeTag::Any) {
@@ -177,7 +178,7 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
     // through `check_value_at`; declarations match them now).
     if let Err(err) = oxdock_parser::check_value(expected, &value) {
         if matches!(expected, TypeTag::ListOf(_) | TypeTag::Record(_)) {
-            return Err(err);
+            return Err(args_diag::coerce_check_failed(&err));
         }
     } else {
         return Ok(value);
@@ -206,17 +207,19 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
             // of silently re-parsing at every consumer.
             TypeTag::Bool => match parse_bool_str(s) {
                 Some(b) => Ok(Value::bool(b)),
-                None => Err(args_diag::coerce_type_mismatch("coercion", expected, &value).into()),
+                None => Err(args_diag::coerce_type_mismatch(
+                    "coercion", expected, &value,
+                )),
             },
             TypeTag::Pipe => {
                 // Strict: plain strings never coerce to pipes, so a handle is
                 // always created explicitly via `LET $p: PIPE`. Anything else
                 // is a TypeMismatch.
-                Err(args_diag::coerce_string_to_pipe(s).into())
+                Err(args_diag::coerce_string_to_pipe(s))
             }
             TypeTag::Duration => oxdock_parser::command::parse_duration(s.trim())
                 .map(Value::duration)
-                .map_err(|_| args_diag::coerce_type_mismatch("coercion", expected, &value).into()),
+                .map_err(|_| args_diag::coerce_type_mismatch("coercion", expected, &value)),
             TypeTag::Path => {
                 // Narrow exception: materializing the PATH payload. Guard checks
                 // still run through oxdock-fs at use time.
@@ -246,9 +249,9 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
             | TypeTag::ListOf(_)
             | TypeTag::Record(_)
             | TypeTag::MapOf(_)
-            | TypeTag::Union(..) => {
-                Err(args_diag::coerce_type_mismatch("coercion", expected, &value).into())
-            }
+            | TypeTag::Union(..) => Err(args_diag::coerce_type_mismatch(
+                "coercion", expected, &value,
+            )),
         };
     }
     coerce_scalar(&value, expected)
@@ -258,7 +261,7 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
 /// pipe-name words. Anything else is a `TypeMismatch`. Admissions are
 /// explicit `if`s; the fallthrough rejects closed, so a new tag is
 /// refused here until its coercion rule is written.
-fn coerce_scalar(value: &Value, expected: &TypeTag) -> Result<Value> {
+fn coerce_scalar(value: &Value, expected: &TypeTag) -> DiagnosticResult<Value> {
     if let Some(n) = value.as_i64() {
         if matches!(expected, TypeTag::String) {
             return Ok(Value::string(n.to_string()));
@@ -271,11 +274,11 @@ fn coerce_scalar(value: &Value, expected: &TypeTag) -> Result<Value> {
                 1 => return Ok(Value::bool(true)),
                 0 => return Ok(Value::bool(false)),
                 _ => {
-                    return Err(args_diag::coerce_type_mismatch("coercion", expected, value).into());
+                    return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
                 }
             }
         }
-        return Err(args_diag::coerce_type_mismatch("coercion", expected, value).into());
+        return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
     }
     if let Some(f) = value.as_f64() {
         if matches!(expected, TypeTag::String) {
@@ -284,36 +287,36 @@ fn coerce_scalar(value: &Value, expected: &TypeTag) -> Result<Value> {
         // Strict: floats never narrow to integers here. Whole floats
         // pass through the explicit `INT()` converter instead, so an
         // `INT` slot names the mismatch rather than truncating.
-        return Err(args_diag::coerce_type_mismatch("coercion", expected, value).into());
+        return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
     }
     if let Some(b) = value.as_bool() {
         if matches!(expected, TypeTag::String) {
             return Ok(Value::string(b.to_string()));
         }
-        return Err(args_diag::coerce_type_mismatch("coercion", expected, value).into());
+        return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
     }
     if let Some(d) = value.as_duration() {
         if matches!(expected, TypeTag::String) {
             return Ok(Value::string(oxdock_parser::command::format_duration(&d)));
         }
-        return Err(args_diag::coerce_type_mismatch("coercion", expected, value).into());
+        return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
     }
     if let Some(p) = value.as_path() {
         if matches!(expected, TypeTag::String) {
             return Ok(Value::string(p.to_string_lossy().to_string()));
         }
-        return Err(args_diag::coerce_type_mismatch("coercion", expected, value).into());
+        return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
     }
     if value.as_pipe_handle().is_some() {
         // Pipes are refused in string slots: they carry streams between
         // steps, not text, and silently rendering a handle hides a bug.
         // Capture the producing step's output with LET instead.
         if matches!(expected, TypeTag::String) {
-            return Err(args_diag::coerce_pipe_to_string().into());
+            return Err(args_diag::coerce_pipe_to_string());
         }
-        return Err(args_diag::coerce_type_mismatch("coercion", expected, value).into());
+        return Err(args_diag::coerce_type_mismatch("coercion", expected, value));
     }
-    Err(args_diag::coerce_type_mismatch("coercion", expected, value).into())
+    Err(args_diag::coerce_type_mismatch("coercion", expected, value))
 }
 
 /// Resolve an [`Arg`] using an [`ExecState`] directly (no [`StepCtx`] needed).
