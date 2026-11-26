@@ -76,6 +76,144 @@ pub fn host_key_insecure_permissions(func: &str, path: &str, mode: u32) -> Diagn
     )
 }
 
+/// Workspace resolver for the host key cannot open. Takes the
+/// invoking func and the underlying failure; the outer message
+/// stays bare while the cause rides a chained source, so
+/// `{err:#}` keeps the legacy `": "` join. Call sites stay
+/// `format!`-free.
+pub fn host_key_resolver_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "ssh.key.resolver_failed",
+        format!("{func} cannot open the workspace resolver"),
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// Ed25519 host key generation failed. Takes the concrete failure
+/// by value; the outer message stays bare while the cause rides a
+/// chained source.
+pub fn host_key_generate_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.key.generate_failed",
+        "generate Ed25519 host key".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// Ed25519 host key PEM encoding failed. Takes the concrete failure
+/// by value; bare outer message plus chained source.
+pub fn host_key_encode_failed(
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.key.encode_failed",
+        "encode Ed25519 host key".to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// `key_path` parent guard cannot anchor the workspace root. Takes
+/// the invoking func and the underlying failure; bare outer message
+/// plus chained source.
+pub fn key_guard_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "ssh.key.guard_failed",
+        format!("{func} cannot guard the workspace root"),
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// Host key file metadata cannot be read. Takes the display path
+/// and the underlying failure; bare outer message plus chained
+/// source.
+pub fn host_key_stat_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "ssh.key.stat_failed",
+        format!("cannot stat host key {path}"),
+        Diagnostic::make_fields(&[(FIELD_PATH, path), (FIELD_ERR, &reason_text)]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// Host key file bytes cannot be read. Takes the invoking func, the
+/// display path, and the underlying failure; bare outer message
+/// plus chained source.
+pub fn host_key_read_failed(func: &str, path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "ssh.key.read_failed",
+        format!("{func} cannot read host key {path}"),
+        Diagnostic::make_fields(&[
+            (FIELD_FUNC, func),
+            (FIELD_PATH, path),
+            (FIELD_ERR, &reason_text),
+        ]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
+/// Host key bytes do not parse as OpenSSH. Takes the invoking func,
+/// the display path, and the concrete failure by value; bare outer
+/// message plus chained source.
+pub fn host_key_parse_failed(
+    func: &str,
+    path: &str,
+    reason: impl std::error::Error + Send + Sync + 'static,
+) -> Diagnostic {
+    let reason_text = reason.to_string();
+    Diagnostic::new(
+        "ssh.key.parse_failed",
+        format!("{func} cannot parse host key {path}"),
+        Diagnostic::make_fields(&[
+            (FIELD_FUNC, func),
+            (FIELD_PATH, path),
+            (FIELD_ERR, &reason_text),
+        ]),
+    )
+    .with_source(std::sync::Arc::new(reason))
+}
+
+/// Host key file write failed past the first-start race. Takes the
+/// underlying failure verbatim: the file layer already names the
+/// path, so the message passes through unchanged.
+pub fn host_key_write_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "ssh.key.write_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[(FIELD_ERR, &reason_text)]),
+    )
+}
+
+/// Guarded join of a `key_path` escapes the workspace. Takes the
+/// invoking func, the raw path, and the guard failure; the outer
+/// message names the escape while the resolved-path detail rides a
+/// chained source, so it keeps its own key.
+pub fn key_path_join_failed(func: &str, raw: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "ssh.key.join_failed",
+        format!("{func} key_path escapes the workspace: {raw}"),
+        Diagnostic::make_fields(&[
+            (FIELD_FUNC, func),
+            (FIELD_RAW, raw),
+            (FIELD_ERR, &reason_text),
+        ]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+}
+
 /// SSH pump output lock poisoned. Parameterless: the wording is
 /// fixed.
 pub fn pump_output_lock_poisoned() -> Diagnostic {
@@ -535,6 +673,15 @@ mod tests {
         let err = io_err("boom");
         let keys = [
             key_path_escapes("SSH_SERVE", "k").key(),
+            host_key_resolver_failed("SSH_SERVE", &anyhow::anyhow!("boom")).key(),
+            host_key_generate_failed(io_err("boom")).key(),
+            host_key_encode_failed(io_err("boom")).key(),
+            key_guard_failed("SSH_SERVE", &anyhow::anyhow!("boom")).key(),
+            key_path_join_failed("SSH_SERVE", "k", &anyhow::anyhow!("boom")).key(),
+            host_key_stat_failed("p", &anyhow::anyhow!("boom")).key(),
+            host_key_read_failed("SSH_SERVE", "p", &anyhow::anyhow!("boom")).key(),
+            host_key_parse_failed("SSH_SERVE", "p", io_err("boom")).key(),
+            host_key_write_failed(&anyhow::anyhow!("boom")).key(),
             host_key_must_be_ed25519("SSH_SERVE", "p", &"Ed25519").key(),
             host_key_insecure_permissions("SSH_SERVE", "p", 0o644).key(),
             pump_output_lock_poisoned().key(),
@@ -620,6 +767,109 @@ mod tests {
         assert_eq!(
             key_path_escapes("SSH_SERVE", "k").message(),
             "SSH_SERVE key_path escapes the workspace: k"
+        );
+        assert_eq!(
+            host_key_resolver_failed("SSH_SERVE", &anyhow::anyhow!("boom")).message(),
+            "SSH_SERVE cannot open the workspace resolver"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(host_key_resolver_failed(
+                    "SSH_SERVE",
+                    &anyhow::anyhow!("boom")
+                ))
+            ),
+            "SSH_SERVE cannot open the workspace resolver: boom"
+        );
+        assert_eq!(
+            host_key_generate_failed(io_err("boom")).message(),
+            "generate Ed25519 host key"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(host_key_generate_failed(io_err("boom")))
+            ),
+            "generate Ed25519 host key: boom"
+        );
+        assert_eq!(
+            host_key_encode_failed(io_err("boom")).message(),
+            "encode Ed25519 host key"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(host_key_encode_failed(io_err("boom")))
+            ),
+            "encode Ed25519 host key: boom"
+        );
+        assert_eq!(
+            key_guard_failed("SSH_SERVE", &anyhow::anyhow!("boom")).message(),
+            "SSH_SERVE cannot guard the workspace root"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(key_guard_failed("SSH_SERVE", &anyhow::anyhow!("boom")))
+            ),
+            "SSH_SERVE cannot guard the workspace root: boom"
+        );
+        assert_eq!(
+            key_path_join_failed("SSH_SERVE", "k", &anyhow::anyhow!("boom")).message(),
+            "SSH_SERVE key_path escapes the workspace: k"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(key_path_join_failed(
+                    "SSH_SERVE",
+                    "k",
+                    &anyhow::anyhow!("boom")
+                ))
+            ),
+            "SSH_SERVE key_path escapes the workspace: k: boom"
+        );
+        assert_eq!(
+            host_key_stat_failed("p", &anyhow::anyhow!("boom")).message(),
+            "cannot stat host key p"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(host_key_stat_failed("p", &anyhow::anyhow!("boom")))
+            ),
+            "cannot stat host key p: boom"
+        );
+        assert_eq!(
+            host_key_read_failed("SSH_SERVE", "p", &anyhow::anyhow!("boom")).message(),
+            "SSH_SERVE cannot read host key p"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(host_key_read_failed(
+                    "SSH_SERVE",
+                    "p",
+                    &anyhow::anyhow!("boom")
+                ))
+            ),
+            "SSH_SERVE cannot read host key p: boom"
+        );
+        assert_eq!(
+            host_key_parse_failed("SSH_SERVE", "p", io_err("boom")).message(),
+            "SSH_SERVE cannot parse host key p"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                anyhow::Error::new(host_key_parse_failed("SSH_SERVE", "p", io_err("boom")))
+            ),
+            "SSH_SERVE cannot parse host key p: boom"
+        );
+        assert_eq!(
+            host_key_write_failed(&anyhow::anyhow!("boom")).message(),
+            "boom"
         );
         assert_eq!(
             host_key_must_be_ed25519("SSH_SERVE", "p", &"Ed25519").message(),

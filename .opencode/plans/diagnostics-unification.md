@@ -2572,6 +2572,27 @@ transport, so this phase is mechanical:
    (invalid_timeout_duration, expected_int). Parser 267+303 plus
    core lib 410 plus integration 629 green; parser clippy zero,
    fmt clean on both touched files.
+   ssh-keys bulk 2026-11-27 (keys.rs plus ssh diagnostics): nine
+   new ssh.key.* ctors with key plus wording pins
+   (resolver_failed, generate_failed, encode_failed,
+   guard_failed, join_failed, stat_failed, read_failed,
+   parse_failed, write_failed verbatim). keys.rs flips all five
+   fns to DiagnosticResult; anyhow Context import drops.
+   Review AMEND applied: generate/encode/parse take the concrete
+   russh error by value (no anyhow::Error::new round-trip);
+   all eight context-wrapping ctors go bare-outer plus chained
+   source (io::Error::other for anyhow inners, direct Arc for
+   concrete ones), matching the eval_archive_failed shape;
+   {:#} pins prove the legacy ": " join. Join failures keep
+   their own key (outer duplicates key_path_escapes text while
+   the resolved-path detail rides the chain). keys.rs keeps one
+   anyhow path: is_io_kind over the fs anyhow boundary.
+   The funcs.rs:298 caller holds unchanged via blanket From;
+   funcs.rs:301 ephemeral-generate context stays a noted
+   follow-up. invalid_host_key_file_bails integration pin
+   passes. ssh lib 13 plus parser 267+303 plus core lib 410
+   plus integration 629 green; ssh clippy zero, fmt clean on
+   both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

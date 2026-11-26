@@ -7,7 +7,7 @@
 //! pre-existing files load only with safe Unix permissions. Losers of a
 //! first-start race re-read briefly in case they caught a partial write.
 
-use anyhow::{Context, Result};
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::diagnostics as ssh_diag;
 use oxdock_core::StepCtx;
@@ -21,20 +21,20 @@ pub fn load_or_create_host_key<P: ProcessManager>(
     cx: &StepCtx<P>,
     func: &str,
     key_path: Option<String>,
-) -> Result<Option<PrivateKey>> {
+) -> DiagnosticResult<Option<PrivateKey>> {
     let Some(raw) = key_path.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
     let root = cx.cwd().root();
     let guarded = anchor_key_path(root, raw, func)?;
     let resolver =
-        PathResolver::new(root, root).context("SSH_SERVE cannot open the workspace resolver")?;
+        PathResolver::new(root, root).map_err(|e| ssh_diag::host_key_resolver_failed(func, &e))?;
     if !resolver.exists(&guarded) {
         let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
-            .context("generate Ed25519 host key")?;
+            .map_err(ssh_diag::host_key_generate_failed)?;
         let pem = key
             .to_openssh(russh::keys::ssh_key::LineEnding::LF)
-            .context("encode Ed25519 host key")?;
+            .map_err(ssh_diag::host_key_encode_failed)?;
         match resolver.write_private_file(&guarded, pem.as_bytes()) {
             Ok(()) => return Ok(Some(key)),
             Err(err) if is_io_kind(&err, std::io::ErrorKind::AlreadyExists) => {
@@ -51,7 +51,7 @@ pub fn load_or_create_host_key<P: ProcessManager>(
                 // partial so the next boot regenerates instead of
                 // tripping the parse gate on our own rubbish.
                 let _ = resolver.remove_file(&guarded);
-                return Err(err);
+                return Err(ssh_diag::host_key_write_failed(&err));
             }
         }
     }
@@ -67,7 +67,7 @@ pub fn load_or_create_host_key<P: ProcessManager>(
 /// filesystem root), genuinely in-root absolutes are preserved, and
 /// anything escaping still bails. Relative paths stay root-anchored.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-fn anchor_key_path(root: &std::path::Path, raw: &str, func: &str) -> Result<GuardedPath> {
+fn anchor_key_path(root: &std::path::Path, raw: &str, func: &str) -> DiagnosticResult<GuardedPath> {
     let normalized = to_forward_slashes(raw);
     let rel_path = std::path::Path::new(&normalized);
     if PathResolver::is_absolute_or_rooted(rel_path) {
@@ -76,17 +76,17 @@ fn anchor_key_path(root: &std::path::Path, raw: &str, func: &str) -> Result<Guar
         }
         let rel = PathResolver::root_relative_path(rel_path);
         let Some(rel_str) = rel.to_str().filter(|s| !s.is_empty()) else {
-            return Err(anyhow::Error::new(ssh_diag::key_path_escapes(func, raw)));
+            return Err(ssh_diag::key_path_escapes(func, raw));
         };
         return GuardedPath::new_root(root)
-            .with_context(|| format!("{func} cannot guard the workspace root"))?
+            .map_err(|e| ssh_diag::key_guard_failed(func, &e))?
             .join(rel_str)
-            .with_context(|| format!("{func} key_path escapes the workspace: {raw}"));
+            .map_err(|e| ssh_diag::key_path_join_failed(func, raw, &e));
     }
     GuardedPath::new_root(root)
-        .with_context(|| format!("{func} cannot guard the workspace root"))?
+        .map_err(|e| ssh_diag::key_guard_failed(func, &e))?
         .join(&normalized)
-        .with_context(|| format!("{func} key_path escapes the workspace: {raw}"))
+        .map_err(|e| ssh_diag::key_path_join_failed(func, raw, &e))
 }
 
 /// Bounded re-read for every host-key load: the winner's PEM bytes land
@@ -100,21 +100,21 @@ fn read_existing_key_retry(
     resolver: &PathResolver,
     guarded: &GuardedPath,
     func: &str,
-) -> Result<Option<PrivateKey>> {
+) -> DiagnosticResult<Option<PrivateKey>> {
     let meta = resolver
         .metadata(guarded)
-        .with_context(|| format!("cannot stat host key {}", guarded.display()))?;
+        .map_err(|e| ssh_diag::host_key_stat_failed(&guarded.display().to_string(), &e))?;
     assert_safe_mode(guarded, &meta, func)?;
     let mut attempts = 0;
     loop {
         match read_and_parse_key(resolver, guarded, func) {
             Ok(key) => {
                 if key.algorithm() != Algorithm::Ed25519 {
-                    return Err(anyhow::Error::new(ssh_diag::host_key_must_be_ed25519(
+                    return Err(ssh_diag::host_key_must_be_ed25519(
                         func,
                         &guarded.display().to_string(),
                         &key.algorithm(),
-                    )));
+                    ));
                 }
                 return Ok(Some(key));
             }
@@ -133,27 +133,31 @@ fn read_and_parse_key(
     resolver: &PathResolver,
     guarded: &GuardedPath,
     func: &str,
-) -> Result<PrivateKey> {
+) -> DiagnosticResult<PrivateKey> {
     let bytes = resolver
         .read_file(guarded)
-        .with_context(|| format!("{func} cannot read host key {}", guarded.display()))?;
+        .map_err(|e| ssh_diag::host_key_read_failed(func, &guarded.display().to_string(), &e))?;
     PrivateKey::from_openssh(&bytes)
-        .with_context(|| format!("{func} cannot parse host key {}", guarded.display()))
+        .map_err(|e| ssh_diag::host_key_parse_failed(func, &guarded.display().to_string(), e))
 }
 
 /// Bail when group or world have any access to a pre-existing key file
 /// (Unix-only; Windows ACLs are a follow-up).
-fn assert_safe_mode(guarded: &GuardedPath, meta: &std::fs::Metadata, func: &str) -> Result<()> {
+fn assert_safe_mode(
+    guarded: &GuardedPath,
+    meta: &std::fs::Metadata,
+    func: &str,
+) -> DiagnosticResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = meta.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
-            return Err(anyhow::Error::new(ssh_diag::host_key_insecure_permissions(
+            return Err(ssh_diag::host_key_insecure_permissions(
                 func,
                 &guarded.display().to_string(),
                 mode,
-            )));
+            ));
         }
     }
     #[cfg(not(unix))]
