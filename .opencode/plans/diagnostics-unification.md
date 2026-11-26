@@ -2715,6 +2715,26 @@ transport, so this phase is mechanical:
    stay anyhow by design and hold via blanket From. ssh lib
    13 plus ssh integration 68 green; ssh clippy zero, fmt
    clean on both files.
+   net bridge bulk 2026-11-27 (net bridge.rs plus net
+   diagnostics, 9 new net.pump.* ctors): pump_stream plus
+   pump_memory plus all five worker fns flip to
+   DiagnosticResult; NetDone/MemoryDone thread payloads plus
+   both failed slots plus note_failure go Diagnostic-native.
+   New ctors follow the net inline family (reason text in the
+   outer message, never with_source): stdin_pipe_read_failed
+   (shared socket plus memory input), socket_write_failed,
+   stdout_pipe_write_failed plus stdout_pipe_flush_failed
+   (shared socket plus memory output), borrow_input_failed
+   plus borrow_output_failed (by-value Diagnostic, static
+   "NET pump ..." outer so {:#} renders byte-identical to the
+   retired .context layer), socket_clone_failed (one key for
+   both clone sites), memory_pipe_write_failed plus
+   memory_pipe_flush_failed. All anyhow::Error::new wrappers
+   and every with_context/context layer drop; anyhow import
+   drops from bridge.rs. funcs.rs #[oxdock_func] callers stay
+   anyhow by design and hold via blanket From. net lib 38
+   plus net integration 38 green; net clippy zero, fmt clean
+   on both files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

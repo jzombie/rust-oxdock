@@ -125,6 +125,120 @@ pub fn pump_memory_pipe_read_failed(func: &str, err: &std::io::Error) -> Diagnos
     )
 }
 
+/// Stdin pipe read failed. Takes the caller label plus the I/O
+/// failure; rendering lives here. Shared by the socket and memory
+/// input paths: one key, one mode.
+pub fn pump_stdin_pipe_read_failed(func: &str, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{func} stdin pipe read failed: {err_text}");
+    Diagnostic::new(
+        "net.pump.stdin_pipe_read_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Socket write failed. Takes the caller label plus the I/O
+/// failure; rendering lives here.
+pub fn pump_socket_write_failed(func: &str, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{func} socket write failed: {err_text}");
+    Diagnostic::new(
+        "net.pump.socket_write_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Stdout pipe write failed. Takes the caller label plus the I/O
+/// failure; rendering lives here. Shared by the socket and memory
+/// output paths: one key, one mode.
+pub fn pump_stdout_pipe_write_failed(func: &str, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{func} stdout pipe write failed: {err_text}");
+    Diagnostic::new(
+        "net.pump.stdout_pipe_write_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Stdout pipe flush failed. Takes the caller label plus the I/O
+/// failure; rendering lives here. Shared by the socket and memory
+/// output paths: one key, one mode.
+pub fn pump_stdout_pipe_flush_failed(func: &str, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{func} stdout pipe flush failed: {err_text}");
+    Diagnostic::new(
+        "net.pump.stdout_pipe_flush_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// NET pump cannot borrow the input pipe. Takes the underlying typed
+/// failure by value; its text inlines so the chain renders
+/// byte-identical to the retired context layer.
+pub fn pump_borrow_input_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("NET pump cannot borrow the input pipe: {reason_text}");
+    Diagnostic::new(
+        "net.pump.borrow_input_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, reason_text.as_str())]),
+    )
+}
+
+/// NET pump cannot borrow the output pipe. Takes the underlying typed
+/// failure by value; its text inlines so the chain renders
+/// byte-identical to the retired context layer.
+pub fn pump_borrow_output_failed(reason: Diagnostic) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("NET pump cannot borrow the output pipe: {reason_text}");
+    Diagnostic::new(
+        "net.pump.borrow_output_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, reason_text.as_str())]),
+    )
+}
+
+/// Socket clone failed. Takes the caller label plus the I/O failure;
+/// rendering lives here. Shared by both clone sites in the socket
+/// supervisor: one key, one mode.
+pub fn pump_socket_clone_failed(func: &str, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{func} failed to clone socket: {err_text}");
+    Diagnostic::new(
+        "net.pump.socket_clone_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Memory pipe write failed. Takes the caller label plus the I/O
+/// failure; rendering lives here.
+pub fn pump_memory_pipe_write_failed(func: &str, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{func} memory pipe write failed: {err_text}");
+    Diagnostic::new(
+        "net.pump.memory_pipe_write_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, err_text.as_str())]),
+    )
+}
+
+/// Memory pipe flush failed. Takes the caller label plus the I/O
+/// failure; rendering lives here.
+pub fn pump_memory_pipe_flush_failed(func: &str, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{func} memory pipe flush failed: {err_text}");
+    Diagnostic::new(
+        "net.pump.memory_pipe_flush_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, err_text.as_str())]),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Fetch (`net.fetch.*`, `fetch.rs`)
 // ---------------------------------------------------------------------------
@@ -962,6 +1076,15 @@ mod tests {
             pump_interrupted_by_cancellation("NET_PUMP").key(),
             pump_memory_pipe_lock_poisoned("NET_PUMP").key(),
             pump_memory_pipe_read_failed("NET_PUMP", &err).key(),
+            pump_stdin_pipe_read_failed("NET_PUMP", &err).key(),
+            pump_socket_write_failed("NET_PUMP", &err).key(),
+            pump_stdout_pipe_write_failed("NET_PUMP", &err).key(),
+            pump_stdout_pipe_flush_failed("NET_PUMP", &err).key(),
+            pump_borrow_input_failed(pump_stdout_lock_poisoned("NET_PUMP")).key(),
+            pump_borrow_output_failed(pump_stdout_lock_poisoned("NET_PUMP")).key(),
+            pump_socket_clone_failed("NET_PUMP", &err).key(),
+            pump_memory_pipe_write_failed("NET_PUMP", &err).key(),
+            pump_memory_pipe_flush_failed("NET_PUMP", &err).key(),
             fetch_url_missing_scheme("example.com/x").key(),
             fetch_url_not_https("example.com/x").key(),
             fetch_refuses_cleartext_http("example.com").key(),
@@ -1107,6 +1230,42 @@ mod tests {
         assert_eq!(
             pump_memory_pipe_read_failed("NET_ACCEPT", &err).message(),
             "NET_ACCEPT memory pipe read failed: boom"
+        );
+        assert_eq!(
+            pump_stdin_pipe_read_failed("NET_ACCEPT", &err).message(),
+            "NET_ACCEPT stdin pipe read failed: boom"
+        );
+        assert_eq!(
+            pump_socket_write_failed("NET_ACCEPT", &err).message(),
+            "NET_ACCEPT socket write failed: boom"
+        );
+        assert_eq!(
+            pump_stdout_pipe_write_failed("NET_ACCEPT", &err).message(),
+            "NET_ACCEPT stdout pipe write failed: boom"
+        );
+        assert_eq!(
+            pump_stdout_pipe_flush_failed("NET_ACCEPT", &err).message(),
+            "NET_ACCEPT stdout pipe flush failed: boom"
+        );
+        assert_eq!(
+            pump_borrow_input_failed(pump_stdout_lock_poisoned("NET_ACCEPT")).message(),
+            "NET pump cannot borrow the input pipe: NET_ACCEPT stdout lock poisoned"
+        );
+        assert_eq!(
+            pump_borrow_output_failed(pump_stdout_lock_poisoned("NET_ACCEPT")).message(),
+            "NET pump cannot borrow the output pipe: NET_ACCEPT stdout lock poisoned"
+        );
+        assert_eq!(
+            pump_socket_clone_failed("NET_ACCEPT", &err).message(),
+            "NET_ACCEPT failed to clone socket: boom"
+        );
+        assert_eq!(
+            pump_memory_pipe_write_failed("NET_ACCEPT", &err).message(),
+            "NET_ACCEPT memory pipe write failed: boom"
+        );
+        assert_eq!(
+            pump_memory_pipe_flush_failed("NET_ACCEPT", &err).message(),
+            "NET_ACCEPT memory pipe flush failed: boom"
         );
         assert_eq!(
             fetch_url_missing_scheme("example.com/x").message(),
