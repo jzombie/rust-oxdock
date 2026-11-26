@@ -538,7 +538,7 @@ pub fn validate_steps_with_fs_modules_and_entry<P: ProcessManager>(
     modules: Vec<HostModule<P>>,
     types: Vec<&'static TypeDescriptor>,
     entry_file: Option<GuardedPath>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut state = new_state(fs, ExecIo::new())?;
     state.entry_file = entry_file;
     state.module_table = build_module_table(&modules);
@@ -561,7 +561,7 @@ pub fn validate_steps_with_fs_modules_and_entry<P: ProcessManager>(
 pub fn validate_closure_for_run<P: ProcessManager>(
     state: &mut ExecState<P>,
     steps: &[Step],
-) -> Result<Vec<String>> {
+) -> DiagnosticResult<Vec<String>> {
     state.restore_aliases(self::typing::collect_type_aliases(steps, state)?);
     state.validate_function_type_tags()?;
     // Entry Frame-1 file scope (#322): index the entry top-level

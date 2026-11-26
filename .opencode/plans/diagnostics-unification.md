@@ -1512,6 +1512,22 @@ transport, so this phase is mechanical:
    green; clippy shows only the three
    pre-existing needless_borrow warnings; fmt
    clean.
+   Closure-validation step 2026-11-26: no new
+   ctors, all wordings already pinned. Two
+   signatures flip in exec/mod.rs:
+   validate_steps_with_fs_modules_and_entry
+   plus validate_closure_for_run return
+   DiagnosticResult. Bodies need no unwrap
+   (all callees already DiagnosticResult:
+   collect_type_aliases,
+   validate_function_type_tags,
+   collect_top_funcs, expand_import_closure,
+   validate_script_closure, new_state). Outside
+   callers hold via the blanket
+   Diagnostic-into-anyhow conversion with no
+   change (mcp init, finish_run, CLI dry-run,
+   expect_err tests). Core 409 plus integration
+   629 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
