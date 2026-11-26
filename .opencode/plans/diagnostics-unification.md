@@ -2309,6 +2309,21 @@ transport, so this phase is mechanical:
    no Other-kind flattening). Call sites pass e directly. First
    by-value precedent in the exec diagnostics; applies wherever the
    callee already returns DiagnosticResult. Gates stay green.
+   WITH_IO validation bulk step 2026-11-27 (file-sized batch):
+   five new dsl.eval.* ctors with key plus wording pins
+   (geometry_needs_tty plus tty_no_stderr plus tty_needs_run
+   parameterless; duplicate_stream with stream, one key covering
+   all six stdin/stdout/stderr/tty/rows/cols sites;
+   pipe_handle_mismatch with actual plus Value, one key covering
+   both match arms with Debug rendering in the ctor). Thirteen
+   sites re-keyed: with_io_block reuses eval_with_io_unexpanded;
+   resolve_pipe_handle None arm reuses eval_undeclared(var).
+   Unused PIPE_TYPE_NAME import dropped from handlers. Bytes
+   identical (only contains pins on tty and duplicate-stream
+   wordings). Tail discipline: bare Err tails where the match is
+   the tail value, explicit return Err in diverging if/for arms.
+   Core 410 plus integration 629 green; clippy at baseline
+   (3 pre-existing), fmt clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

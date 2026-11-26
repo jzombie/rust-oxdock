@@ -1468,6 +1468,66 @@ pub fn eval_with_io_unexpanded() -> Diagnostic {
     )
 }
 
+/// `WITH_IO` geometry without a terminal. Parameterless: the wording
+/// names the shared keyword constant; no operand varies.
+pub fn eval_with_io_geometry_needs_tty() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.with_io_geometry_needs_tty",
+        format!(
+            "{KEYWORD_WITH_IO} [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size"
+        ),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `WITH_IO` tty binding stderr. Parameterless: the pty master
+/// carries one interleaved stream, so the wording is fixed.
+pub fn eval_with_io_tty_no_stderr() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.with_io_tty_no_stderr",
+        format!(
+            "{KEYWORD_WITH_IO} [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex"
+        ),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `WITH_IO` tty wrapping a non-RUN step. Parameterless: the required
+/// step kind rides the shared keyword constant.
+pub fn eval_with_io_tty_needs_run() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.with_io_tty_needs_run",
+        format!(
+            "{KEYWORD_WITH_IO} [tty] only wraps a {KEYWORD_RUN} step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it"
+        ),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `WITH_IO` duplicate stream binding. Takes the stream name
+/// (`stdin`, `stdout`, `stderr`, `tty`, `rows`, `cols`); one key
+/// covers all six sites since the outer text is identical.
+pub fn eval_with_io_duplicate_stream(stream: &str) -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.with_io_duplicate_stream",
+        format!("{KEYWORD_WITH_IO} declared {stream} more than once"),
+        Diagnostic::make_fields(&[("stream", stream)]),
+    )
+}
+
+/// `WITH_IO` pipe endpoint holding a non-PIPE value. Takes the actual
+/// type name and the offending value; `Debug` rendering lives here.
+/// One key covers both match arms since the outer text is identical.
+pub fn eval_pipe_handle_mismatch(actual: &str, value: &super::Value) -> Diagnostic {
+    let message = format!("TypeMismatch: expected {PIPE_TYPE_NAME}, got {actual} ({value:?})");
+    let got_text = format!("{value:?}");
+    Diagnostic::new(
+        "dsl.eval.pipe_handle_mismatch",
+        message,
+        Diagnostic::make_fields(&[("actual", actual), ("got", &got_text)]),
+    )
+}
+
 /// `ASYNC` scope observing cancellation. Parameterless: the wording
 /// names the surface; no operand varies.
 pub fn eval_async_cancelled() -> Diagnostic {
@@ -5521,6 +5581,11 @@ mod tests {
             eval_dispatch_failed(&anyhow::anyhow!("x")).key(),
             eval_pipe_assertion_read_failed(&anyhow::anyhow!("x")).key(),
             eval_with_io_unexpanded().key(),
+            eval_with_io_geometry_needs_tty().key(),
+            eval_with_io_tty_no_stderr().key(),
+            eval_with_io_tty_needs_run().key(),
+            eval_with_io_duplicate_stream("stdin").key(),
+            eval_pipe_handle_mismatch("STRING", &crate::Value::string("x".to_string())).key(),
             eval_async_cancelled().key(),
             eval_flow_crosses_remote(1, "BREAK").key(),
             eval_stdin_lock_failed("READ").key(),
@@ -5945,6 +6010,26 @@ mod tests {
         assert_eq!(
             eval_with_io_unexpanded().message(),
             "WITH_IO block should have been expanded during parsing"
+        );
+        assert_eq!(
+            eval_with_io_geometry_needs_tty().message(),
+            "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size"
+        );
+        assert_eq!(
+            eval_with_io_tty_no_stderr().message(),
+            "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex"
+        );
+        assert_eq!(
+            eval_with_io_tty_needs_run().message(),
+            "WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it"
+        );
+        assert_eq!(
+            eval_with_io_duplicate_stream("stdin").message(),
+            "WITH_IO declared stdin more than once"
+        );
+        assert_eq!(
+            eval_pipe_handle_mismatch("STRING", &crate::Value::string("x".to_string())).message(),
+            "TypeMismatch: expected PIPE, got STRING (STRING(\"x\"))"
         );
         assert_eq!(eval_async_cancelled().message(), "ASYNC task cancelled");
         assert_eq!(

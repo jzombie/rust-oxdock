@@ -20,9 +20,8 @@ use oxdock_parser::constants::{
     KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WRITE,
 };
 use oxdock_parser::{
-    Arg, Command, Expr, IoBinding, IoStream, MAP_TYPE_NAME, PIPE_TYPE_NAME, PipeTarget,
-    STRING_TYPE_NAME, Step, StepKind, TypeTag, Value, WorkspaceTarget, render_structural,
-    sigil_var,
+    Arg, Command, Expr, IoBinding, IoStream, MAP_TYPE_NAME, PipeTarget, STRING_TYPE_NAME, Step,
+    StepKind, TypeTag, Value, WorkspaceTarget, render_structural, sigil_var,
 };
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
@@ -2111,7 +2110,7 @@ pub(crate) fn with_io_block<P: ProcessManager>(
     _idx: usize,
     _bindings: &[IoBinding],
 ) -> Result<()> {
-    bail!("{KEYWORD_WITH_IO} block should have been expanded during parsing")
+    Err(anyhow::Error::new(diag::eval_with_io_unexpanded()))
 }
 
 /// True when the wrapped command is a lone `RUN`: the only consumer or
@@ -2192,9 +2191,7 @@ fn tty_request(bindings: &[IoBinding], cmd: &StepKind) -> Result<Option<TtyReque
     }
     if !tty {
         if rows.is_some() || cols.is_some() {
-            bail!(
-                "{KEYWORD_WITH_IO} [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size"
-            );
+            return Err(anyhow::Error::new(diag::eval_with_io_geometry_needs_tty()));
         }
         return Ok(None);
     }
@@ -2202,15 +2199,11 @@ fn tty_request(bindings: &[IoBinding], cmd: &StepKind) -> Result<Option<TtyReque
         .iter()
         .any(|b| matches!(b.stream, IoStream::Stderr))
     {
-        bail!(
-            "{KEYWORD_WITH_IO} [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex"
-        );
+        return Err(anyhow::Error::new(diag::eval_with_io_tty_no_stderr()));
     }
     match cmd {
         StepKind::Run(_) | StepKind::RunExec { .. } => Ok(Some(TtyRequest { rows, cols })),
-        _ => bail!(
-            "{KEYWORD_WITH_IO} [tty] only wraps a {KEYWORD_RUN} step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it",
-        ),
+        _ => Err(anyhow::Error::new(diag::eval_with_io_tty_needs_run())),
     }
 }
 
@@ -2280,7 +2273,9 @@ fn resolve_io_streams<P: ProcessManager>(
         match binding.stream {
             IoStream::Stdin => {
                 if seen_stdin {
-                    bail!("{KEYWORD_WITH_IO} declared stdin more than once");
+                    return Err(anyhow::Error::new(diag::eval_with_io_duplicate_stream(
+                        "stdin",
+                    )));
                 }
                 seen_stdin = true;
                 next_expose_stdin = true;
@@ -2296,7 +2291,9 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Stdout => {
                 if seen_stdout {
-                    bail!("{KEYWORD_WITH_IO} declared stdout more than once");
+                    return Err(anyhow::Error::new(diag::eval_with_io_duplicate_stream(
+                        "stdout",
+                    )));
                 }
                 seen_stdout = true;
                 (step_stdout, out_pipe) = if let Some(target) = &binding.pipe {
@@ -2311,7 +2308,9 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Stderr => {
                 if seen_stderr {
-                    bail!("{KEYWORD_WITH_IO} declared stderr more than once");
+                    return Err(anyhow::Error::new(diag::eval_with_io_duplicate_stream(
+                        "stderr",
+                    )));
                 }
                 seen_stderr = true;
                 step_stderr = if let Some(target) = &binding.pipe {
@@ -2325,19 +2324,25 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Tty => {
                 if seen_tty {
-                    bail!("{KEYWORD_WITH_IO} declared tty more than once");
+                    return Err(anyhow::Error::new(diag::eval_with_io_duplicate_stream(
+                        "tty",
+                    )));
                 }
                 seen_tty = true;
             }
             IoStream::Rows(_) => {
                 if seen_rows {
-                    bail!("{KEYWORD_WITH_IO} declared rows more than once");
+                    return Err(anyhow::Error::new(diag::eval_with_io_duplicate_stream(
+                        "rows",
+                    )));
                 }
                 seen_rows = true;
             }
             IoStream::Cols(_) => {
                 if seen_cols {
-                    bail!("{KEYWORD_WITH_IO} declared cols more than once");
+                    return Err(anyhow::Error::new(diag::eval_with_io_duplicate_stream(
+                        "cols",
+                    )));
                 }
                 seen_cols = true;
             }
@@ -2366,24 +2371,18 @@ fn resolve_pipe_handle<P: ProcessManager>(
     match cx.state.get_var_typed(var) {
         Some((kind, value)) if matches!(kind, TypeTag::Pipe) => {
             let Some(handle) = value.as_pipe_handle() else {
-                bail!(
-                    "TypeMismatch: expected {PIPE_TYPE_NAME}, got {} ({:?})",
+                return Err(anyhow::Error::new(diag::eval_pipe_handle_mismatch(
                     kind.name(),
-                    value
-                );
+                    &value,
+                )));
             };
             Ok(handle)
         }
-        Some((kind, value)) => {
-            bail!(
-                "TypeMismatch: expected {PIPE_TYPE_NAME}, got {} ({:?})",
-                kind.name(),
-                value
-            );
-        }
-        None => {
-            bail!("undeclared variable ${var}");
-        }
+        Some((kind, value)) => Err(anyhow::Error::new(diag::eval_pipe_handle_mismatch(
+            kind.name(),
+            &value,
+        ))),
+        None => Err(anyhow::Error::new(diag::eval_undeclared(var))),
     }
 }
 
