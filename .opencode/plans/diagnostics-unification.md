@@ -2002,6 +2002,31 @@ transport, so this phase is mechanical:
    410 plus integration 629 green; clippy at
    baseline (3 pre-existing), fmt clean on
    both touched files.
+   RUN transport bulk step 2026-11-26
+   (file-sized batch): nine new dsl.eval.run_*
+   ctors with key plus wording pins
+   (run_cancelled with command covering shell
+   cmd plus pty what; run_argv_cancelled with
+   argv debug; run_unexpected_capture and
+   run_argv_unexpected_capture; run_exit_status
+   and run_argv_exit_status with platform
+   ExitStatus Display, pins use starts_with;
+   run_needs_program; run_pty_exit_status with
+   numeric code; run_exec_requires_arg
+   parameterless). Thirteen sites re-keyed
+   across run/run_argv/run_pty/resolve_run_exec_
+   argv: pre/post-spawn cancellation and exit
+   checks keep explicit return Err (statement
+   positions must diverge); Captured arms and
+   Completed/Cancelled match tails use bare
+   or return Err per tail versus statement
+   shape, avoiding needless_return. Spawn
+   with_context trio deliberately held for a
+   later io-ctor batch; exec-form element
+   type errors and SLEEP held. Bytes
+   identical. Core 410 plus integration 629
+   green; clippy at baseline (3 pre-existing),
+   fmt clean on both touched files.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

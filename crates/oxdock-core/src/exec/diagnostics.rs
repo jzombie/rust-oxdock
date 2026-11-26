@@ -13,8 +13,9 @@ use oxdock_parser::{
     KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CONST,
     KEYWORD_CONTINUE, KEYWORD_ENV, KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_IMPORT,
     KEYWORD_INHERIT_ENV, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_REMOTE,
-    KEYWORD_RETURN, KEYWORD_SWITCH, KEYWORD_TYPE, KEYWORD_WITH_IO, LIST_TYPE_NAME, MAP_TYPE_NAME,
-    PIPE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME, render_structural,
+    KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SWITCH, KEYWORD_TYPE, KEYWORD_WITH_IO, LIST_TYPE_NAME,
+    MAP_TYPE_NAME, PIPE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, VOID_TYPE_NAME,
+    render_structural,
 };
 
 use super::function_names::{
@@ -1903,6 +1904,113 @@ pub fn eval_capture_return_outside_function(step: usize) -> Diagnostic {
         "dsl.eval.capture_return_outside_function",
         message,
         Diagnostic::make_fields(&[("step", &step.to_string())]),
+    )
+}
+
+/// `RUN` interrupted by cancellation. Takes the rendered command
+/// (shell text or pty `what`); one key covers both, the template
+/// is identical. No source rides along.
+pub fn eval_run_cancelled(command: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_RUN} {command} interrupted by cancellation");
+    Diagnostic::new(
+        "dsl.eval.run_cancelled",
+        message,
+        Diagnostic::make_fields(&[("command", command)]),
+    )
+}
+
+/// `RUN` argv form interrupted by cancellation. Takes the argv
+/// slice; `Debug` rendering lives here. No source rides along.
+pub fn eval_run_argv_cancelled(argv: &[String]) -> Diagnostic {
+    let message = format!("{KEYWORD_RUN} {argv:?} interrupted by cancellation");
+    Diagnostic::new(
+        "dsl.eval.run_argv_cancelled",
+        message,
+        Diagnostic::make_fields(&[("argv", &format!("{argv:?}"))]),
+    )
+}
+
+/// `RUN` unexpectedly captured output (background contract
+/// breach). Takes the rendered shell command. No source rides
+/// along.
+pub fn eval_run_unexpected_capture(command: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_RUN} {command} unexpectedly captured output");
+    Diagnostic::new(
+        "dsl.eval.run_unexpected_capture",
+        message,
+        Diagnostic::make_fields(&[("command", command)]),
+    )
+}
+
+/// `RUN` argv form unexpectedly captured output. Takes the argv
+/// slice; `Debug` rendering lives here. No source rides along.
+pub fn eval_run_argv_unexpected_capture(argv: &[String]) -> Diagnostic {
+    let message = format!("{KEYWORD_RUN} {argv:?} unexpectedly captured output");
+    Diagnostic::new(
+        "dsl.eval.run_argv_unexpected_capture",
+        message,
+        Diagnostic::make_fields(&[("argv", &format!("{argv:?}"))]),
+    )
+}
+
+/// `RUN` shell form exited non-zero. Takes the rendered command and
+/// the platform exit status; `Display` rendering of the status
+/// lives here (platform-specific, so wording pins use
+/// `starts_with`). No source rides along.
+pub fn eval_run_exit_status(command: &str, status: &std::process::ExitStatus) -> Diagnostic {
+    let message = format!("{KEYWORD_RUN} {command} exited with status {status}");
+    Diagnostic::new(
+        "dsl.eval.run_exit_status",
+        message,
+        Diagnostic::make_fields(&[("command", command), ("status", &format!("{status}"))]),
+    )
+}
+
+/// `RUN` argv form exited non-zero. Takes the argv slice and the
+/// platform exit status; `Debug`/`Display` rendering lives here.
+/// No source rides along.
+pub fn eval_run_argv_exit_status(argv: &[String], status: &std::process::ExitStatus) -> Diagnostic {
+    let message = format!("{KEYWORD_RUN} {argv:?} exited with status {status}");
+    Diagnostic::new(
+        "dsl.eval.run_argv_exit_status",
+        message,
+        Diagnostic::make_fields(&[
+            ("argv", &format!("{argv:?}")),
+            ("status", &format!("{status}")),
+        ]),
+    )
+}
+
+/// `RUN` pty form asked to spawn with no program. Takes the rendered
+/// `what` (shell argv debug or shell text). No source rides along.
+pub fn eval_run_needs_program(command: &str) -> Diagnostic {
+    let message = format!("{KEYWORD_RUN} {command} needs at least a program");
+    Diagnostic::new(
+        "dsl.eval.run_needs_program",
+        message,
+        Diagnostic::make_fields(&[("command", command)]),
+    )
+}
+
+/// `RUN` pty form exited non-zero. Takes the rendered `what` and
+/// the numeric code. No source rides along.
+pub fn eval_run_pty_exit_status(command: &str, code: i64) -> Diagnostic {
+    let message = format!("{KEYWORD_RUN} {command} exited with status {code}");
+    Diagnostic::new(
+        "dsl.eval.run_pty_exit_status",
+        message,
+        Diagnostic::make_fields(&[("command", command), ("code", &code.to_string())]),
+    )
+}
+
+/// `RUN` exec form with no arguments. Parameterless: the keyword
+/// and the requirement are fixed. No source rides along.
+pub fn eval_run_exec_requires_arg() -> Diagnostic {
+    let message = format!("{KEYWORD_RUN} exec form requires at least one argument");
+    Diagnostic::new(
+        "dsl.eval.run_exec_requires_arg",
+        message,
+        Diagnostic::make_fields(&[]),
     )
 }
 
@@ -4691,6 +4799,15 @@ mod tests {
             eval_continue_outside_loop().key(),
             eval_capture_flow_outside_loop(1, "BREAK").key(),
             eval_capture_return_outside_function(1).key(),
+            eval_run_cancelled("echo hi").key(),
+            eval_run_argv_cancelled(&["echo".to_string()]).key(),
+            eval_run_unexpected_capture("echo hi").key(),
+            eval_run_argv_unexpected_capture(&["echo".to_string()]).key(),
+            eval_run_exit_status("echo hi", &exit_status_sample()).key(),
+            eval_run_argv_exit_status(&["echo".to_string()], &exit_status_sample()).key(),
+            eval_run_needs_program("[]").key(),
+            eval_run_pty_exit_status("echo hi", 1).key(),
+            eval_run_exec_requires_arg().key(),
             eval_async_exit_status(None, &exit_status_sample()).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
@@ -5095,6 +5212,40 @@ mod tests {
         assert_eq!(
             eval_capture_return_outside_function(1).message(),
             "step 1: RETURN outside function (cannot be captured)"
+        );
+        assert_eq!(
+            eval_run_cancelled("echo hi").message(),
+            "RUN echo hi interrupted by cancellation"
+        );
+        assert_eq!(
+            eval_run_argv_cancelled(&["echo".to_string()]).message(),
+            "RUN [\"echo\"] interrupted by cancellation"
+        );
+        assert_eq!(
+            eval_run_unexpected_capture("echo hi").message(),
+            "RUN echo hi unexpectedly captured output"
+        );
+        assert_eq!(
+            eval_run_needs_program("[]").message(),
+            "RUN [] needs at least a program"
+        );
+        assert_eq!(
+            eval_run_pty_exit_status("echo hi", 1).message(),
+            "RUN echo hi exited with status 1"
+        );
+        assert_eq!(
+            eval_run_exec_requires_arg().message(),
+            "RUN exec form requires at least one argument"
+        );
+        assert!(
+            eval_run_exit_status("echo hi", &exit_status_sample())
+                .message()
+                .starts_with("RUN echo hi exited with status ")
+        );
+        assert!(
+            eval_run_argv_exit_status(&["echo".to_string()], &exit_status_sample())
+                .message()
+                .starts_with("RUN [\"echo\"] exited with status ")
         );
         assert!(
             eval_async_exit_status(None, &exit_status_sample())

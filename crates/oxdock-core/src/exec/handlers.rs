@@ -262,7 +262,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
     {
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            bail!("{KEYWORD_RUN} {} interrupted by cancellation", cmd);
+            return Err(anyhow::Error::new(diag::eval_run_cancelled(cmd)));
         }
     }
 
@@ -275,7 +275,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),
         CommandResult::Captured(_) => {
-            bail!("{KEYWORD_RUN} {} unexpectedly captured output", cmd)
+            return Err(anyhow::Error::new(diag::eval_run_unexpected_capture(cmd)));
         }
     };
 
@@ -297,7 +297,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
             let _ = handle.kill();
-            bail!("{KEYWORD_RUN} {} interrupted by cancellation", cmd);
+            return Err(anyhow::Error::new(diag::eval_run_cancelled(cmd)));
         }
     }
 
@@ -317,7 +317,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
 
     let status = status?;
     if !status.success() {
-        bail!("{KEYWORD_RUN} {} exited with status {}", cmd, status);
+        return Err(anyhow::Error::new(diag::eval_run_exit_status(cmd, &status)));
     }
     Ok(())
 }
@@ -388,7 +388,7 @@ pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[Strin
     {
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            bail!("{KEYWORD_RUN} {argv:?} interrupted by cancellation");
+            return Err(anyhow::Error::new(diag::eval_run_argv_cancelled(argv)));
         }
     }
 
@@ -401,7 +401,9 @@ pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[Strin
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),
         CommandResult::Captured(_) => {
-            bail!("{KEYWORD_RUN} {argv:?} unexpectedly captured output",)
+            return Err(anyhow::Error::new(diag::eval_run_argv_unexpected_capture(
+                argv,
+            )));
         }
     };
 
@@ -420,7 +422,7 @@ pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[Strin
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
             let _ = handle.kill();
-            bail!("{KEYWORD_RUN} {argv:?} interrupted by cancellation");
+            return Err(anyhow::Error::new(diag::eval_run_argv_cancelled(argv)));
         }
     }
 
@@ -440,7 +442,9 @@ pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[Strin
 
     let status = status?;
     if !status.success() {
-        bail!("{KEYWORD_RUN} {argv:?} exited with status {}", status);
+        return Err(anyhow::Error::new(diag::eval_run_argv_exit_status(
+            argv, &status,
+        )));
     }
     Ok(())
 }
@@ -472,11 +476,11 @@ fn run_pty<P: ProcessManager>(
 ) -> Result<()> {
     use std::sync::atomic::Ordering;
     if argv.is_empty() {
-        bail!("{KEYWORD_RUN} {what} needs at least a program");
+        return Err(anyhow::Error::new(diag::eval_run_needs_program(what)));
     }
     // Same pre-spawn cancellation refusal as [`run`].
     if cx.state.cancel_token.load(Ordering::SeqCst) {
-        bail!("{KEYWORD_RUN} {what} interrupted by cancellation");
+        return Err(anyhow::Error::new(diag::eval_run_cancelled(what)));
     }
     if std::env::var(PROCESS_DEBUG_ENV_VAR).is_ok() {
         eprintln!("DEBUG: step RUN {what} under tty {tty:?}");
@@ -567,13 +571,13 @@ fn run_pty<P: ProcessManager>(
     match outcome {
         PtyOutcome::Completed(code) => {
             if code != 0 {
-                bail!("{KEYWORD_RUN} {what} exited with status {code}");
+                return Err(anyhow::Error::new(diag::eval_run_pty_exit_status(
+                    what, code,
+                )));
             }
             Ok(())
         }
-        PtyOutcome::Cancelled => {
-            bail!("{KEYWORD_RUN} {what} interrupted by cancellation");
-        }
+        PtyOutcome::Cancelled => Err(anyhow::Error::new(diag::eval_run_cancelled(what))),
     }
 }
 
@@ -618,7 +622,7 @@ pub(super) fn resolve_run_exec_argv<P: ProcessManager>(
         }
     }
     if out.is_empty() {
-        bail!("{KEYWORD_RUN} exec form requires at least one argument");
+        return Err(anyhow::Error::new(diag::eval_run_exec_requires_arg()));
     }
     Ok(out)
 }
