@@ -1236,7 +1236,7 @@ pub(super) fn unarchive<P: ProcessManager>(
         }
         Ok(())
     })
-    .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
+    .map_err(|e| diag::eval_unarchive_failed(src, dst, &anyhow::Error::from(e)))?;
     for (dir, mode) in deferred_dir_modes.into_iter().rev() {
         restore_archive_mode(fs, &dir, mode)
             .map_err(|e| diag::eval_unarchive_restore_mode_failed(src, dst, &e))?;

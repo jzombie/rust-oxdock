@@ -710,6 +710,7 @@ impl MuxioSession {
                 oxdock_core::apply_push_symlink(fs, &root, &host_rel, &target)
             }
         })
+        .map_err(anyhow::Error::from)
     }
 }
 

@@ -174,10 +174,15 @@ All sites already use keyed ctors; flip signatures to
       :1022,:5166).
       Decision: Approved. Small bulk, runs after B1 with no
       further input.
-- [ ] B6 `oxdock-utils/tar.rs` pack/unpack (3 sites): needs io
+- [x] B6 `oxdock-utils/tar.rs` pack/unpack (3 sites): needs io
       ctors + `apply`-callback migration design first.
-      Decision: Deferred design. Runs after the H-bulks once
-      the io-ctor and callback-migration shape is proposed.
+      Decision: Deferred design → executed. Two io owners
+      (`tar.pack.failed`, `tar.unpack.failed`, verbatim like
+      `build.operation.failed`) plus lossless `from_anyhow`
+      (mirroring `lift_dispatch_error`); the `apply` callback
+      stays `anyhow::Result` (callers span permanent-carrier
+      crates `cli` + net-plugin), lifted via `from_anyhow`, the
+      sanctioned external-boundary shape (H1/H5/H6b).
 - [x] B7 Closure cascade: `write_stdout`/`write_stderr`
       (`core/io.rs:368,392`) + 10+ inline closures in
       `handlers.rs`/`remote.rs`. Flip as one cascade with
@@ -1090,3 +1095,43 @@ All sites already use keyed ctors; flip signatures to
   `cargo clippy --workspace --all-targets` clean (zero warnings),
   `rustfmt --edition 2024 --check` clean on all 3 touched files
   (`assets.rs`, `diagnostics.rs`, `350-plan.md`).
+
+- B6 (2026-11-27): tar driver flip. All 5 fns (`tar.rs`:
+  `pack_to`, `unpack_from`, `unpack_auto_from`,
+  `unpack_raw_checked`, `drain_entries`) return
+  `DiagnosticResult`; 3 outer `anyhow::Error::new(ctor(...))`
+  wrappers dropped (`archive_empty`, `archive_truncated`,
+  `unsupported_type`). Two new keyed ctors for the bare io
+  paths: `pack_failed` (`tar.pack.failed`) and `unpack_failed`
+  (`tar.unpack.failed`), both verbatim reason like
+  `build.operation.failed`, plus the single owner `from_anyhow`
+  (lossless: first keyed `Diagnostic` in the chain reclaimed,
+  outer `.context(...)` frames replayed via native
+  `with_contexts`, mirroring `lift_dispatch_error`; unkeyed
+  fallout wraps verbatim via `unpack_failed`). Tar/flate2/io
+  `?`s map via the new owners (`anyhow::Error::new(e)`
+  ctor-arg adapters, H2a/H3 pattern); `sanitize_rel` already
+  native passes through. The `apply` callback stays
+  `anyhow::Result` (external boundary: callers span
+  permanent-carrier crates `cli` + net-plugin), lifted at the
+  three call sites via `from_anyhow`. Core `unarchive` outer
+  bridges via `&anyhow::Error::from(e)` (A4/B2 pattern,
+  byte-identical `{reason:#}`); `cli` pack/unpack and
+  net-plugin `pack_to` sites hold via `From` with zero changes.
+  Gate-caught fix within the bulk: net-plugin `apply_push_tar`
+  is a tail-expression return (no `?`), so it bridges
+  explicitly with `.map_err(anyhow::Error::from)` (A4
+  precedent; downcast/exit pins ride the same node). Pin tests
+  extended (distinct keys + verbatim messages + reclaim +
+  frame preservation, SEV-2 lesson applied up front). anyhow
+  dep stays (callback signature + ctor adapters permanent).
+  Gates: `cargo test -p oxdock-utils` green (9 + 0),
+  `cargo check --workspace --all-targets` clean, full
+  `cargo test --workspace` green with zero failures across all
+  suites (the two
+  `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
+  expected fixture stderr, not failures),
+  `cargo clippy --workspace --all-targets` clean (zero warnings),
+  `rustfmt --edition 2024 --check` clean on all 5 touched files
+  (`tar.rs`, `diagnostics.rs`, `handlers.rs`, `session.rs`,
+  `350-plan.md`).
