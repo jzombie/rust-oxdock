@@ -185,7 +185,7 @@ impl OxDockHandler {
         modules: Vec<oxdock_core::HostModule<oxdock_process::DefaultProcessManager>>,
         types: Vec<&'static oxdock_core::TypeDescriptor>,
         workspace_root: &GuardedPath,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         let outcome = match Self::build_inner(
             script_text,
             modules,
@@ -202,7 +202,7 @@ impl OxDockHandler {
         let mut inner = self
             .inner
             .lock()
-            .map_err(|_| anyhow::Error::new(mcp_diag::session_lock_poisoned_reload()))?;
+            .map_err(|_| mcp_diag::session_lock_poisoned_reload())?;
         inner.status.generation += 1;
         inner.status.script_sha256 = outcome.hash.clone();
         inner.status.loaded_at_unix = unix_now();
@@ -335,9 +335,11 @@ impl OxDockHandler {
 
 /// Build the lazy session filesystem plus its backing-dir hold. The hold
 /// must outlive the session, so it rides in `HandlerInner`.
-pub fn session_fs(root: &GuardedPath) -> Result<(Box<dyn WorkspaceFs>, Arc<LazyGuardedTempDir>)> {
+pub fn session_fs(
+    root: &GuardedPath,
+) -> DiagnosticResult<(Box<dyn WorkspaceFs>, Arc<LazyGuardedTempDir>)> {
     let mut resolver = PathResolver::new_lazy(root.clone())
-        .map_err(|err| anyhow::Error::new(mcp_diag::session_guard_workspace_root(&err)))?;
+        .map_err(|err| mcp_diag::session_guard_workspace_root(&err))?;
     resolver.set_workspace_root(root.clone());
     let hold = resolver.snapshot_handle();
     Ok((Box::new(resolver), hold))
@@ -347,11 +349,13 @@ pub fn session_fs(root: &GuardedPath) -> Result<(Box<dyn WorkspaceFs>, Arc<LazyG
 /// carry their parent as guard root (`join_script`), which may differ
 /// from the workspace root when the server was launched elsewhere;
 /// rooting the read at the path itself keeps reload working there.
-fn read_guarded(path: &GuardedPath) -> Result<String> {
+fn read_guarded(path: &GuardedPath) -> DiagnosticResult<String> {
     let anchor = path.root();
     let resolver = PathResolver::new(anchor, anchor)
-        .map_err(|err| anyhow::Error::new(mcp_diag::session_guard_script_root(&err)))?;
-    resolver.read_to_string(path)
+        .map_err(|err| mcp_diag::session_guard_script_root(&err))?;
+    resolver
+        .read_to_string(path)
+        .map_err(|err| mcp_diag::session_script_read_failed(&err))
 }
 
 impl ServerHandler for OxDockHandler {
@@ -834,15 +838,16 @@ impl OxDockHandler {
         types: Vec<&'static oxdock_core::TypeDescriptor>,
         workspace_root: &GuardedPath,
         script_path: Option<&GuardedPath>,
-    ) -> Result<BuiltInner> {
+    ) -> DiagnosticResult<BuiltInner> {
         let mut engine = oxdock_core::Engine::new();
         for module in &modules {
             engine.register_module(module.clone());
         }
         let parsed =
-            oxdock_core::parse_script_with_modules_and_exports(script_text, engine.module_table())?;
+            oxdock_core::parse_script_with_modules_and_exports(script_text, engine.module_table())
+                .map_err(|err| mcp_diag::session_script_parse_failed(&err))?;
         if parsed.exports.funcs.is_empty() {
-            return Err(anyhow::Error::new(mcp_diag::export_no_entries()));
+            return Err(mcp_diag::export_no_entries());
         }
         if parsed
             .exports
@@ -850,9 +855,7 @@ impl OxDockHandler {
             .iter()
             .any(|name| name == STATUS_TOOL_NAME)
         {
-            return Err(anyhow::Error::new(mcp_diag::export_status_name_reserved(
-                STATUS_TOOL_NAME,
-            )));
+            return Err(mcp_diag::export_status_name_reserved(STATUS_TOOL_NAME));
         }
         let (fs, hold) = session_fs(workspace_root)?;
         let session = McpSession::init(

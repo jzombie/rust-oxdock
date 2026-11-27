@@ -88,7 +88,7 @@ All sites already use keyed ctors; flip signatures to
   Section C's permanent carrier list, not its removal list.
 
 ### A6. `oxdock-mcp/server.rs` (5 sites)
-- [ ] Flip with B1: `session_lock_poisoned_reload`,
+- [x] Flip with B1: `session_lock_poisoned_reload`,
       guard-workspace/script-root, `export_no_entries`,
       status-name-reserved
 
@@ -890,3 +890,33 @@ All sites already use keyed ctors; flip signatures to
   `rustfmt --edition 2024 --check` clean on touched files
   (`steps.rs`, `handlers.rs`, `mod.rs`, `import.rs`, `mcp.rs`,
   `remote.rs`).
+
+- A6 (2026-11-27): mcp server boundary. `reload`, `session_fs`,
+  `read_guarded`, `build_inner` (`oxdock-mcp/server.rs`) return
+  `DiagnosticResult`; 5 outer `anyhow::Error::new(...)` wrappers
+  dropped (`session_lock_poisoned_reload`,
+  `session_guard_workspace_root`, `session_guard_script_root`,
+  `export_no_entries`, `export_status_name_reserved`). Two
+  previously-bare anyhow leaves gain keyed owners (no magic
+  strings, no info loss: reason chain renders inline):
+  `session_script_parse_failed`
+  (`mcp.session.script_parse_failed`) for
+  `parse_script_with_modules_and_exports`,
+  `session_script_read_failed`
+  (`mcp.session.script_read_failed`) for `read_to_string`.
+  Already-native callees pass through untouched
+  (`McpSession::init`, `tool_metas`, `reject_reserved_metas`,
+  `build_tool_table`). Anyhow parents hold via `From` with no
+  caller changes (`init_handler`, `from_built`, `new`,
+  `from_parts`, `spawn_reloader` match arms, tests). Pin tests
+  extended (distinct keys + canonical messages for both new
+  ctors). Reload-failure `message.contains("BROKEN")` contract
+  preserved via inline reason rendering. Gates:
+  `cargo test -p oxdock-mcp` green (11 + 13 + 26 + 0), full
+  `cargo test --workspace` green with zero failures across all
+  suites (the two
+  `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
+  expected fixture stderr, not failures),
+  `cargo clippy --workspace --all-targets` clean (zero warnings),
+  `rustfmt --edition 2024 --check` clean on touched files
+  (`server.rs`, `diagnostics.rs`).
