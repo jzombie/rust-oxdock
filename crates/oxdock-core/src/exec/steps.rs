@@ -950,12 +950,12 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             } else {
                 let from_resolved = super::args::resolve_arg(from, &mut cx)?;
                 let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-                handlers::copy(
+                Ok(handlers::copy(
                     &mut cx,
                     from_workspace.clone(),
                     &from_resolved,
                     &to_resolved,
-                )
+                )?)
             }
         }
         StepKind::CopyGit {
@@ -967,13 +967,13 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let rev_resolved = super::args::resolve_arg(rev, &mut cx)?;
             let from_resolved = super::args::resolve_arg(from, &mut cx)?;
             let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-            handlers::copy_git(
+            Ok(handlers::copy_git(
                 &mut cx,
                 &rev_resolved,
                 &from_resolved,
                 &to_resolved,
                 *include_dirty,
-            )
+            )?)
         }
         StepKind::Archive { src, dst, raw } => {
             let src_resolved = super::args::resolve_arg(src, &mut cx)?;
@@ -1007,29 +1007,29 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         } => {
             let from_resolved = super::args::resolve_arg(from, &mut cx)?;
             let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-            handlers::symlink(
+            Ok(handlers::symlink(
                 &mut cx,
                 from_workspace.clone(),
                 &from_resolved,
                 &to_resolved,
-            )
+            )?)
         }
         StepKind::Mkdir(arg) => {
             let path = super::args::resolve_arg(arg, &mut cx)?;
-            handlers::mkdir(&mut cx, &path)
+            Ok(handlers::mkdir(&mut cx, &path)?)
         }
         StepKind::Install { from, to } => {
             let from_resolved = super::args::resolve_arg(from, &mut cx)?;
             let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-            handlers::install(&mut cx, &from_resolved, &to_resolved)
+            Ok(handlers::install(&mut cx, &from_resolved, &to_resolved)?)
         }
         StepKind::SetExecutable { path } => {
             let resolved = super::args::resolve_arg(path, &mut cx)?;
-            handlers::set_executable(&mut cx, &resolved)
+            Ok(handlers::set_executable(&mut cx, &resolved)?)
         }
         StepKind::Ls(arg) => {
             let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
-            handlers::ls(&mut cx, &resolved)
+            Ok(handlers::ls(&mut cx, &resolved)?)
         }
         StepKind::Read(arg) => {
             let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
@@ -1050,7 +1050,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         }
         StepKind::ListAppend { list, item } => {
             let value = super::args::evaluate_assert_operand(item, &mut cx)?;
-            handlers::push_into(&mut cx, list, value)
+            Ok(handlers::push_into(&mut cx, list, value)?)
         }
         StepKind::Write { path, contents } => {
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
@@ -1073,11 +1073,15 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::AppendLine { path, contents } => {
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
             let contents_resolved = super::args::resolve_arg(contents, &mut cx)?;
-            handlers::append_line(&mut cx, &path_resolved, &contents_resolved)
+            Ok(handlers::append_line(
+                &mut cx,
+                &path_resolved,
+                &contents_resolved,
+            )?)
         }
         StepKind::Remove { path, recursive } => {
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
-            handlers::remove(&mut cx, &path_resolved, *recursive)
+            Ok(handlers::remove(&mut cx, &path_resolved, *recursive)?)
         }
         StepKind::Expand { path, overrides } => {
             let path_resolved = super::args::resolve_arg_opt(path, &mut cx)?;

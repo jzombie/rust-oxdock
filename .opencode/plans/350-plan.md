@@ -23,7 +23,7 @@ All sites already use keyed ctors; flip signatures to
       `unarchive`
 - [x] H2a read/write cluster (30): `write`, `append`, `read`,
       `read_line`
-- [ ] H2b fs-ops cluster (35): `symlink`, `remove`, `mkdir`,
+- [x] H2b fs-ops cluster (35): `symlink`, `remove`, `mkdir`,
       `set_executable`, `ls`, `install`, `append_line`,
       `push_into`, `copy`, `copy_git`, `place_file_in_dir`,
       `link_base_name`
@@ -544,3 +544,26 @@ All sites already use keyed ctors; flip signatures to
   (`lazy_resolver_bare_snapshot_selection_creates_nothing`,
   8205 leaked `oxdock-pending-*` dirs in `$TMPDIR`); unrelated
   crate, passes on retry (71/71), re-run green.
+
+- H2b (2026-11-27): fs-ops cluster. `copy`, `place_file_in_dir`,
+  `copy_git`, `symlink`, `link_base_name`, `mkdir`,
+  `set_executable`, `ls`, `install`, `push_into`, `append_line`,
+  `remove` (`core/exec/handlers.rs`) return `DiagnosticResult`;
+  35 outer `anyhow::Error::new(diag::...)` wrappers dropped.
+  Ctors keep `&anyhow::Error` params as conversion owners
+  (byte-identical messages); `eval_list_append_failed` keeps its
+  `Diagnostic` param (`push_into_list` already native). Inner
+  `link_base_name` propagates natively via `?`; `place_file_in_dir`
+  re-wraps through `eval_copy_failed` with one
+  `&anyhow::Error::new(e)` bridge (Diagnostic-to-ctor adapter, same
+  as H2a flush pattern). Already-native `write_stdout` closure in
+  `ls` passes through untouched. 10 `dispatch_*` anyhow-parent
+  boundaries plus 10 `steps.rs` arms use `Ok(f(...)?)`; pipeline
+  table untouched. No test changes. Gates:
+  `cargo test --workspace` green (core 432 + 629 + 12 + 2,
+  diagnostics 12, process 121, fs 71, cli 50 + 12, mcp
+  11 + 26 + 13, net-plugin 38 + 38, logic-tests
+  5 + 2 + 8 + 17 + 15 + 19 + 1 + 4 + 4 + 31 + 6 + 12 + 2 +
+  19 + 11 + 4 + 1 + 5 + 3 + 15), `cargo clippy --workspace
+  --all-targets` clean, `rustfmt --edition 2024 --check` clean
+  on touched files.

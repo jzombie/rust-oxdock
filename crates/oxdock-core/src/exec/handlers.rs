@@ -752,27 +752,27 @@ pub(super) fn copy<P: ProcessManager>(
     from_workspace: Option<WorkspaceTarget>,
     from: &str,
     to: &str,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let from_abs = if let Some(target) = from_workspace {
         cx.state
             .fs
             .resolve_copy_source_from_target(copy_source_root(target), from)
-            .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?
+            .map_err(|e| diag::eval_copy_failed(from, to, &e))?
     } else {
         cx.state
             .fs
             .resolve_copy_source(from)
-            .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?
+            .map_err(|e| diag::eval_copy_failed(from, to, &e))?
     };
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_copy_failed(from, to, &e))?;
     let to_abs = place_file_in_dir(cx.state.fs.as_ref(), &from_abs, to, &to_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_copy_failed(from, to, &anyhow::Error::new(e)))?;
     copy_entry(cx.state.fs.as_ref(), &from_abs, &to_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_copy_failed(from, to, &e))?;
     Ok(())
 }
 
@@ -787,7 +787,7 @@ fn place_file_in_dir(
     from_abs: &GuardedPath,
     to: &str,
     to_abs: &GuardedPath,
-) -> Result<GuardedPath> {
+) -> oxdock_diagnostics::DiagnosticResult<GuardedPath> {
     if !matches!(fs.entry_kind(from_abs), Ok(EntryKind::File)) {
         return Ok(to_abs.clone());
     }
@@ -801,11 +801,11 @@ fn place_file_in_dir(
         .as_path()
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
-        .ok_or_else(|| anyhow::Error::new(diag::eval_copy_no_file_name(&display)))?;
+        .ok_or_else(|| diag::eval_copy_no_file_name(&display))?;
     let to_display = to_abs.display().to_string();
     to_abs
         .join(&base)
-        .map_err(|e| anyhow::Error::new(diag::eval_copy_destination_escapes(&to_display, &e)))
+        .map_err(|e| diag::eval_copy_destination_escapes(&to_display, &e))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -815,16 +815,16 @@ pub(super) fn copy_git<P: ProcessManager>(
     from: &str,
     to: &str,
     include_dirty: bool,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .map_err(|e| anyhow::Error::new(diag::eval_copy_git_failed(rev, from, to, &e)))?;
+        .map_err(|e| diag::eval_copy_git_failed(rev, from, to, &e))?;
     cx.state
         .fs
         .copy_from_git(rev, from, &to_abs, include_dirty)
-        .map_err(|e| anyhow::Error::new(diag::eval_copy_git_failed(rev, from, to, &e)))?;
+        .map_err(|e| diag::eval_copy_git_failed(rev, from, to, &e))?;
     Ok(())
 }
 
@@ -1303,22 +1303,22 @@ pub(super) fn symlink<P: ProcessManager>(
     from_workspace: Option<WorkspaceTarget>,
     from: &str,
     to: &str,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_symlink_failed(from, to, &e))?;
     let from_abs = if let Some(target) = from_workspace {
         cx.state
             .fs
             .resolve_copy_source_from_target(copy_source_root(target), from)
-            .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
     } else {
         cx.state
             .fs
             .resolve_copy_source(from)
-            .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
     };
     // `ln -s` destination semantics: a directory destination (existing,
     // or named with a trailing slash) receives the link under the
@@ -1327,66 +1327,76 @@ pub(super) fn symlink<P: ProcessManager>(
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
     } else if matches!(cx.state.fs.entry_kind(&to_abs), Ok(EntryKind::Dir)) {
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
     } else {
         to_abs
     };
     cx.state
         .fs
         .symlink(&from_abs, &to_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_symlink_failed(from, to, &e))?;
     Ok(())
 }
 
 /// Basename of a link source for directory-destination placement. Lexical:
 /// dangling sources have no entry kind to inspect.
-fn link_base_name(from_abs: &GuardedPath, from: &str) -> Result<String> {
+fn link_base_name(
+    from_abs: &GuardedPath,
+    from: &str,
+) -> oxdock_diagnostics::DiagnosticResult<String> {
     from_abs
         .as_path()
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
-        .ok_or_else(|| anyhow::Error::new(diag::eval_symlink_no_file_name(from)))
+        .ok_or_else(|| diag::eval_symlink_no_file_name(from))
 }
 
-pub(super) fn mkdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> Result<()> {
+pub(super) fn mkdir<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    path: &str,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_mkdir_resolve_failed(path, &e)))?;
-    cx.state.fs.create_dir_all(&target).map_err(|e| {
-        anyhow::Error::new(diag::eval_mkdir_create_failed(
-            &target.display().to_string(),
-            &e,
-        ))
-    })?;
+        .map_err(|e| diag::eval_mkdir_resolve_failed(path, &e))?;
+    cx.state
+        .fs
+        .create_dir_all(&target)
+        .map_err(|e| diag::eval_mkdir_create_failed(&target.display().to_string(), &e))?;
     Ok(())
 }
 
-pub(super) fn set_executable<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> Result<()> {
+pub(super) fn set_executable<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    path: &str,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_set_executable_failed(path, &e)))?;
+        .map_err(|e| diag::eval_set_executable_failed(path, &e))?;
     cx.state
         .fs
         .set_executable(&target)
-        .map_err(|e| anyhow::Error::new(diag::eval_set_executable_failed(path, &e)))?;
+        .map_err(|e| diag::eval_set_executable_failed(path, &e))?;
     Ok(())
 }
 
-pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String>) -> Result<()> {
+pub(super) fn ls<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    arg: &Option<String>,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target_dir = if let Some(p) = arg {
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, p)
-            .map_err(|e| anyhow::Error::new(diag::eval_ls_resolve_failed(Some(p), &e)))?
+            .map_err(|e| diag::eval_ls_resolve_failed(Some(p), &e))?
     } else {
         // Bare `LS` lists the current directory: ride the choke point so a
         // pending snapshot materializes (a snapshot read), matching the
@@ -1394,14 +1404,13 @@ pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, ".")
-            .map_err(|e| anyhow::Error::new(diag::eval_ls_resolve_failed(None, &e)))?
+            .map_err(|e| diag::eval_ls_resolve_failed(None, &e))?
     };
-    let mut entries = cx.state.fs.read_dir_entries(&target_dir).map_err(|e| {
-        anyhow::Error::new(diag::eval_ls_read_failed(
-            &target_dir.display().to_string(),
-            &e,
-        ))
-    })?;
+    let mut entries = cx
+        .state
+        .fs
+        .read_dir_entries(&target_dir)
+        .map_err(|e| diag::eval_ls_read_failed(&target_dir.display().to_string(), &e))?;
     entries.sort_by_key(|e| e.file_name());
     write_stdout(cx.out.clone(), |writer| {
         writeln!(writer, "{}:", target_dir.display())
@@ -3973,7 +3982,12 @@ pub(crate) fn dispatch_copy<P: ProcessManager>(
     }
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
-    copy(cx, from_workspace.clone(), &from_resolved, &to_resolved)
+    Ok(copy(
+        cx,
+        from_workspace.clone(),
+        &from_resolved,
+        &to_resolved,
+    )?)
 }
 
 pub(crate) fn dispatch_archive<P: ProcessManager>(
@@ -4027,13 +4041,13 @@ pub(crate) fn dispatch_copy_git<P: ProcessManager>(
     let rev_resolved = super::args::resolve_arg(rev, cx)?;
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
-    copy_git(
+    Ok(copy_git(
         cx,
         &rev_resolved,
         &from_resolved,
         &to_resolved,
         *include_dirty,
-    )
+    )?)
 }
 
 pub(crate) fn dispatch_symlink<P: ProcessManager>(
@@ -4050,7 +4064,12 @@ pub(crate) fn dispatch_symlink<P: ProcessManager>(
     };
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
-    symlink(cx, from_workspace.clone(), &from_resolved, &to_resolved)
+    Ok(symlink(
+        cx,
+        from_workspace.clone(),
+        &from_resolved,
+        &to_resolved,
+    )?)
 }
 
 pub(crate) fn dispatch_mkdir<P: ProcessManager>(
@@ -4061,28 +4080,28 @@ pub(crate) fn dispatch_mkdir<P: ProcessManager>(
         unreachable!()
     };
     let path = super::args::resolve_arg(arg, cx)?;
-    mkdir(cx, &path)
+    Ok(mkdir(cx, &path)?)
 }
 
 pub(super) fn install<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     from: &str,
     to: &str,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let from_abs = cx
         .state
         .fs
         .resolve_read(&cx.state.cwd, from)
-        .map_err(|e| anyhow::Error::new(diag::eval_install_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_install_failed(from, to, &e))?;
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .map_err(|e| anyhow::Error::new(diag::eval_install_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_install_failed(from, to, &e))?;
     cx.state
         .fs
         .install_file_atomic(&from_abs, &to_abs, EXECUTABLE_MODE)
-        .map_err(|e| anyhow::Error::new(diag::eval_install_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_install_failed(from, to, &e))?;
     Ok(())
 }
 
@@ -4095,7 +4114,7 @@ pub(crate) fn dispatch_install<P: ProcessManager>(
     };
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
-    install(cx, &from_resolved, &to_resolved)
+    Ok(install(cx, &from_resolved, &to_resolved)?)
 }
 
 pub(crate) fn dispatch_set_executable<P: ProcessManager>(
@@ -4106,7 +4125,7 @@ pub(crate) fn dispatch_set_executable<P: ProcessManager>(
         unreachable!()
     };
     let resolved = super::args::resolve_arg(path, cx)?;
-    set_executable(cx, &resolved)
+    Ok(set_executable(cx, &resolved)?)
 }
 
 pub(crate) fn dispatch_ls<P: ProcessManager>(
@@ -4117,7 +4136,7 @@ pub(crate) fn dispatch_ls<P: ProcessManager>(
         unreachable!()
     };
     let resolved = super::args::resolve_arg_opt(arg, cx)?;
-    ls(cx, &resolved)
+    Ok(ls(cx, &resolved)?)
 }
 
 pub(crate) fn dispatch_read<P: ProcessManager>(
@@ -4261,10 +4280,10 @@ pub(super) fn push_into<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     var: &str,
     item: Value,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     cx.state
         .push_into_list(var, item)
-        .map_err(|e| anyhow::Error::new(diag::eval_list_append_failed(var, e)))
+        .map_err(|e| diag::eval_list_append_failed(var, e))
 }
 
 pub(crate) fn dispatch_push_into_step<P: ProcessManager>(
@@ -4275,7 +4294,7 @@ pub(crate) fn dispatch_push_into_step<P: ProcessManager>(
         unreachable!()
     };
     let value = super::args::evaluate_assert_operand(item, cx)?;
-    push_into(cx, list, value)
+    Ok(push_into(cx, list, value)?)
 }
 
 pub(crate) fn dispatch_write<P: ProcessManager>(
@@ -4311,33 +4330,29 @@ pub(crate) fn dispatch_append_line<P: ProcessManager>(
     };
     let path_resolved = super::args::resolve_arg(path, cx)?;
     let contents_resolved = super::args::resolve_arg(contents, cx)?;
-    append_line(cx, &path_resolved, &contents_resolved)
+    Ok(append_line(cx, &path_resolved, &contents_resolved)?)
 }
 
 pub(super) fn append_line<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
     contents: &str,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_append_line_resolve_failed(path, &e)))?;
-    cx.state.fs.ensure_parent_dir(&target).map_err(|e| {
-        anyhow::Error::new(diag::eval_ensure_parent_failed(
-            &target.display().to_string(),
-            &e,
-        ))
-    })?;
+        .map_err(|e| diag::eval_append_line_resolve_failed(path, &e))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .map_err(|e| diag::eval_ensure_parent_failed(&target.display().to_string(), &e))?;
     let mut line = contents.to_string();
     line.push('\n');
     cx.state
         .fs
         .append_file(&target, line.as_bytes())
-        .map_err(|e| {
-            anyhow::Error::new(diag::eval_append_failed(&target.display().to_string(), &e))
-        })?;
+        .map_err(|e| diag::eval_append_failed(&target.display().to_string(), &e))?;
     Ok(())
 }
 
@@ -4345,7 +4360,7 @@ pub(super) fn remove<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
     recursive: bool,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     // Removal resolves against the ambient cwd. The deletion guard
     // below compares against the real run cwd and roots, so a module
     // can never remove the caller's working directory out from
@@ -4355,7 +4370,7 @@ pub(super) fn remove<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_remove_failed(path, &e)))?;
+        .map_err(|e| diag::eval_remove_failed(path, &e))?;
     // Root and working-directory deletion guard: removing the cwd (or any
     // of its ancestors), the workspace root, or the effective root (`/`
     // under `WORKSPACE SYSTEM`) would destroy the execution context or
@@ -4374,7 +4389,7 @@ pub(super) fn remove<P: ProcessManager>(
         || Some(&target) == cx.state.fs.workspace_root()
         || target == *cx.state.fs.root()
     {
-        return Err(anyhow::Error::new(diag::eval_remove_protected(path)));
+        return Err(diag::eval_remove_protected(path));
     }
     // Lexical link probe: canonical resolution routes through the
     // final link, so a link would otherwise read as its target and the
@@ -4383,33 +4398,34 @@ pub(super) fn remove<P: ProcessManager>(
         .state
         .fs
         .remove_link_if_symlink(&cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_remove_failed(path, &e)))?
+        .map_err(|e| diag::eval_remove_failed(path, &e))?
     {
         return Ok(());
     }
     match cx.state.fs.entry_kind_no_follow(&target) {
-        Err(_) => Err(anyhow::Error::new(diag::eval_remove_missing(path))),
+        Err(_) => Err(diag::eval_remove_missing(path)),
         Ok(EntryKind::File) => {
             cx.state
                 .fs
                 .remove_file(&target)
-                .map_err(|e| anyhow::Error::new(diag::eval_remove_failed(path, &e)))?;
+                .map_err(|e| diag::eval_remove_failed(path, &e))?;
             Ok(())
         }
         // A link reaching here appeared between the probe and the
         // resolve: fail closed rather than touch its target.
-        Ok(EntryKind::Symlink) => Err(anyhow::Error::new(diag::eval_remove_link_changed(path))),
+        Ok(EntryKind::Symlink) => Err(diag::eval_remove_link_changed(path)),
         Ok(EntryKind::Dir) => {
             if recursive {
                 cx.state
                     .fs
                     .remove_dir_all(&target)
-                    .map_err(|e| anyhow::Error::new(diag::eval_remove_failed(path, &e)))?;
+                    .map_err(|e| diag::eval_remove_failed(path, &e))?;
                 Ok(())
             } else {
-                cx.state.fs.remove_empty_dir(&target).map_err(|e| {
-                    anyhow::Error::new(diag::eval_remove_not_empty_failed(path, &e))
-                })?;
+                cx.state
+                    .fs
+                    .remove_empty_dir(&target)
+                    .map_err(|e| diag::eval_remove_not_empty_failed(path, &e))?;
                 Ok(())
             }
         }
@@ -4424,7 +4440,7 @@ pub(crate) fn dispatch_remove<P: ProcessManager>(
         unreachable!()
     };
     let path_resolved = super::args::resolve_arg(path, cx)?;
-    remove(cx, &path_resolved, *recursive)
+    Ok(remove(cx, &path_resolved, *recursive)?)
 }
 
 pub(crate) fn dispatch_expand<P: ProcessManager>(
