@@ -27,7 +27,7 @@ All sites already use keyed ctors; flip signatures to
       `set_executable`, `ls`, `install`, `append_line`,
       `push_into`, `copy`, `copy_git`, `place_file_in_dir`,
       `link_base_name`
-- [ ] H3 run cluster (41): `run`, `run_argv`, `run_pty`,
+- [x] H3 run cluster (41): `run`, `run_argv`, `run_pty`,
       `resolve_run_exec_argv`, `flatten_exec_value`,
       `resolve_io_streams`, `top_level_flow`,
       `drain_stdin_bounded`, `exact_stdout_bytes`,
@@ -567,3 +567,27 @@ All sites already use keyed ctors; flip signatures to
   19 + 11 + 4 + 1 + 5 + 3 + 15), `cargo clippy --workspace
   --all-targets` clean, `rustfmt --edition 2024 --check` clean
   on touched files.
+
+- H3 (2026-11-27): run cluster. `run`, `run_argv`, `run_pty`,
+  `resolve_run_exec_argv`, `flatten_exec_value`,
+  `drain_stdin_bounded`, `exact_stdout_bytes`, `tty_request`,
+  `resolve_io_streams`, `resolve_pipe_handle`, `top_level_flow`
+  (`core/exec/handlers.rs`) return `DiagnosticResult`; 41 outer
+  `anyhow::Error::new(diag::...)` wrappers dropped. Ctors keep
+  `&anyhow::Error` params as conversion owners (byte-identical
+  messages). One inner `&anyhow::Error::new(e)` bridge kept in
+  `run_pty` (`eval_run_spawn_failed` over the pty-session error,
+  same adapter pattern as H2a/H2b). Already-native callees pass
+  through untouched (`command_ctx`, `check_spawn_anchors`,
+  `BackgroundHandle::wait`/`kill`, `load_var_binding`,
+  args/io helpers, `write_stdout` closures). 10 anyhow-parent
+  `top_level_flow(...)` call sites (H4/H5 owners: `fail`,
+  `for_loop`, `if_then`, `switch_run`, `with_io`,
+  `handle_return`, `while_loop`, `assign_capture`, `timeout`,
+  `isolated`) plus 2 `dispatch_*` fns and 2 `steps.rs` arms
+  (`Run`, `RunExec`) bridge via `Ok(f(...)?)`; pipeline table
+  untouched. `with_io` itself stays anyhow and holds the flipped
+  helpers via `From`. No test changes. Gates: pending execution
+  upon PASS (`cargo test --workspace`,
+  `cargo clippy --workspace --all-targets`,
+  `rustfmt --edition 2024 --check` on touched files).

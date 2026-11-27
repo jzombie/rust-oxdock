@@ -892,11 +892,11 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::Run(arg) => {
             let cmd = super::args::resolve_arg(arg, &mut cx)?;
             let cmd = super::args::expand_dsl_vars(&cmd, cx.state)?;
-            handlers::run(&mut cx, &cmd)
+            Ok(handlers::run(&mut cx, &cmd)?)
         }
         StepKind::RunExec { argv } => {
             let resolved = handlers::resolve_run_exec_argv(argv, &mut cx)?;
-            handlers::run_argv(&mut cx, &resolved)
+            Ok(handlers::run_argv(&mut cx, &resolved)?)
         }
         StepKind::Echo(arg) => {
             let msg = super::args::resolve_arg(arg, &mut cx)?;
