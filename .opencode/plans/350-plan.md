@@ -163,7 +163,7 @@ All sites already use keyed ctors; flip signatures to
       ctors + `apply`-callback migration design first.
       Decision: Deferred design. Runs after the H-bulks once
       the io-ctor and callback-migration shape is proposed.
-- [ ] B7 Closure cascade: `write_stdout`/`write_stderr`
+- [x] B7 Closure cascade: `write_stdout`/`write_stderr`
       (`core/io.rs:368,392`) + 10+ inline closures in
       `handlers.rs`/`remote.rs`. Flip as one cascade with
       callers, inside B1's blast radius.
@@ -435,6 +435,28 @@ All sites already use keyed ctors; flip signatures to
   `exit_code_of_diag(&diag)` alongside `exit_code_of(&err)`.
   Gates (post-PASS execution): `cargo test --workspace` green
   (core 432 + 629 + 12 + 2, diagnostics 12, process 121, cli
+  50 + 12, mcp 11 + 26 + 13, net-plugin 38 + 38, logic-tests
+  5 + 2 + 8 + 17 + 15 + 19 + 1 + 4 + 4 + 31 + 6 + 12 + 2 +
+  19 + 11 + 4 + 1 + 5 + 3 + 15), `cargo clippy --workspace
+  --all-targets` clean, `rustfmt --edition 2024 --check` clean
+  on touched files.
+
+- B7 (2026-11-27): closure cascade (`write_stdout`/`write_stderr`
+  in `core/exec/io.rs` plus all 10 inline closures in
+  `handlers.rs`/`remote.rs`). Both helpers return
+  `DiagnosticResult`; the `Os` arms return keyed
+  `eval_write_live_pipe` directly, and closures propagate
+  natively. Already-mapped sites (`read`, `expand`) drop the
+  `anyhow::Error::new` wrapper around identical ctors. Bare
+  writer ops (`echo`, `fail_message`, assert echo-backs, `ls`
+  header, remote replay + flushes) map io failures through
+  the new io-native `eval_stream_write_failed`
+  (`dsl.eval.stream_write_failed`, `FIELD_REASON`, message is
+  the failure verbatim), keeping the `step N: <reason>`
+  rendering byte-identical with zero new `anyhow::Error::new`
+  sites. No new keys beyond the one ctor. Gates (post-PASS
+  execution): `cargo test --workspace` green (core
+  432 + 629 + 12 + 2, diagnostics 12, process 121, cli
   50 + 12, mcp 11 + 26 + 13, net-plugin 38 + 38, logic-tests
   5 + 2 + 8 + 17 + 15 + 19 + 1 + 4 + 4 + 31 + 6 + 12 + 2 +
   19 + 11 + 4 + 1 + 5 + 3 + 15), `cargo clippy --workspace

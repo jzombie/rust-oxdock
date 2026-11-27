@@ -1675,6 +1675,21 @@ pub fn eval_dispatch_failed(reason: &anyhow::Error) -> Diagnostic {
     )
 }
 
+/// Output-stream write/flush failure. Takes the underlying I/O
+/// failure directly (no `anyhow` carrier: the error is already a
+/// concrete `std::io::Error` at every call site). One key covers
+/// `ECHO`, `FAIL`, `LS`, assert echo-backs, and `REMOTE` replay
+/// since the outer `step N` prefix already names the location and
+/// the message carries the failure verbatim.
+pub fn eval_stream_write_failed(reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    Diagnostic::new(
+        "dsl.eval.stream_write_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[(FIELD_REASON, reason_text.as_str())]),
+    )
+}
+
 /// Pipe content peek behind a pipe assertion. Takes the underlying
 /// failure verbatim: it already names the handle and the cause, so
 /// no wrapper is added.
@@ -6852,6 +6867,7 @@ mod tests {
             eval_expand_resolve_failed("p", &anyhow::anyhow!("x")).key(),
             eval_expand_read_failed("p", &anyhow::anyhow!("x")).key(),
             eval_expand_write_failed(&std::io::Error::other("x")).key(),
+            eval_stream_write_failed(&std::io::Error::other("x")).key(),
             eval_expand_needs_stdin().key(),
             eval_install_failed("a", "b", &anyhow::anyhow!("x")).key(),
             eval_prompt_no_answer("m").key(),
@@ -7796,6 +7812,10 @@ mod tests {
         assert_eq!(
             eval_expand_write_failed(&std::io::Error::other("boom")).message(),
             "failed to write output"
+        );
+        assert_eq!(
+            eval_stream_write_failed(&std::io::Error::other("boom")).message(),
+            "boom"
         );
         assert_eq!(
             eval_expand_needs_stdin().message(),

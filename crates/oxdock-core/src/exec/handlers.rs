@@ -688,7 +688,9 @@ pub(super) fn echo<P: ProcessManager>(cx: &mut StepCtx<'_, P>, msg: &str) -> Res
     // atomic line.
     let line = format!("{msg}\n");
     write_stdout(cx.out.clone(), |writer| {
-        writer.write_all(line.as_bytes())?;
+        writer
+            .write_all(line.as_bytes())
+            .map_err(|e| diag::eval_stream_write_failed(&e))?;
         Ok(())
     })?;
     Ok(())
@@ -1440,9 +1442,11 @@ pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String
     })?;
     entries.sort_by_key(|e| e.file_name());
     write_stdout(cx.out.clone(), |writer| {
-        writeln!(writer, "{}:", target_dir.display())?;
+        writeln!(writer, "{}:", target_dir.display())
+            .map_err(|e| diag::eval_stream_write_failed(&e))?;
         for entry in &entries {
-            writeln!(writer, "{}", entry.file_name().to_string_lossy())?;
+            writeln!(writer, "{}", entry.file_name().to_string_lossy())
+                .map_err(|e| diag::eval_stream_write_failed(&e))?;
         }
         Ok(())
     })?;
@@ -1470,13 +1474,13 @@ pub(super) fn read<P: ProcessManager>(
             loop {
                 let n = reader
                     .read(&mut buf)
-                    .map_err(|e| anyhow::Error::new(diag::eval_read_file_failed(&e)))?;
+                    .map_err(|e| diag::eval_read_file_failed(&e))?;
                 if n == 0 {
                     break;
                 }
                 writer
                     .write_all(&buf[..n])
-                    .map_err(|e| anyhow::Error::new(diag::eval_read_write_failed(&e)))?;
+                    .map_err(|e| diag::eval_read_write_failed(&e))?;
             }
             Ok(())
         })?;
@@ -1500,7 +1504,7 @@ pub(super) fn read<P: ProcessManager>(
             write_stdout(cx.out.clone(), |writer| {
                 writer
                     .write_all(&buf[..n])
-                    .map_err(|e| anyhow::Error::new(diag::eval_read_write_failed(&e)))
+                    .map_err(|e| diag::eval_read_write_failed(&e))
             })?;
         }
     }
@@ -1774,47 +1778,46 @@ pub(super) fn replace<P: ProcessManager>(
                 .state
                 .fs
                 .resolve_read(&cx.state.cwd, path)
-                .map_err(|e| anyhow::Error::new(diag::eval_expand_resolve_failed(path, &e)))?;
-            let mut reader = cx.state.fs.open_read(&target).map_err(|e| {
-                anyhow::Error::new(diag::eval_read_open_failed(
-                    &target.display().to_string(),
-                    &e,
-                ))
-            })?;
+                .map_err(|e| diag::eval_expand_resolve_failed(path, &e))?;
+            let mut reader = cx
+                .state
+                .fs
+                .open_read(&target)
+                .map_err(|e| diag::eval_read_open_failed(&target.display().to_string(), &e))?;
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
                 let n = reader.read(&mut buf).map_err(|e| {
-                    anyhow::Error::new(diag::eval_expand_read_failed(
+                    diag::eval_expand_read_failed(
                         &target.display().to_string(),
                         &anyhow::Error::new(e),
-                    ))
+                    )
                 })?;
                 if n == 0 {
                     break;
                 }
                 expander.process_bytes(&buf[..n], &mut out_buf)?;
                 w.write_all(&out_buf)
-                    .map_err(|e| anyhow::Error::new(diag::eval_expand_write_failed(&e)))?;
+                    .map_err(|e| diag::eval_expand_write_failed(&e))?;
                 out_buf.clear();
             }
         } else {
             let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-                return Err(anyhow::Error::new(diag::eval_expand_needs_stdin()));
+                return Err(diag::eval_expand_needs_stdin());
             };
             let mut guard = input_stream
                 .lock()
-                .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_EXPAND)))?;
+                .map_err(|_| diag::eval_stdin_lock_failed(KEYWORD_EXPAND))?;
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
                 let n = guard
                     .read(&mut buf)
-                    .map_err(|e| anyhow::Error::new(diag::eval_stdin_read_failed(None, &e)))?;
+                    .map_err(|e| diag::eval_stdin_read_failed(None, &e))?;
                 if n == 0 {
                     break;
                 }
                 expander.process_bytes(&buf[..n], &mut out_buf)?;
                 w.write_all(&out_buf)
-                    .map_err(|e| anyhow::Error::new(diag::eval_expand_write_failed(&e)))?;
+                    .map_err(|e| diag::eval_expand_write_failed(&e))?;
                 out_buf.clear();
             }
         }
@@ -1822,7 +1825,7 @@ pub(super) fn replace<P: ProcessManager>(
         expander.flush(&mut out_buf)?;
         if !out_buf.is_empty() {
             w.write_all(&out_buf)
-                .map_err(|e| anyhow::Error::new(diag::eval_expand_write_failed(&e)))?;
+                .map_err(|e| diag::eval_expand_write_failed(&e))?;
             out_buf.clear();
         }
 
@@ -1860,7 +1863,8 @@ pub(super) fn assert_equality<P: ProcessManager>(
     {
         let drained = drain_stdin_bounded(input_stream, verb)?;
         super::io::write_stdout(cx.out.clone(), |w| {
-            w.write_all(&drained)?;
+            w.write_all(&drained)
+                .map_err(|e| diag::eval_stream_write_failed(&e))?;
             Ok(())
         })?;
         if let Some(sha) = hash {
@@ -2125,7 +2129,8 @@ pub(super) fn assert_contains<P: ProcessManager>(
                     read_any = true;
                     window.push_chunk(&buf[..n]);
                     super::io::write_stdout(cx.out.clone(), |w| {
-                        w.write_all(&buf[..n])?;
+                        w.write_all(&buf[..n])
+                            .map_err(|e| diag::eval_stream_write_failed(&e))?;
                         Ok(())
                     })?;
                 }
@@ -4564,7 +4569,9 @@ pub(crate) fn dispatch_exit<P: ProcessManager>(
 pub(super) fn fail_message<P: ProcessManager>(cx: &mut StepCtx<'_, P>, msg: &str) -> Result<()> {
     let line = format!("{msg}\n");
     write_stderr(cx.err.clone(), |writer| {
-        writer.write_all(line.as_bytes())?;
+        writer
+            .write_all(line.as_bytes())
+            .map_err(|e| diag::eval_stream_write_failed(&e))?;
         Ok(())
     })?;
     Ok(())

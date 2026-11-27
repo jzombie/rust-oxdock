@@ -31,6 +31,7 @@ use oxdock_parser::{
 use oxdock_pipe::PipeInner;
 use oxdock_process::ProcessManager;
 
+use super::diagnostics as diag;
 use super::io::write_stdout;
 use super::steps::StepCtx;
 
@@ -599,16 +600,24 @@ fn route_stdio<P: ProcessManager>(
     } else if !stdout_bytes.is_empty() {
         let owned = stdout_bytes.to_vec();
         write_stdout(cx.out.clone(), |writer| {
-            writer.write_all(&owned)?;
-            writer.flush()?;
+            writer
+                .write_all(&owned)
+                .map_err(|e| diag::eval_stream_write_failed(&e))?;
+            writer
+                .flush()
+                .map_err(|e| diag::eval_stream_write_failed(&e))?;
             Ok(())
         })?;
     }
     if !stderr_bytes.is_empty() {
         let owned = stderr_bytes.to_vec();
         write_stdout(cx.err.clone(), |writer| {
-            writer.write_all(&owned)?;
-            writer.flush()?;
+            writer
+                .write_all(&owned)
+                .map_err(|e| diag::eval_stream_write_failed(&e))?;
+            writer
+                .flush()
+                .map_err(|e| diag::eval_stream_write_failed(&e))?;
             Ok(())
         })?;
     }

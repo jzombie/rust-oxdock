@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, atomic::AtomicU64};
 
-use anyhow::Result;
 use oxdock_diagnostics::DiagnosticResult;
 #[cfg(not(miri))]
 use oxdock_pipe::OsPipeWriter;
@@ -350,9 +349,9 @@ impl StreamHandle {
     }
 }
 
-pub(super) fn write_stdout<F>(handle: Option<StreamHandle>, op: F) -> Result<()>
+pub(super) fn write_stdout<F>(handle: Option<StreamHandle>, op: F) -> DiagnosticResult<()>
 where
-    F: FnOnce(&mut dyn Write) -> Result<()>,
+    F: FnOnce(&mut dyn Write) -> DiagnosticResult<()>,
 {
     match handle {
         Some(StreamHandle::Stream(writer)) => {
@@ -365,9 +364,7 @@ where
         // OS entries to shared handles for them, and promotion only fires
         // for single RUN bodies. This arm is defensive only.
         #[cfg(not(miri))]
-        Some(StreamHandle::Os(_)) => Err(anyhow::Error::new(
-            super::diagnostics::eval_write_live_pipe("stdout"),
-        )),
+        Some(StreamHandle::Os(_)) => Err(super::diagnostics::eval_write_live_pipe("stdout")),
         // `None` inherits host stdout: only explicit `Stream` bindings
         // reroute DSL output.
         None => {
@@ -377,9 +374,9 @@ where
     }
 }
 
-pub(super) fn write_stderr<F>(handle: Option<StreamHandle>, op: F) -> Result<()>
+pub(super) fn write_stderr<F>(handle: Option<StreamHandle>, op: F) -> DiagnosticResult<()>
 where
-    F: FnOnce(&mut dyn Write) -> Result<()>,
+    F: FnOnce(&mut dyn Write) -> DiagnosticResult<()>,
 {
     match handle {
         Some(StreamHandle::Stream(writer)) => {
@@ -389,9 +386,7 @@ where
             Ok(())
         }
         #[cfg(not(miri))]
-        Some(StreamHandle::Os(_)) => Err(anyhow::Error::new(
-            super::diagnostics::eval_write_live_pipe("stderr"),
-        )),
+        Some(StreamHandle::Os(_)) => Err(super::diagnostics::eval_write_live_pipe("stderr")),
         None => {
             let mut stderr = io::stderr();
             op(&mut stderr)
