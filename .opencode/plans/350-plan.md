@@ -587,7 +587,28 @@ All sites already use keyed ctors; flip signatures to
   `isolated`) plus 2 `dispatch_*` fns and 2 `steps.rs` arms
   (`Run`, `RunExec`) bridge via `Ok(f(...)?)`; pipeline table
   untouched. `with_io` itself stays anyhow and holds the flipped
-  helpers via `From`. No test changes. Gates: pending execution
-  upon PASS (`cargo test --workspace`,
-  `cargo clippy --workspace --all-targets`,
-  `rustfmt --edition 2024 --check` on touched files).
+  helpers via `From`. No test changes. Gates:
+  `cargo test --workspace` green (core 432 + 629 + 12 + 2,
+  parser 267 + 303, diagnostics 12, process 121, fs 71 + 8 + 4 + 1,
+  cli 50 + 12, mcp 11 + 26 + 13, net-plugin 38 + 38, logic-tests
+  5 + 2 + 8 + 17 + 15 + 19 + 1 + 4 + 4 + 31 + 6 + 12 + 2 +
+  19 + 11 + 4 + 1 + 5 + 3 + 15), `cargo clippy --workspace
+  --all-targets` clean, `rustfmt --edition 2024 --check` clean
+  on touched files.
+
+  H3 follow-up (2026-11-27, post-PASS review note): magic-string
+  purge. New single owner `IoStream::name()` (`parser/ast.rs`)
+  for the bare `WITH_IO` vocabulary; 6 `duplicate_stream` sites
+  use `binding.stream.name()`, 2 `tty_live_pipe` sites use
+  `IoStream::Stdin/Stdout.name()`, `fmt_io` renders through
+  `name()` (geometry arms interpolate `name()` plus `=value`). `flatten_exec_value`
+  derives `map` from `val.type_name().to_lowercase()` (byte
+  identical, `KEYWORD_*` lowercase convention); pin tests
+  untouched. Parse-direction arms (`&str` to variant) and prose
+  messages quoting source spellings stay: defining occurrences,
+  not restatements. `task handle task#N` shape in the handle arm
+  stays as-is per review (ctor-documented prose with dynamic id,
+  no named owner). Follow-up gates: same `cargo test --workspace`
+  run green, `cargo clippy --workspace --all-targets` clean,
+  `rustfmt --edition 2024 --check` clean on `ast.rs`,
+  `commands.rs`, `handlers.rs`, `steps.rs`.

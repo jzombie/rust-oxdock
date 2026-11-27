@@ -514,7 +514,7 @@ fn run_pty<P: ProcessManager>(
         },
         #[cfg(not(miri))]
         CommandStdin::OsPipe(_) => {
-            return Err(diag::eval_with_io_tty_live_pipe("stdin"));
+            return Err(diag::eval_with_io_tty_live_pipe(IoStream::Stdin.name()));
         }
     };
     // Master output lands exclusively in the step stdout sink. `None`
@@ -526,7 +526,7 @@ fn run_pty<P: ProcessManager>(
         None => Arc::new(Mutex::new(std::io::stdout())),
         #[cfg(not(miri))]
         Some(StreamHandle::Os(_)) => {
-            return Err(diag::eval_with_io_tty_live_pipe("stdout"));
+            return Err(diag::eval_with_io_tty_live_pipe(IoStream::Stdout.name()));
         }
     };
     let hub = cx.cancel_hub();
@@ -657,7 +657,12 @@ fn flatten_exec_value(
         return Ok(());
     }
     if val.as_map().is_some() {
-        return Err(diag::eval_run_exec_element_needs_string("map"));
+        // Runtime kind word derives from the value's own descriptor
+        // name (`MAP` renders `map`), matching the `KEYWORD_*`
+        // lowercase-rendering convention elsewhere; never restated.
+        return Err(diag::eval_run_exec_element_needs_string(
+            &val.type_name().to_lowercase(),
+        ));
     }
     if let Some(id) = val.as_handle() {
         return Err(diag::eval_run_exec_element_needs_string(&format!(
@@ -2323,7 +2328,7 @@ fn resolve_io_streams<P: ProcessManager>(
         match binding.stream {
             IoStream::Stdin => {
                 if seen_stdin {
-                    return Err(diag::eval_with_io_duplicate_stream("stdin"));
+                    return Err(diag::eval_with_io_duplicate_stream(binding.stream.name()));
                 }
                 seen_stdin = true;
                 next_expose_stdin = true;
@@ -2339,7 +2344,7 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Stdout => {
                 if seen_stdout {
-                    return Err(diag::eval_with_io_duplicate_stream("stdout"));
+                    return Err(diag::eval_with_io_duplicate_stream(binding.stream.name()));
                 }
                 seen_stdout = true;
                 (step_stdout, out_pipe) = if let Some(target) = &binding.pipe {
@@ -2354,7 +2359,7 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Stderr => {
                 if seen_stderr {
-                    return Err(diag::eval_with_io_duplicate_stream("stderr"));
+                    return Err(diag::eval_with_io_duplicate_stream(binding.stream.name()));
                 }
                 seen_stderr = true;
                 step_stderr = if let Some(target) = &binding.pipe {
@@ -2368,19 +2373,19 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Tty => {
                 if seen_tty {
-                    return Err(diag::eval_with_io_duplicate_stream("tty"));
+                    return Err(diag::eval_with_io_duplicate_stream(binding.stream.name()));
                 }
                 seen_tty = true;
             }
             IoStream::Rows(_) => {
                 if seen_rows {
-                    return Err(diag::eval_with_io_duplicate_stream("rows"));
+                    return Err(diag::eval_with_io_duplicate_stream(binding.stream.name()));
                 }
                 seen_rows = true;
             }
             IoStream::Cols(_) => {
                 if seen_cols {
-                    return Err(diag::eval_with_io_duplicate_stream("cols"));
+                    return Err(diag::eval_with_io_duplicate_stream(binding.stream.name()));
                 }
                 seen_cols = true;
             }
