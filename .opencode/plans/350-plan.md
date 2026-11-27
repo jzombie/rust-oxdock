@@ -18,7 +18,7 @@ All sites already use keyed ctors; flip signatures to
 `DiagnosticResult`, anyhow parents hold via blanket `From`
 (`Ok(f(...)?)` at boundaries). Blocked only at the top by B1.
 
-- [ ] H1 archive cluster (58): `collect_archive_tree`,
+- [x] H1 archive cluster (58): `collect_archive_tree`,
       `append_archive_tree`, `archive`, `resolve_archive_src`,
       `unarchive`
 - [ ] H2a read/write cluster (30): `write`, `append`, `read`,
@@ -480,6 +480,33 @@ All sites already use keyed ctors; flip signatures to
   propagate with no `anyhow` wrap: three
   `anyhow::Error::new` sites eliminated. 4 pin tests updated
   to the new signatures; keys/messages unchanged. Gates:
+  `cargo test --workspace` green (core 432 + 629 + 12 + 2,
+  diagnostics 12, process 121, cli 50 + 12, mcp
+  11 + 26 + 13, net-plugin 38 + 38, logic-tests
+  5 + 2 + 8 + 17 + 15 + 19 + 1 + 4 + 4 + 31 + 6 + 12 + 2 +
+  19 + 11 + 4 + 1 + 5 + 3 + 15), `cargo clippy --workspace
+  --all-targets` clean, `rustfmt --edition 2024 --check` clean
+  on touched files.
+
+- H1 (2026-11-27): archive cluster. `resolve_archive_src`,
+  `collect_archive_tree`, `append_archive_tree`, `archive`,
+  `unarchive` (`core/exec/handlers.rs`) return
+  `DiagnosticResult`; 34 outer `anyhow::Error::new(diag::...)`
+  wrappers dropped (16 `eval_archive_failed`, 5
+  `eval_unarchive_failed`, plus `no_file_name`,
+  `refuses_symlink(_source)`, `destination_is_source/inside_tree`,
+  tar `into_inner`/`flush`/`try_finish`/`append_data`,
+  `bad_max_bytes`, `restore_mode_failed`). Ctors keep their
+  `&anyhow::Error` params as the conversion owners (fs/io/sanitize
+  errors bridge in; messages byte-identical). 4 anyhow-parent
+  boundaries use `Ok(f(...)?)` via blanket `From<Diagnostic>`
+  (`dispatch_archive`, `dispatch_unarchive`, two `steps.rs`
+  match arms); dispatch signatures and the `define_pipeline!`
+  table untouched. The 15 `member_failed`/`expansion_cap`/
+  `refuses_symlink` sites inside the `unpack_auto_from` closure
+  stay anyhow: the closure must return anyhow `Result` per the
+  `oxdock-utils` signature (external-crate boundary). No new keys;
+  no test changes (existing archive pins cover). Gates:
   `cargo test --workspace` green (core 432 + 629 + 12 + 2,
   diagnostics 12, process 121, cli 50 + 12, mcp
   11 + 26 + 13, net-plugin 38 + 38, logic-tests

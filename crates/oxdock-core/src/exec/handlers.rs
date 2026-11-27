@@ -839,7 +839,7 @@ fn resolve_archive_src<P: ProcessManager>(
     cx: &StepCtx<'_, P>,
     src: &str,
     dst: &str,
-) -> Result<GuardedPath> {
+) -> oxdock_diagnostics::DiagnosticResult<GuardedPath> {
     let trimmed = to_forward_slashes(src).trim_end_matches('/').to_string();
     // A leading slash roots the parent at `/` itself: without the
     // index-zero arm `/foo` would split into parent `""` and resolve
@@ -856,7 +856,7 @@ fn resolve_archive_src<P: ProcessManager>(
             .state
             .fs
             .resolve_read(&cx.state.cwd, src)
-            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)));
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e));
     }
     let parent_abs = if parent.is_empty() {
         cx.state.cwd.clone()
@@ -864,14 +864,14 @@ fn resolve_archive_src<P: ProcessManager>(
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, &parent)
-            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e))?
     };
     let mut matched = false;
     for entry in cx
         .state
         .fs
         .read_dir_entries(&parent_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?
     {
         if entry
             .file_name()
@@ -884,9 +884,7 @@ fn resolve_archive_src<P: ProcessManager>(
                 .map(|kind| kind.is_symlink())
                 .unwrap_or(true);
             if is_link {
-                return Err(anyhow::Error::new(
-                    diag::eval_archive_refuses_symlink_source(src, dst),
-                ));
+                return Err(diag::eval_archive_refuses_symlink_source(src, dst));
             }
         }
     }
@@ -896,11 +894,11 @@ fn resolve_archive_src<P: ProcessManager>(
             .state
             .fs
             .resolve_read(&cx.state.cwd, src)
-            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)));
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e));
     }
     parent_abs
         .join(&name)
-        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))
 }
 
 /// Collected packable tree: `(rel, guard)` files plus `(rel, guard)`
@@ -917,10 +915,10 @@ fn collect_archive_tree(
     src_abs: &GuardedPath,
     src: &str,
     dst: &str,
-) -> Result<ArchiveTree> {
+) -> oxdock_diagnostics::DiagnosticResult<ArchiveTree> {
     match fs
         .entry_kind(src_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?
     {
         EntryKind::File => {
             let base = src_abs
@@ -928,19 +926,10 @@ fn collect_archive_tree(
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .ok_or_else(|| {
-                    anyhow::Error::new(diag::eval_archive_no_file_name(
-                        src,
-                        dst,
-                        &src_abs.display().to_string(),
-                    ))
+                    diag::eval_archive_no_file_name(src, dst, &src_abs.display().to_string())
                 })?;
-            let rel = sanitize_rel(&to_forward_slashes(&base)).map_err(|err| {
-                anyhow::Error::new(diag::eval_archive_failed(
-                    src,
-                    dst,
-                    &anyhow::Error::new(err),
-                ))
-            })?;
+            let rel = sanitize_rel(&to_forward_slashes(&base))
+                .map_err(|err| diag::eval_archive_failed(src, dst, &anyhow::Error::new(err)))?;
             Ok((vec![(rel, src_abs.clone())], Vec::new()))
         }
         EntryKind::Dir => {
@@ -952,10 +941,10 @@ fn collect_archive_tree(
                 // subtree walk: the rel prefixes must be real
                 // directories before listing.
                 PathResolver::refuse_link_ancestors(src_abs, &dir_rel)
-                    .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+                    .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
                 let mut entries = fs
                     .read_dir_entries(&dir_abs)
-                    .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+                    .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
                 entries.sort_by_key(|entry| entry.file_name());
                 for entry in entries {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -970,16 +959,14 @@ fn collect_archive_tree(
                         .map(|kind| kind.is_symlink())
                         .unwrap_or(true);
                     if is_link {
-                        return Err(anyhow::Error::new(diag::eval_archive_refuses_symlink(
-                            src, dst, &child_rel,
-                        )));
+                        return Err(diag::eval_archive_refuses_symlink(src, dst, &child_rel));
                     }
                     let child = dir_abs
                         .join(&name)
-                        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+                        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
                     match fs
                         .entry_kind(&child)
-                        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?
+                        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?
                     {
                         EntryKind::Dir => {
                             dirs.push((child_rel.clone(), child.clone()));
@@ -1011,19 +998,14 @@ fn append_archive_tree<W: std::io::Write>(
     src_abs: &GuardedPath,
     src: &str,
     dst: &str,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     for (rel, guard) in dirs {
-        let rel = sanitize_rel(rel).map_err(|err| {
-            anyhow::Error::new(diag::eval_archive_failed(
-                src,
-                dst,
-                &anyhow::Error::new(err),
-            ))
-        })?;
+        let rel = sanitize_rel(rel)
+            .map_err(|err| diag::eval_archive_failed(src, dst, &anyhow::Error::new(err)))?;
         let mode = fs
             .archive_member_stat(guard)
             .map(|(_, mode)| mode.unwrap_or(0o755))
-            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
         let mut header = tar::Header::new_gnu();
         header.set_mode(mode);
         header.set_entry_type(tar::EntryType::Directory);
@@ -1031,36 +1013,27 @@ fn append_archive_tree<W: std::io::Write>(
         header.set_cksum();
         builder
             .append_data(&mut header, &rel, std::io::empty())
-            .map_err(|e| {
-                anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
-            })?;
+            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?;
     }
     for (rel, guard) in files {
-        let rel = sanitize_rel(rel).map_err(|err| {
-            anyhow::Error::new(diag::eval_archive_failed(
-                src,
-                dst,
-                &anyhow::Error::new(err),
-            ))
-        })?;
+        let rel = sanitize_rel(rel)
+            .map_err(|err| diag::eval_archive_failed(src, dst, &anyhow::Error::new(err)))?;
         let (len, mode) = fs
             .archive_member_stat(guard)
-            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
         // Link-refusing open: a symlink planted after the listing
         // probe fails here instead of packing its target's bytes, and
         // the descriptor must stay under the packed tree.
         let mut reader = fs
             .open_read_nofollow(guard, src_abs)
-            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
         let mut header = tar::Header::new_gnu();
         header.set_mode(mode.unwrap_or(0o644));
         header.set_size(len);
         header.set_cksum();
         builder
             .append_data(&mut header, &rel, &mut reader)
-            .map_err(|e| {
-                anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
-            })?;
+            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?;
     }
     Ok(())
 }
@@ -1070,13 +1043,13 @@ pub(super) fn archive<P: ProcessManager>(
     src: &str,
     dst: &str,
     raw: bool,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let src_abs = resolve_archive_src(cx, src, dst)?;
     let dst_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, dst)
-        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
     // Opening the destination truncates it: an archive landing on its
     // own source would destroy inputs before their bytes stream, so
     // equal paths fail closed. A pre-existing destination inside the
@@ -1085,25 +1058,21 @@ pub(super) fn archive<P: ProcessManager>(
     // cannot be a member) which keeps whole-tree archives like
     // `ARCHIVE project project.tar.gz` working.
     if dst_abs == src_abs {
-        return Err(anyhow::Error::new(
-            diag::eval_archive_destination_is_source(src, dst),
-        ));
+        return Err(diag::eval_archive_destination_is_source(src, dst));
     }
     if dst_abs.as_path().starts_with(src_abs.as_path()) && dst_abs.exists() {
-        return Err(anyhow::Error::new(
-            diag::eval_archive_destination_inside_tree(src, dst),
-        ));
+        return Err(diag::eval_archive_destination_inside_tree(src, dst));
     }
     let (files, dirs) = collect_archive_tree(cx.state.fs.as_ref(), &src_abs, src, dst)?;
     cx.state
         .fs
         .ensure_parent_dir(&dst_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
     let out = cx
         .state
         .fs
         .open_write(&dst_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
     if raw {
         let mut builder = tar::Builder::new(out);
         append_archive_tree(
@@ -1115,12 +1084,11 @@ pub(super) fn archive<P: ProcessManager>(
             src,
             dst,
         )?;
-        let mut out = builder.into_inner().map_err(|e| {
-            anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
-        })?;
-        std::io::Write::flush(&mut out).map_err(|e| {
-            anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
-        })?;
+        let mut out = builder
+            .into_inner()
+            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?;
+        std::io::Write::flush(&mut out)
+            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?;
     } else {
         let encoder = GzEncoder::new(out, Compression::default());
         let mut builder = tar::Builder::new(encoder);
@@ -1135,13 +1103,9 @@ pub(super) fn archive<P: ProcessManager>(
         )?;
         builder
             .into_inner()
-            .map_err(|e| {
-                anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
-            })?
+            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?
             .try_finish()
-            .map_err(|e| {
-                anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
-            })?;
+            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?;
     }
     Ok(())
 }
@@ -1151,32 +1115,31 @@ pub(super) fn unarchive<P: ProcessManager>(
     src: &str,
     dst: &str,
     max_bytes: Option<&str>,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let cap = match max_bytes {
-        Some(raw) => oxdock_parser::command::parse_byte_count(raw).map_err(|e| {
-            anyhow::Error::new(diag::eval_unarchive_bad_max_bytes(src, dst, raw, e))
-        })?,
+        Some(raw) => oxdock_parser::command::parse_byte_count(raw)
+            .map_err(|e| diag::eval_unarchive_bad_max_bytes(src, dst, raw, e))?,
         None => DEFAULT_UNARCHIVE_MAX_BYTES,
     };
     let src_abs = cx
         .state
         .fs
         .resolve_read(&cx.state.cwd, src)
-        .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     let dst_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, dst)
-        .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     cx.state
         .fs
         .create_dir_all(&dst_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     let reader = cx
         .state
         .fs
         .open_read(&src_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     let fs = cx.state.fs.as_ref();
     // Directory modes apply after every member lands: a read-only
     // header (e.g. 0555) would otherwise lock its own children out
@@ -1274,11 +1237,10 @@ pub(super) fn unarchive<P: ProcessManager>(
         }
         Ok(())
     })
-    .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
+    .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     for (dir, mode) in deferred_dir_modes.into_iter().rev() {
-        restore_archive_mode(fs, &dir, mode).map_err(|e| {
-            anyhow::Error::new(diag::eval_unarchive_restore_mode_failed(src, dst, &e))
-        })?;
+        restore_archive_mode(fs, &dir, mode)
+            .map_err(|e| diag::eval_unarchive_restore_mode_failed(src, dst, &e))?;
     }
     Ok(())
 }
@@ -4031,7 +3993,7 @@ pub(crate) fn dispatch_archive<P: ProcessManager>(
     };
     let src_resolved = super::args::resolve_arg(src, cx)?;
     let dst_resolved = super::args::resolve_arg(dst, cx)?;
-    archive(cx, &src_resolved, &dst_resolved, *raw)
+    Ok(archive(cx, &src_resolved, &dst_resolved, *raw)?)
 }
 
 pub(crate) fn dispatch_unarchive<P: ProcessManager>(
@@ -4049,7 +4011,12 @@ pub(crate) fn dispatch_unarchive<P: ProcessManager>(
     let src_resolved = super::args::resolve_arg(src, cx)?;
     let dst_resolved = super::args::resolve_arg(dst, cx)?;
     let cap_resolved = super::args::resolve_arg_opt(max_bytes, cx)?;
-    unarchive(cx, &src_resolved, &dst_resolved, cap_resolved.as_deref())
+    Ok(unarchive(
+        cx,
+        &src_resolved,
+        &dst_resolved,
+        cap_resolved.as_deref(),
+    )?)
 }
 
 pub(crate) fn dispatch_copy_git<P: ProcessManager>(

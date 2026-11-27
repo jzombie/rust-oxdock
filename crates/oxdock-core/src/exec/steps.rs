@@ -978,7 +978,12 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::Archive { src, dst, raw } => {
             let src_resolved = super::args::resolve_arg(src, &mut cx)?;
             let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
-            handlers::archive(&mut cx, &src_resolved, &dst_resolved, *raw)
+            Ok(handlers::archive(
+                &mut cx,
+                &src_resolved,
+                &dst_resolved,
+                *raw,
+            )?)
         }
         StepKind::Unarchive {
             src,
@@ -988,12 +993,12 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let src_resolved = super::args::resolve_arg(src, &mut cx)?;
             let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
             let cap_resolved = super::args::resolve_arg_opt(max_bytes, &mut cx)?;
-            handlers::unarchive(
+            Ok(handlers::unarchive(
                 &mut cx,
                 &src_resolved,
                 &dst_resolved,
                 cap_resolved.as_deref(),
-            )
+            )?)
         }
         StepKind::Symlink {
             from_workspace,
