@@ -21,7 +21,7 @@ All sites already use keyed ctors; flip signatures to
 - [x] H1 archive cluster (58): `collect_archive_tree`,
       `append_archive_tree`, `archive`, `resolve_archive_src`,
       `unarchive`
-- [ ] H2a read/write cluster (30): `write`, `append`, `read`,
+- [x] H2a read/write cluster (30): `write`, `append`, `read`,
       `read_line`
 - [ ] H2b fs-ops cluster (35): `symlink`, `remove`, `mkdir`,
       `set_executable`, `ls`, `install`, `append_line`,
@@ -514,3 +514,33 @@ All sites already use keyed ctors; flip signatures to
   19 + 11 + 4 + 1 + 5 + 3 + 15), `cargo clippy --workspace
   --all-targets` clean, `rustfmt --edition 2024 --check` clean
   on touched files.
+
+- H2a (2026-11-27): read/write cluster. `read`, `read_line`,
+  `write`, `append` (`core/exec/handlers.rs`) return
+  `DiagnosticResult`; 25 outer `anyhow::Error::new(diag::...)`
+  wrappers dropped. Ctors keep their `&anyhow::Error` /
+  `&std::io::Error` params as conversion owners (byte-identical
+  messages). Already-native sites pass through untouched
+  (`write_stdout` closures, `mutate_var`/`declare_var`,
+  io-native stdin/read ctors). The 2 bare `writer.flush()?`
+  sites map through the neighboring chunk-failure owners
+  (`eval_write_stream_failed`, `eval_append_failed`); the two
+  `&anyhow::Error::new(e)` bridges there mirror the adjacent
+  `write_all` lines (ctor `&anyhow::Error` params), so no new
+  outer wrapper sites. 8 anyhow-parent
+  boundaries use `Ok(f(...)?)` (`dispatch_read`,
+  `dispatch_read_line`, `dispatch_write`, `dispatch_append`,
+  four `steps.rs` arms); pipeline table untouched.
+  `append_line` (H2b) out of scope. No test changes. Gates:
+  `cargo test --workspace` green (core 432 + 629 + 12 + 2,
+  diagnostics 12, process 121, fs 71, cli 50 + 12, mcp
+  11 + 26 + 13, net-plugin 38 + 38, logic-tests
+  5 + 2 + 8 + 17 + 15 + 19 + 1 + 4 + 4 + 31 + 6 + 12 + 2 +
+  19 + 11 + 4 + 1 + 5 + 3 + 15), `cargo clippy --workspace
+  --all-targets` clean, `rustfmt --edition 2024 --check` clean
+  on touched files. Note: one `cargo test --workspace` run
+  during this bulk hit the pre-existing environmental
+  `oxdock-fs` pid-reuse flake
+  (`lazy_resolver_bare_snapshot_selection_creates_nothing`,
+  8205 leaked `oxdock-pending-*` dirs in `$TMPDIR`); unrelated
+  crate, passes on retry (71/71), re-run green.

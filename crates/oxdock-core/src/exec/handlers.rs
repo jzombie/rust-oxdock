@@ -1418,19 +1418,18 @@ pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String
 pub(super) fn read<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path_opt: &Option<String>,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     if let Some(path) = path_opt {
         let target = cx
             .state
             .fs
             .resolve_read(&cx.state.cwd, path)
-            .map_err(|e| anyhow::Error::new(diag::eval_read_resolve_failed(path, &e)))?;
-        let mut reader = cx.state.fs.open_read(&target).map_err(|e| {
-            anyhow::Error::new(diag::eval_read_open_failed(
-                &target.display().to_string(),
-                &e,
-            ))
-        })?;
+            .map_err(|e| diag::eval_read_resolve_failed(path, &e))?;
+        let mut reader = cx
+            .state
+            .fs
+            .open_read(&target)
+            .map_err(|e| diag::eval_read_open_failed(&target.display().to_string(), &e))?;
         write_stdout(cx.out.clone(), |writer| {
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
@@ -1448,17 +1447,17 @@ pub(super) fn read<P: ProcessManager>(
         })?;
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-            return Err(anyhow::Error::new(diag::eval_read_needs_stdin()));
+            return Err(diag::eval_read_needs_stdin());
         };
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
             let n = {
                 let mut guard = input_stream
                     .lock()
-                    .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_READ)))?;
+                    .map_err(|_| diag::eval_stdin_lock_failed(KEYWORD_READ))?;
                 guard
                     .read(&mut buf)
-                    .map_err(|e| anyhow::Error::new(diag::eval_stdin_read_failed(None, &e)))?
+                    .map_err(|e| diag::eval_stdin_read_failed(None, &e))?
             };
             if n == 0 {
                 break;
@@ -1473,9 +1472,12 @@ pub(super) fn read<P: ProcessManager>(
     Ok(())
 }
 
-pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -> Result<()> {
+pub(super) fn read_line<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    var: &str,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-        return Err(anyhow::Error::new(diag::eval_read_line_needs_stdin()));
+        return Err(diag::eval_read_line_needs_stdin());
     };
     let clean_var = var.trim_start_matches('$').to_string();
     let mut buf = Vec::new();
@@ -1484,10 +1486,10 @@ pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -
         let n = {
             let mut guard = input_stream
                 .lock()
-                .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_READ_LINE)))?;
+                .map_err(|_| diag::eval_stdin_lock_failed(KEYWORD_READ_LINE))?;
             guard
                 .read(&mut byte)
-                .map_err(|e| anyhow::Error::new(diag::eval_stdin_read_failed(None, &e)))?
+                .map_err(|e| diag::eval_stdin_read_failed(None, &e))?
         };
         if n == 0 {
             break;
@@ -1497,8 +1499,7 @@ pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -
             break;
         }
     }
-    let line = String::from_utf8(buf)
-        .map_err(|e| anyhow::Error::new(diag::eval_read_line_not_utf8(&e)))?;
+    let line = String::from_utf8(buf).map_err(|e| diag::eval_read_line_not_utf8(&e))?;
     let line = line
         .strip_suffix("\r\n")
         .or_else(|| line.strip_suffix('\n'))
@@ -1591,56 +1592,53 @@ pub(super) fn write<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
     contents: Option<&str>,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_write_resolve_failed(path, &e)))?;
-    cx.state.fs.ensure_parent_dir(&target).map_err(|e| {
-        anyhow::Error::new(diag::eval_ensure_parent_failed(
-            &target.display().to_string(),
-            &e,
-        ))
-    })?;
+        .map_err(|e| diag::eval_write_resolve_failed(path, &e))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .map_err(|e| diag::eval_ensure_parent_failed(&target.display().to_string(), &e))?;
     if let Some(body) = contents {
         cx.state
             .fs
             .write_file(&target, body.as_bytes())
-            .map_err(|e| {
-                anyhow::Error::new(diag::eval_write_file_failed(
-                    &target.display().to_string(),
-                    &e,
-                ))
-            })?;
+            .map_err(|e| diag::eval_write_file_failed(&target.display().to_string(), &e))?;
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-            return Err(anyhow::Error::new(diag::eval_write_needs_stdin(path)));
+            return Err(diag::eval_write_needs_stdin(path));
         };
         let mut guard = input_stream
             .lock()
-            .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_WRITE)))?;
-        let mut writer = cx.state.fs.open_write(&target).map_err(|e| {
-            anyhow::Error::new(diag::eval_write_open_failed(
-                &target.display().to_string(),
-                &e,
-            ))
-        })?;
+            .map_err(|_| diag::eval_stdin_lock_failed(KEYWORD_WRITE))?;
+        let mut writer = cx
+            .state
+            .fs
+            .open_write(&target)
+            .map_err(|e| diag::eval_write_open_failed(&target.display().to_string(), &e))?;
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
-            let n = guard.read(&mut buf).map_err(|e| {
-                anyhow::Error::new(diag::eval_stdin_read_failed(Some(KEYWORD_WRITE), &e))
-            })?;
+            let n = guard
+                .read(&mut buf)
+                .map_err(|e| diag::eval_stdin_read_failed(Some(KEYWORD_WRITE), &e))?;
             if n == 0 {
                 break;
             }
             writer.write_all(&buf[..n]).map_err(|e| {
-                anyhow::Error::new(diag::eval_write_stream_failed(
+                diag::eval_write_stream_failed(
                     &target.display().to_string(),
                     &anyhow::Error::new(e),
-                ))
+                )
             })?;
-            writer.flush()?;
+            writer.flush().map_err(|e| {
+                diag::eval_write_stream_failed(
+                    &target.display().to_string(),
+                    &anyhow::Error::new(e),
+                )
+            })?;
         }
     }
     Ok(())
@@ -1650,53 +1648,47 @@ pub(super) fn append<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
     contents: Option<&str>,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_append_resolve_failed(path, &e)))?;
-    cx.state.fs.ensure_parent_dir(&target).map_err(|e| {
-        anyhow::Error::new(diag::eval_ensure_parent_failed(
-            &target.display().to_string(),
-            &e,
-        ))
-    })?;
+        .map_err(|e| diag::eval_append_resolve_failed(path, &e))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .map_err(|e| diag::eval_ensure_parent_failed(&target.display().to_string(), &e))?;
     if let Some(body) = contents {
         cx.state
             .fs
             .append_file(&target, body.as_bytes())
-            .map_err(|e| {
-                anyhow::Error::new(diag::eval_append_failed(&target.display().to_string(), &e))
-            })?;
+            .map_err(|e| diag::eval_append_failed(&target.display().to_string(), &e))?;
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-            return Err(anyhow::Error::new(diag::eval_append_needs_stdin(path)));
+            return Err(diag::eval_append_needs_stdin(path));
         };
         let mut guard = input_stream
             .lock()
-            .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_APPEND)))?;
-        let mut writer = cx.state.fs.open_append(&target).map_err(|e| {
-            anyhow::Error::new(diag::eval_append_open_failed(
-                &target.display().to_string(),
-                &e,
-            ))
-        })?;
+            .map_err(|_| diag::eval_stdin_lock_failed(KEYWORD_APPEND))?;
+        let mut writer = cx
+            .state
+            .fs
+            .open_append(&target)
+            .map_err(|e| diag::eval_append_open_failed(&target.display().to_string(), &e))?;
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
-            let n = guard.read(&mut buf).map_err(|e| {
-                anyhow::Error::new(diag::eval_stdin_read_failed(Some(KEYWORD_APPEND), &e))
-            })?;
+            let n = guard
+                .read(&mut buf)
+                .map_err(|e| diag::eval_stdin_read_failed(Some(KEYWORD_APPEND), &e))?;
             if n == 0 {
                 break;
             }
             writer.write_all(&buf[..n]).map_err(|e| {
-                anyhow::Error::new(diag::eval_append_failed(
-                    &target.display().to_string(),
-                    &anyhow::Error::new(e),
-                ))
+                diag::eval_append_failed(&target.display().to_string(), &anyhow::Error::new(e))
             })?;
-            writer.flush()?;
+            writer.flush().map_err(|e| {
+                diag::eval_append_failed(&target.display().to_string(), &anyhow::Error::new(e))
+            })?;
         }
     }
     Ok(())
@@ -4136,7 +4128,7 @@ pub(crate) fn dispatch_read<P: ProcessManager>(
         unreachable!()
     };
     let resolved = super::args::resolve_arg_opt(arg, cx)?;
-    read(cx, &resolved)
+    Ok(read(cx, &resolved)?)
 }
 
 pub(crate) fn dispatch_read_line<P: ProcessManager>(
@@ -4146,7 +4138,7 @@ pub(crate) fn dispatch_read_line<P: ProcessManager>(
     let StepKind::ReadLine { var } = step else {
         unreachable!()
     };
-    read_line(cx, var)
+    Ok(read_line(cx, var)?)
 }
 
 /// Render the terminal prompt: `{message} [{default}]: ` with a default,
@@ -4295,7 +4287,7 @@ pub(crate) fn dispatch_write<P: ProcessManager>(
     };
     let path_resolved = super::args::resolve_arg(path, cx)?;
     let contents_resolved = super::args::resolve_arg_opt(contents, cx)?;
-    write(cx, &path_resolved, contents_resolved.as_deref())
+    Ok(write(cx, &path_resolved, contents_resolved.as_deref())?)
 }
 
 pub(crate) fn dispatch_append<P: ProcessManager>(
@@ -4307,7 +4299,7 @@ pub(crate) fn dispatch_append<P: ProcessManager>(
     };
     let path_resolved = super::args::resolve_arg(path, cx)?;
     let contents_resolved = super::args::resolve_arg_opt(contents, cx)?;
-    append(cx, &path_resolved, contents_resolved.as_deref())
+    Ok(append(cx, &path_resolved, contents_resolved.as_deref())?)
 }
 
 pub(crate) fn dispatch_append_line<P: ProcessManager>(

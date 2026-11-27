@@ -1033,9 +1033,9 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         }
         StepKind::Read(arg) => {
             let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
-            handlers::read(&mut cx, &resolved)
+            Ok(handlers::read(&mut cx, &resolved)?)
         }
-        StepKind::ReadLine { var } => handlers::read_line(&mut cx, var),
+        StepKind::ReadLine { var } => Ok(handlers::read_line(&mut cx, var)?),
         StepKind::Prompt {
             var,
             message,
@@ -1055,12 +1055,20 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::Write { path, contents } => {
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
             let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
-            handlers::write(&mut cx, &path_resolved, contents_resolved.as_deref())
+            Ok(handlers::write(
+                &mut cx,
+                &path_resolved,
+                contents_resolved.as_deref(),
+            )?)
         }
         StepKind::Append { path, contents } => {
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
             let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
-            handlers::append(&mut cx, &path_resolved, contents_resolved.as_deref())
+            Ok(handlers::append(
+                &mut cx,
+                &path_resolved,
+                contents_resolved.as_deref(),
+            )?)
         }
         StepKind::AppendLine { path, contents } => {
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
