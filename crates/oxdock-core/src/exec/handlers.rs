@@ -1816,7 +1816,7 @@ pub(super) fn assert_equality<P: ProcessManager>(
     hash: &Option<String>,
     actual: &super::steps::ResolvedAssertTarget,
     expected: Option<&Value>,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     use super::steps::ResolvedAssertTarget;
     // Mode 1: exact stdout with piped stdin consumes the stream, mirroring
     // the legacy substring behavior, but compares exact bytes.
@@ -1836,34 +1836,30 @@ pub(super) fn assert_equality<P: ProcessManager>(
             let is_equal = computed.eq_ignore_ascii_case(sha);
             if is_equal != expect_equal {
                 if expect_equal {
-                    return Err(anyhow::Error::new(diag::eval_assert_hash_mismatch(
-                        verb, sha, &computed,
-                    )));
+                    return Err(diag::eval_assert_hash_mismatch(verb, sha, &computed));
                 } else {
-                    return Err(anyhow::Error::new(diag::eval_assert_hash_match(verb, sha)));
+                    return Err(diag::eval_assert_hash_match(verb, sha));
                 }
             }
             return Ok(());
         }
         let Some(want) = expected.and_then(|v| v.as_str()) else {
-            return Err(anyhow::Error::new(diag::eval_assert_stream_mismatch(
+            return Err(diag::eval_assert_stream_mismatch(
                 verb,
                 expected,
                 &String::from_utf8_lossy(&drained),
-            )));
+            ));
         };
         let is_equal = drained == want.as_bytes();
         if is_equal != expect_equal {
             if expect_equal {
-                return Err(anyhow::Error::new(diag::eval_assert_stream_mismatch_text(
+                return Err(diag::eval_assert_stream_mismatch_text(
                     verb,
                     want,
                     &String::from_utf8_lossy(&drained),
-                )));
-            } else {
-                return Err(anyhow::Error::new(
-                    diag::eval_assert_stream_unexpected_equal(verb, want),
                 ));
+            } else {
+                return Err(diag::eval_assert_stream_unexpected_equal(verb, want));
             }
         }
         return Ok(());
@@ -1873,28 +1869,22 @@ pub(super) fn assert_equality<P: ProcessManager>(
             ResolvedAssertTarget::Value(v) => match v.as_str() {
                 Some(s) => s.as_bytes().to_vec(),
                 None => {
-                    return Err(anyhow::Error::new(diag::eval_assert_hash_needs_string(
-                        verb, v,
-                    )));
+                    return Err(diag::eval_assert_hash_needs_string(verb, v));
                 }
             },
             ResolvedAssertTarget::Pipe(bytes) => bytes.clone(),
             ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, generation, verb)?,
             ResolvedAssertTarget::Stderr => {
-                return Err(anyhow::Error::new(diag::eval_assert_stderr_unsupported(
-                    verb,
-                )));
+                return Err(diag::eval_assert_stderr_unsupported(verb));
             }
         };
         let computed = sha256_hex(&actual_bytes);
         let is_equal = computed.eq_ignore_ascii_case(sha);
         if is_equal != expect_equal {
             if expect_equal {
-                return Err(anyhow::Error::new(diag::eval_assert_hash_mismatch(
-                    verb, sha, &computed,
-                )));
+                return Err(diag::eval_assert_hash_mismatch(verb, sha, &computed));
             } else {
-                return Err(anyhow::Error::new(diag::eval_assert_hash_match(verb, sha)));
+                return Err(diag::eval_assert_hash_match(verb, sha));
             }
         }
         return Ok(());
@@ -1902,20 +1892,14 @@ pub(super) fn assert_equality<P: ProcessManager>(
     match actual {
         ResolvedAssertTarget::Value(got) => {
             let Some(want) = expected else {
-                return Err(anyhow::Error::new(diag::eval_assert_requires_expected(
-                    verb,
-                )));
+                return Err(diag::eval_assert_requires_expected(verb));
             };
             let is_equal = got == want;
             if is_equal != expect_equal {
                 if expect_equal {
-                    return Err(anyhow::Error::new(diag::eval_assert_value_mismatch(
-                        verb, want, got,
-                    )));
+                    return Err(diag::eval_assert_value_mismatch(verb, want, got));
                 } else {
-                    return Err(anyhow::Error::new(
-                        diag::eval_assert_value_unexpected_equal(verb, want, got),
-                    ));
+                    return Err(diag::eval_assert_value_unexpected_equal(verb, want, got));
                 }
             }
             Ok(())
@@ -1923,53 +1907,43 @@ pub(super) fn assert_equality<P: ProcessManager>(
         ResolvedAssertTarget::Stdout => {
             let bytes = exact_stdout_bytes(cx, generation, verb)?;
             let Some(want) = expected.and_then(|v| v.as_str()) else {
-                return Err(anyhow::Error::new(diag::eval_assert_stream_mismatch(
+                return Err(diag::eval_assert_stream_mismatch(
                     verb,
                     expected,
                     &String::from_utf8_lossy(&bytes),
-                )));
+                ));
             };
             let is_equal = bytes == want.as_bytes();
             if is_equal != expect_equal {
                 if expect_equal {
-                    return Err(anyhow::Error::new(diag::eval_assert_stream_mismatch_text(
+                    return Err(diag::eval_assert_stream_mismatch_text(
                         verb,
                         want,
                         &String::from_utf8_lossy(&bytes),
-                    )));
-                } else {
-                    return Err(anyhow::Error::new(
-                        diag::eval_assert_stream_unexpected_equal(verb, want),
                     ));
+                } else {
+                    return Err(diag::eval_assert_stream_unexpected_equal(verb, want));
                 }
             }
             Ok(())
         }
-        ResolvedAssertTarget::Stderr => Err(anyhow::Error::new(
-            diag::eval_assert_stderr_unsupported(verb),
-        )),
+        ResolvedAssertTarget::Stderr => Err(diag::eval_assert_stderr_unsupported(verb)),
         ResolvedAssertTarget::Pipe(bytes) => {
-            let actual_str = String::from_utf8(bytes.clone())
-                .map_err(|e| anyhow::Error::new(diag::eval_pipe_not_utf8(verb, &e)))?;
+            let actual_str =
+                String::from_utf8(bytes.clone()).map_err(|e| diag::eval_pipe_not_utf8(verb, &e))?;
             let Some(want) = expected.and_then(|v| v.as_str()) else {
-                return Err(anyhow::Error::new(diag::eval_assert_pipe_mismatch(
-                    verb,
-                    expected,
-                    &actual_str,
-                )));
+                return Err(diag::eval_assert_pipe_mismatch(verb, expected, &actual_str));
             };
             let is_equal = actual_str == want;
             if is_equal != expect_equal {
                 if expect_equal {
-                    return Err(anyhow::Error::new(diag::eval_assert_pipe_mismatch_text(
+                    return Err(diag::eval_assert_pipe_mismatch_text(
                         verb,
                         want,
                         &actual_str,
-                    )));
+                    ));
                 } else {
-                    return Err(anyhow::Error::new(diag::eval_assert_pipe_unexpected_equal(
-                        verb, want,
-                    )));
+                    return Err(diag::eval_assert_pipe_unexpected_equal(verb, want));
                 }
             }
             Ok(())
@@ -2032,7 +2006,7 @@ pub(super) fn assert_contains<P: ProcessManager>(
     idx_step: usize,
     haystack: &super::steps::ResolvedAssertTarget,
     needle: &Arg,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     use super::steps::ResolvedAssertTarget;
     let verb = Command::AssertContains.as_str();
     let needle_str = super::args::resolve_arg(needle, cx)?;
@@ -2042,11 +2016,11 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 if hay.contains(needle_str.as_str()) {
                     return Ok(());
                 }
-                return Err(anyhow::Error::new(diag::eval_assert_contains_str_mismatch(
+                return Err(diag::eval_assert_contains_str_mismatch(
                     verb,
                     &needle_str,
                     hay,
-                )));
+                ));
             }
             if let Some(items) = v.as_list() {
                 if items
@@ -2055,22 +2029,19 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 {
                     return Ok(());
                 }
-                return Err(anyhow::Error::new(
-                    diag::eval_assert_contains_value_mismatch(verb, &needle_str, v),
+                return Err(diag::eval_assert_contains_value_mismatch(
+                    verb,
+                    &needle_str,
+                    v,
                 ));
             }
             if let Some(map) = v.as_map() {
                 if map.contains_key(needle_str.as_str()) {
                     return Ok(());
                 }
-                return Err(anyhow::Error::new(diag::eval_assert_contains_missing(
-                    verb,
-                    &needle_str,
-                )));
+                return Err(diag::eval_assert_contains_missing(verb, &needle_str));
             }
-            Err(anyhow::Error::new(
-                diag::eval_assert_contains_needs_haystack(verb, v),
-            ))
+            Err(diag::eval_assert_contains_needs_haystack(verb, v))
         }
         ResolvedAssertTarget::Stdout => {
             // Mode 1: piped stdin is consumed through a local window and
@@ -2078,14 +2049,14 @@ pub(super) fn assert_contains<P: ProcessManager>(
             if let CommandStdin::Stream(input_stream) = cx.stdin.clone() {
                 let mut guard = input_stream
                     .lock()
-                    .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(verb)))?;
+                    .map_err(|_| diag::eval_stdin_lock_failed(verb))?;
                 let mut window = super::io::SlidingWindow::new(needle_str.as_bytes().to_vec());
                 let mut buf = [0u8; super::io::CHUNK_SIZE];
                 let mut read_any = false;
                 loop {
-                    let n = guard.read(&mut buf).map_err(|e| {
-                        anyhow::Error::new(diag::eval_stdin_read_failed(Some(verb), &e))
-                    })?;
+                    let n = guard
+                        .read(&mut buf)
+                        .map_err(|e| diag::eval_stdin_read_failed(Some(verb), &e))?;
                     if n == 0 {
                         break;
                     }
@@ -2102,57 +2073,63 @@ pub(super) fn assert_contains<P: ProcessManager>(
                         return Ok(());
                     }
                     let emitted = String::from_utf8_lossy(&window.ring_buffer()).into_owned();
-                    return Err(anyhow::Error::new(
-                        diag::eval_assert_contains_emitted_mismatch(verb, &needle_str, &emitted),
+                    return Err(diag::eval_assert_contains_emitted_mismatch(
+                        verb,
+                        &needle_str,
+                        &emitted,
                     ));
                 }
             }
             // Mode 2: pre-registered stdout window for this step.
-            let windows = cx.state.assert_windows.lock().map_err(|_| {
-                anyhow::Error::new(diag::std_assert_lock_poisoned("assert_windows"))
-            })?;
+            let windows = cx
+                .state
+                .assert_windows
+                .lock()
+                .map_err(|_| diag::std_assert_lock_poisoned("assert_windows"))?;
             match windows.get(&(generation, idx_step)) {
                 Some(w) if w.matched => Ok(()),
                 Some(w) => {
                     let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
-                    Err(anyhow::Error::new(
-                        diag::eval_assert_contains_emitted_mismatch(verb, &needle_str, &emitted),
+                    Err(diag::eval_assert_contains_emitted_mismatch(
+                        verb,
+                        &needle_str,
+                        &emitted,
                     ))
                 }
-                _ => Err(anyhow::Error::new(diag::eval_assert_contains_missing(
-                    verb,
-                    &needle_str,
-                ))),
+                _ => Err(diag::eval_assert_contains_missing(verb, &needle_str)),
             }
         }
         ResolvedAssertTarget::Stderr => {
             // Stderr has no piped-stdin consumption mode: stdin bytes
             // belong to a different stream and are left alone.
-            let windows = cx.state.assert_windows_stderr.lock().map_err(|_| {
-                anyhow::Error::new(diag::std_assert_lock_poisoned("assert_windows_stderr"))
-            })?;
+            let windows = cx
+                .state
+                .assert_windows_stderr
+                .lock()
+                .map_err(|_| diag::std_assert_lock_poisoned("assert_windows_stderr"))?;
             match windows.get(&(generation, idx_step)) {
                 Some(w) if w.matched => Ok(()),
                 Some(w) => {
                     let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
-                    Err(anyhow::Error::new(
-                        diag::eval_assert_contains_emitted_mismatch(verb, &needle_str, &emitted),
+                    Err(diag::eval_assert_contains_emitted_mismatch(
+                        verb,
+                        &needle_str,
+                        &emitted,
                     ))
                 }
-                _ => Err(anyhow::Error::new(diag::eval_assert_contains_missing(
-                    verb,
-                    &needle_str,
-                ))),
+                _ => Err(diag::eval_assert_contains_missing(verb, &needle_str)),
             }
         }
         ResolvedAssertTarget::Pipe(bytes) => {
-            let hay = String::from_utf8(bytes.clone())
-                .map_err(|e| anyhow::Error::new(diag::eval_pipe_not_utf8(verb, &e)))?;
+            let hay =
+                String::from_utf8(bytes.clone()).map_err(|e| diag::eval_pipe_not_utf8(verb, &e))?;
             if hay.contains(needle_str.as_str()) {
                 Ok(())
             } else {
-                Err(anyhow::Error::new(
-                    diag::eval_assert_contains_pipe_mismatch(verb, &needle_str, &hay),
+                Err(diag::eval_assert_contains_pipe_mismatch(
+                    verb,
+                    &needle_str,
+                    &hay,
                 ))
             }
         }
@@ -4440,7 +4417,7 @@ fn dispatch_assert_equality<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     verb: &str,
     expect_equal: bool,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target = super::steps::resolve_assert_target(actual, cx)?;
     let expected_val = match expected {
         Some(e) => Some(super::args::evaluate_assert_operand(e, cx)?),
@@ -4469,7 +4446,14 @@ pub(crate) fn dispatch_assert_eq<P: ProcessManager>(
     else {
         unreachable!()
     };
-    dispatch_assert_equality(hash, actual, expected, cx, Command::AssertEq.as_str(), true)
+    Ok(dispatch_assert_equality(
+        hash,
+        actual,
+        expected,
+        cx,
+        Command::AssertEq.as_str(),
+        true,
+    )?)
 }
 
 pub(crate) fn dispatch_assert_ne<P: ProcessManager>(
@@ -4484,14 +4468,14 @@ pub(crate) fn dispatch_assert_ne<P: ProcessManager>(
     else {
         unreachable!()
     };
-    dispatch_assert_equality(
+    Ok(dispatch_assert_equality(
         hash,
         actual,
         expected,
         cx,
         Command::AssertNe.as_str(),
         false,
-    )
+    )?)
 }
 
 pub(crate) fn dispatch_assert_contains<P: ProcessManager>(
@@ -4502,7 +4486,7 @@ pub(crate) fn dispatch_assert_contains<P: ProcessManager>(
         unreachable!()
     };
     let target = super::steps::resolve_assert_target(haystack, cx)?;
-    assert_contains(cx, 0, 0, &target, needle)
+    Ok(assert_contains(cx, 0, 0, &target, needle)?)
 }
 
 pub(crate) fn dispatch_exit<P: ProcessManager>(

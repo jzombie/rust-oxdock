@@ -1107,7 +1107,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
                 Some(e) => Some(super::args::evaluate_assert_operand(e, &mut cx)?),
                 None => None,
             };
-            handlers::assert_equality(
+            Ok(handlers::assert_equality(
                 &mut cx,
                 generation,
                 verb,
@@ -1115,11 +1115,13 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
                 hash,
                 &target,
                 expected_resolved.as_ref(),
-            )
+            )?)
         }
         StepKind::AssertContains { haystack, needle } => {
             let target = resolve_assert_target(haystack, &mut cx)?;
-            handlers::assert_contains(&mut cx, generation, idx, &target, needle)
+            Ok(handlers::assert_contains(
+                &mut cx, generation, idx, &target, needle,
+            )?)
         }
         StepKind::WithIoBlock { .. } => Err(step_diag::eval_with_io_unexpanded().into()),
         StepKind::Exit(code) => {

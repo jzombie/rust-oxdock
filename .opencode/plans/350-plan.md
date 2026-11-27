@@ -43,7 +43,7 @@ All sites already use keyed ctors; flip signatures to
       `dispatch_await`, `dispatch_await_capture`,
       `await_task_entry`, `dispatch_cancel`, `disarm_deadline`,
       `isolated_inherit_env`
-- [ ] H6a assert cluster (35): `assert_equality`,
+- [x] H6a assert cluster (35): `assert_equality`,
       `assert_contains`
 - [ ] H6b replace/prompt cluster (18): `replace`, `prompt`,
       `bind_prompt_var`
@@ -701,6 +701,31 @@ All sites already use keyed ctors; flip signatures to
   `define_pipeline!` table, so the `AsyncBlock` leaf arm passes it
   through untouched); the `IsolatedInheritEnv` leaf arm needs none
   either (already `?; Ok(())`). No test changes. Gates (post-PASS):
+  `cargo test -p oxdock-core` green (433 + 629 + 12 + 2; the two
+  `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
+  expected fixture stderr, not failures), full
+  `cargo test --workspace` green with zero failures across all
+  suites, `cargo clippy --workspace --all-targets` clean,
+  `rustfmt --edition 2024 --check` clean on `handlers.rs`,
+  `steps.rs`.
+
+- H6a (2026-11-27): assert cluster. `assert_equality`,
+  `assert_contains` (`core/exec/handlers.rs`) plus
+  `dispatch_assert_equality` return `DiagnosticResult`; 35 outer
+  `anyhow::Error::new(diag::...)` wrappers dropped (20 + 15).
+  Ctors keep their params as conversion owners (byte-identical).
+  `dispatch_assert_eq`/`dispatch_assert_ne`/`dispatch_assert_contains`
+  stay anyhow: the `define_pipeline!` table requires `anyhow::Result`
+  signatures (same as H4 `dispatch_break`/`dispatch_continue`, H5
+  `dispatch_async_block`). Already-native callees pass through
+  untouched (`drain_stdin_bounded`, `exact_stdout_bytes`,
+  `write_stdout`, `resolve_arg`, `evaluate_assert_operand`,
+  `resolve_assert_target`). 5 anyhow-parent boundaries via
+  `Ok(f(...)?)`: 3 in `handlers.rs` (`dispatch_assert_eq`,
+  `dispatch_assert_ne` holding flipped `dispatch_assert_equality`,
+  `dispatch_assert_contains` holding flipped `assert_contains`), 2 in
+  `execute_single_step_with_generation` (`AssertEq`/`AssertNe` arm,
+  `AssertContains` arm). No test changes. Gates (post-PASS):
   `cargo test -p oxdock-core` green (433 + 629 + 12 + 2; the two
   `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
   expected fixture stderr, not failures), full
