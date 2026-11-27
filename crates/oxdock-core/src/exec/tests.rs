@@ -23,6 +23,7 @@ fn run_expect_err<P: ProcessManager>(
 ) -> anyhow::Error {
     run_steps_with_manager(fs, steps, process, ExecIo::new())
         .map(|_| ())
+        .map_err(anyhow::Error::from)
         .unwrap_err()
 }
 
@@ -2008,7 +2009,7 @@ impl ProcessManager for FailingRunner {
         ctx: &CommandContext,
         script: &str,
         options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>> {
+    ) -> anyhow::Result<CommandResult<Self::Handle>> {
         self.calls
             .lock()
             .expect("poisoned")
@@ -11730,45 +11731,38 @@ fn missing_import_hint_names_exporter_and_spelling() {
 fn snapshot_outer_preserves_keyed_exit_and_text() {
     let leaf =
         diagnostics::eval_exit_requested(3).with_span(oxdock_diagnostics::Span::line_col(9, 1));
-    let err = anyhow::Error::new(leaf).context("step 1, line 9");
+    let diag = leaf.with_contexts(vec!["step 1, line 9".to_string()]);
     let snapshot = "filesystem snapshot: never materialized (no snapshot directory was created)";
-    let out = error_with_snapshot(err, snapshot.to_string());
-    assert_eq!(crate::exec::exit::exit_code_of(&out), Some(3));
-    let head = out
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<oxdock_diagnostics::Diagnostic>())
-        .expect("keyed head survives, no wrapper shadows it");
-    assert_eq!(head.key(), "dsl.eval.exit_requested");
-    assert_eq!(head.snapshot(), Some(snapshot));
-    let span = head.span().expect("span survives on the head");
+    let out = error_with_snapshot(diag, snapshot.to_string());
+    assert_eq!(exit::exit_code_of_diag(&out), Some(3));
+    assert_eq!(out.key(), "dsl.eval.exit_requested");
+    assert_eq!(out.snapshot(), Some(snapshot));
+    let span = out.span().expect("span survives on the head");
     assert_eq!((span.line, span.col_start), (9, Some(1)));
     let expected = format!("step 1, line 9 (EXIT requested with code 3)\n{snapshot}");
     assert_eq!(out.to_string(), expected);
     assert_eq!(format!("{out:#}"), expected);
-    assert_eq!(out.chain().count(), 1, "zero trailing duplication: {out:#}");
 }
 
 #[test]
 fn snapshot_outer_keeps_bare_request_shape() {
-    let err = anyhow::Error::new(exit::ExitRequest::new(7));
+    let diag = diagnostics::eval_exit_requested(7);
     let snapshot = "filesystem snapshot: pending";
-    let out = error_with_snapshot(err, snapshot.to_string());
-    assert_eq!(crate::exec::exit::exit_code_of(&out), Some(7));
+    let out = error_with_snapshot(diag, snapshot.to_string());
+    assert_eq!(exit::exit_code_of_diag(&out), Some(7));
     let expected = format!("EXIT requested with code 7\n{snapshot}");
     assert_eq!(out.to_string(), expected);
-    assert_eq!(
-        format!("{out:#}"),
-        format!("{expected}: EXIT requested with code 7")
-    );
+    assert_eq!(format!("{out:#}"), expected);
 }
 
 #[test]
 fn snapshot_outer_without_exit_has_no_source() {
-    let out = error_with_snapshot(
-        anyhow::anyhow!("boom"),
-        "filesystem snapshot: pending".to_string(),
-    );
-    assert_eq!(crate::exec::exit::exit_code_of(&out), None);
+    let diag = diagnostics::eval_dispatch_failed(&anyhow::anyhow!("boom"));
+    let out = error_with_snapshot(diag, "filesystem snapshot: pending".to_string());
+    assert_eq!(exit::exit_code_of_diag(&out), None);
     assert_eq!(out.to_string(), "boom\nfilesystem snapshot: pending");
-    assert!(out.chain().count() == 1, "sourceless stays single: {out:#}");
+    assert!(
+        std::error::Error::source(&out).is_none(),
+        "sourceless stays single: {out:#}"
+    );
 }

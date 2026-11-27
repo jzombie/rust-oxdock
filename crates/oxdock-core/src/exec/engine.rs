@@ -374,13 +374,13 @@ impl Engine<DefaultProcessManager> {
         build_context: &GuardedPath,
         steps: &[Step],
     ) -> Result<super::LazyRunOutput> {
-        super::run_steps_with_lazy_snapshot_and_modules(
+        Ok(super::run_steps_with_lazy_snapshot_and_modules(
             build_context,
             steps,
             self.io.clone(),
             self.modules.clone(),
             self.types.clone(),
-        )
+        )?)
     }
 }
 

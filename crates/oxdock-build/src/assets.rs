@@ -401,7 +401,8 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
     let output =
         run_steps_with_lazy_snapshot(&workspace_root, &steps, ExecIo::new()).map_err(|e| {
             // Alternate formatting keeps the full chain + filesystem snapshot.
-            anyhow::Error::new(build_diag::script_execution_failed(&e))
+            let reason = anyhow::Error::from(e);
+            anyhow::Error::new(build_diag::script_execution_failed(&reason))
         })?;
     let final_cwd = output.final_cwd;
 

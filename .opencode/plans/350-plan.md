@@ -66,12 +66,11 @@ All sites already use keyed ctors; flip signatures to
 - [x] BREAK/CONTINUE/RETURN-outside returns (`finish_run`
       flips to `DiagnosticResult`; 3 outer
       `anyhow::Error::new(...)` wrappers dropped).
-- [ ] `run_steps_with_context*` family. Needs B1 decision
-      (public API affects CLI/mcp/doc-tests callers; `finish_run`
-      flip holds via `From` with no caller changes, but the
-      public family itself plus `error_with_snapshot`/
-      `enrich_lazy_error` Diagnostic-outer shape stays open),
-      then mechanical.
+- [x] `run_steps_with_context*` family. B1 decision applied
+      (public API flips to `DiagnosticResult`; CLI/mcp/doc-tests
+      callers hold via `From`, `finish_run` native `?` with no
+      caller changes; `error_with_snapshot`/
+      `enrich_lazy_error` Diagnostic-outer), then mechanical.
 
 ### A5. `oxdock-build` fn flips (dep stays; see below)
 - [ ] Flip remaining fns to `DiagnosticResult`, dropping the
@@ -920,3 +919,68 @@ All sites already use keyed ctors; flip signatures to
   `cargo clippy --workspace --all-targets` clean (zero warnings),
   `rustfmt --edition 2024 --check` clean on touched files
   (`server.rs`, `diagnostics.rs`).
+
+- A4 (2026-11-27): public runner family. All 13 public fns
+  (`core/exec/mod.rs`: `run_steps`,
+  `run_steps_without_snapshot`, `run_steps_with_context`,
+  `run_steps_with_context_result`,
+  `run_steps_with_context_result_with_io`,
+  `run_steps_with_lazy_snapshot`(+`_and_modules`,
+  +`_and_modules_and_entry`), `run_steps_with_fs`,
+  `run_steps_with_fs_with_io`, `run_steps_with_manager`
+  (+`_with_modules`, +`_with_modules_and_entry`)) return
+  `DiagnosticResult`; `run_steps_inner`,
+  `error_with_snapshot`, `enrich_lazy_error` Diagnostic-native.
+  `PathResolver::{new,new_guarded,new_lazy}` fs-boundary
+  failures lift via the single owner
+  `args::lift_dispatch_error` (B4 permanent; keyed or
+  `dispatch_failed` fallback, messages byte-identical).
+  `error_with_snapshot` collapses to `diag.with_snapshot`
+  (inputs are always keyed post-B1l; exit codes and call-path
+  frames already ride natively). Redundant `Ok(finish_run(...)?)`
+  unwrapped. Anyhow parents hold via `From` with no logic
+  changes: `Engine::run_steps`, CLI `run_cli_steps`/
+  `run_script` (`Ok(...?)`), build `assets.rs` (`&anyhow::from`
+  bridge for the `&anyhow::Error` ctor param, permanent per A5
+  note), 9 core integration `run_script` helpers plus
+  `commands.rs` x3 / `remote.rs` x2 (`.map_err(anyhow::from)`
+  so `exit_code_of`/downcast pins ride the same node),
+  logic-tests `text_surgery`/`multiline`/`perf` helpers plus
+  `release run_validate`, `recording`/`ast_runner` untouched
+  (`expect`/`?`/`.map_err(enrich_lazy_error)` align),
+  `conformance.rs`/`docs_conformance` (`format!("{err:#}")`
+  identical: `Display` ignores alternate), macros `map_err`
+  (`{e:#}` identical, no edit). Test-harness helpers widen to
+  `&dyn Display` (`format_fixture_stderr`,
+  `assert_error_matches`); `run_expect_err` keeps its anyhow
+  return via `.map_err(anyhow::from)` so all downstream pins
+  hold. Three `snapshot_outer_*` tests rewritten
+  Diagnostic-native (keyed exit + frames + snapshot pin,
+  bare-request carrier pin, sourceless pin);
+  `eval_run_snapshot_context` stays reserved (B1j, `pub` API).
+  `FailingRunner` mock qualifies `anyhow::Result` (glob no
+  longer re-exports it). Follow-up within the bulk:
+  `conformance.rs run_example` formats via
+  `anyhow::Error::from(err)` (`{:#}`): the bare `Diagnostic`
+  Display holds message plus span only while doc needles
+  (`PARSE_ARGS` reasons) live in the source chain, so the
+  carrier wrap restores the exact pre-flip chain text
+  (`returns_gate_covers_std_builtins` caught it, passes
+  unmodified). Second follow-up in the same shape:
+  `install_conformance missing_asset_fails_naming_the_file`
+  probes a bare-manager error whose file-name needle lives in
+  the source chain, so it bridges with
+  `.map_err(anyhow::Error::from)` before `expect_err`
+  (negative assertions like `release` TBD-gate stay unwrapped).
+  Third follow-up, same shape: `release_script_conformance
+  missing_section_fails_naming_the_needle` probes a bare-manager
+  error whose `[9.9.9-t]` needle lives in the source chain, so it
+  bridges the same way.
+  Gates: `cargo test -p oxdock-core` green
+  (433 + 629 + 12 + 2; the two
+  `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
+  expected fixture stderr, not failures), full
+  `cargo test --workspace` green with zero failures across all
+  suites, `cargo clippy --workspace --all-targets` clean (zero
+  warnings), `rustfmt --edition 2024 --check` clean on all 23
+  touched files.

@@ -296,7 +296,12 @@ fn run_example<P: ProcessManager + Clone + Send + 'static>(
                 Vec::new(),
             )
             .map(|_| ())
-            .map_err(|err| format!("{err:#}"))
+            // Chain rendering rides the anyhow carrier: the bare
+            // `Diagnostic` Display holds the message plus span only,
+            // while doc needles (e.g. `PARSE_ARGS` reasons) live in
+            // the source chain the snapshot renderer folds in for
+            // users. Wrapping restores the exact pre-flip text.
+            .map_err(|err| format!("{:#}", anyhow::Error::from(err)))
         })();
         let _ = done_tx.send(outcome);
     });

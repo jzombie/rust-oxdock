@@ -122,7 +122,9 @@ fn run_validate(manifest: &str, changelog: &str, confirm: &str) -> Result<()> {
     let mut io = ExecIo::new();
     io.insert_inherit_env("RELEASE_CONFIRM", confirm);
     io.insert_inherit_env("GITHUB_WORKSPACE", fixture.as_path().display().to_string());
-    run_steps_with_context_result_with_io(&fixture, &fixture, &steps, io).map(|_| ())
+    run_steps_with_context_result_with_io(&fixture, &fixture, &steps, io)
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
 }
 
 /// The version fallback executes for real: the actual
@@ -815,6 +817,7 @@ fn missing_section_fails_naming_the_needle() -> Result<()> {
         Vec::new(),
     )
     .map(|_| ())
+    .map_err(anyhow::Error::from)
     .expect_err("missing section must fail");
     let rendered = format!("{err:#}");
     assert!(

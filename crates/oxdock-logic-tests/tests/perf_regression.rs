@@ -22,6 +22,7 @@ fn run_script(script: &str) -> Result<()> {
     let context_root = context_temp.as_guarded_path().clone();
     run_steps_with_context_result_with_io(&fs_root, &context_root, &steps, ExecIo::new())
         .map(|_| ())
+        .map_err(anyhow::Error::from)
 }
 
 /// 100k arithmetic iterations. A release binary runs this end to

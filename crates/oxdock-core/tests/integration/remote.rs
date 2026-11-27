@@ -235,6 +235,7 @@ fn run_with_runner(
     io.set_remote_runner_for_target("prod".to_string(), Arc::new(LocalRunner));
     run_steps_with_manager(fs, &steps, MockProcessManager::default(), io)
         .map(|(_cwd, _fs, bindings)| bindings)
+        .map_err(anyhow::Error::from)
 }
 
 fn read_trimmed(root: &GuardedPath, rel: &str) -> String {
@@ -775,6 +776,7 @@ fn fail_block_remote_gets_no_caller_stdout_pipe() {
     );
     let err = run_steps_with_manager(fs, &steps, MockProcessManager::default(), io)
         .map(|_| ())
+        .map_err(anyhow::Error::from)
         .expect_err("FAIL must abort");
     assert_eq!(
         oxdock_core::exit_code_of(&err),

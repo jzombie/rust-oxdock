@@ -70,8 +70,7 @@ pub use self::typing::{
     unshare_shared,
 };
 
-use anyhow::Result;
-use oxdock_diagnostics::DiagnosticResult;
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 use oxdock_fs::{
     GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs, reserve_cargo_scratch,
 };
@@ -109,7 +108,7 @@ pub const SNAPSHOT_TREE_UNAVAILABLE: &str = "<unavailable>";
 /// [`run_steps_with_lazy_snapshot`]: for bindings and the snapshot
 /// handle, call that directly. For runs that must land exactly in a
 /// given root with no snapshot, use [`run_steps_without_snapshot`].
-pub fn run_steps(build_context: &GuardedPath, steps: &[Step], io: ExecIo) -> Result<()> {
+pub fn run_steps(build_context: &GuardedPath, steps: &[Step], io: ExecIo) -> DiagnosticResult<()> {
     run_steps_with_lazy_snapshot(build_context, steps, io).map(|_| ())
 }
 
@@ -117,7 +116,7 @@ pub fn run_steps(build_context: &GuardedPath, steps: &[Step], io: ExecIo) -> Res
 /// writes land exactly in the given root and read-backs observe them.
 /// Tests pinning on-disk state and hosts with caller-built filesystems
 /// want this; interactive runs want [`run_steps`].
-pub fn run_steps_without_snapshot(fs_root: &GuardedPath, steps: &[Step]) -> Result<()> {
+pub fn run_steps_without_snapshot(fs_root: &GuardedPath, steps: &[Step]) -> DiagnosticResult<()> {
     run_steps_with_context(fs_root, fs_root, steps)
 }
 
@@ -125,7 +124,7 @@ pub fn run_steps_with_context(
     fs_root: &GuardedPath,
     build_context: &GuardedPath,
     steps: &[Step],
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     run_steps_with_context_result(fs_root, build_context, steps, None, None).map(|_| ())
 }
 
@@ -136,7 +135,7 @@ pub fn run_steps_with_context_result(
     steps: &[Step],
     stdin: Option<SharedInput>,
     stdout: Option<SharedOutput>,
-) -> Result<GuardedPath> {
+) -> DiagnosticResult<GuardedPath> {
     let io = assemble_default_io(stdin, stdout);
     run_steps_with_context_result_with_io(fs_root, build_context, steps, io)
 }
@@ -146,11 +145,12 @@ pub fn run_steps_with_context_result_with_io(
     build_context: &GuardedPath,
     steps: &[Step],
     io: ExecIo,
-) -> Result<GuardedPath> {
+) -> DiagnosticResult<GuardedPath> {
     match run_steps_inner(fs_root, build_context, steps, io) {
         Ok(final_cwd) => Ok(final_cwd),
         Err(err) => {
-            let fs = PathResolver::new(fs_root.as_path(), build_context.as_path())?;
+            let fs = PathResolver::new(fs_root.as_path(), build_context.as_path())
+                .map_err(args::lift_dispatch_error)?;
             let tree = describe_dir(&fs, fs_root, 2, 24);
             let snapshot = format!(
                 "filesystem snapshot (root {}):\n{}",
@@ -165,76 +165,17 @@ pub fn run_steps_with_context_result_with_io(
 /// Build a single error message with the top cause plus a caller-provided
 /// filesystem-snapshot section. Shared by the eager and lazy runners so both
 /// render identical chains and only differ in the snapshot section.
-fn error_with_snapshot(err: anyhow::Error, snapshot_section: String) -> anyhow::Error {
-    // Keyed failures keep their own diagnostic as the head error:
-    // outer call-path frames replay natively, the exit code rides
-    // typed only when the chain lacks one, and the snapshot section
-    // attaches as provenance. Nothing shadows the key, span, hint,
-    // or fields, and `{err:#}` renders the failure plus the tree
-    // with no duplicated tail. Unkeyed failures keep the historic
-    // flattened wrapper under the snapshot key.
-    if let Some(found) = err
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<oxdock_diagnostics::Diagnostic>())
-        .cloned()
-    {
-        let mut outer_frames: Vec<String> = Vec::new();
-        for cause in err.chain() {
-            if cause
-                .downcast_ref::<oxdock_diagnostics::Diagnostic>()
-                .is_some()
-            {
-                break;
-            }
-            if cause.downcast_ref::<exit::ExitRequest>().is_none() {
-                outer_frames.push(cause.to_string());
-            }
-        }
-        let mut diag = found.with_contexts(outer_frames);
-        if let Some(code) = exit::exit_code_of(&err)
-            && exit::exit_code_of_diag(&diag).is_none()
-        {
-            let request = match diag.shared_source() {
-                Some(prior) => exit::ExitRequest::with_source(code, prior),
-                None => exit::ExitRequest::new(code),
-            };
-            diag = diag.with_source(Arc::new(request));
-        }
-        anyhow::Error::new(diag.with_snapshot(&snapshot_section))
-    } else {
-        // Unkeyed fallback only: flatten the chain exactly like the
-        // historic renderer, then wrap under the snapshot key.
-        let chain = err.chain().map(|e| e.to_string()).collect::<Vec<_>>();
-        let mut primary = chain
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "unknown error".into());
-        let rest = if chain.len() > 1 {
-            let first_cause = chain[1].clone();
-            primary = format!("{primary} ({first_cause})");
-            if chain.len() > 2 {
-                let causes = chain
-                    .iter()
-                    .skip(2)
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n  ");
-                format!("\ncauses:\n  {}", causes)
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
-        let failure = format!("{primary}{rest}");
-        let outer = diagnostics::eval_run_snapshot_context(&failure, &snapshot_section);
-        match exit::exit_code_of(&err) {
-            Some(code) => {
-                anyhow::Error::new(outer.with_source(Arc::new(exit::ExitRequest::new(code))))
-            }
-            None => anyhow::Error::new(outer),
-        }
-    }
+fn error_with_snapshot(diag: Diagnostic, snapshot_section: String) -> Diagnostic {
+    // The failure is already a keyed diagnostic by the time it reaches
+    // the runner boundary (step failures carry their key from
+    // `step_error`, foreign errors lift through `lift_dispatch_error`
+    // with the `dispatch_failed` fallback, bare exits ride the keyed
+    // `exit_requested` carrier): the snapshot section attaches as
+    // provenance with the exit code and call-path frames riding
+    // natively. The `snapshot_context` constructor stays reserved for
+    // unkeyed fallbacks (B1j) but nothing reaches it past this
+    // boundary anymore.
+    diag.with_snapshot(&snapshot_section)
 }
 
 fn run_steps_inner(
@@ -242,8 +183,9 @@ fn run_steps_inner(
     build_context: &GuardedPath,
     steps: &[Step],
     io: ExecIo,
-) -> Result<GuardedPath> {
-    let mut resolver = PathResolver::new_guarded(fs_root.clone(), build_context.clone())?;
+) -> DiagnosticResult<GuardedPath> {
+    let mut resolver = PathResolver::new_guarded(fs_root.clone(), build_context.clone())
+        .map_err(args::lift_dispatch_error)?;
     resolver.set_workspace_root(build_context.clone());
     run_steps_with_fs_with_io(Box::new(resolver), steps, io)
 }
@@ -270,7 +212,7 @@ pub fn run_steps_with_lazy_snapshot(
     build_context: &GuardedPath,
     steps: &[Step],
     io: ExecIo,
-) -> Result<LazyRunOutput> {
+) -> DiagnosticResult<LazyRunOutput> {
     run_steps_with_lazy_snapshot_and_modules(build_context, steps, io, Vec::new(), Vec::new())
 }
 
@@ -284,7 +226,7 @@ pub fn run_steps_with_lazy_snapshot_and_modules(
     io: ExecIo,
     modules: Vec<HostModule<DefaultProcessManager>>,
     types: Vec<&'static TypeDescriptor>,
-) -> Result<LazyRunOutput> {
+) -> DiagnosticResult<LazyRunOutput> {
     run_steps_with_lazy_snapshot_and_modules_and_entry(
         build_context,
         steps,
@@ -305,8 +247,9 @@ pub fn run_steps_with_lazy_snapshot_and_modules_and_entry(
     modules: Vec<HostModule<DefaultProcessManager>>,
     types: Vec<&'static TypeDescriptor>,
     entry_file: Option<GuardedPath>,
-) -> Result<LazyRunOutput> {
-    let mut resolver = PathResolver::new_lazy(build_context.clone())?;
+) -> DiagnosticResult<LazyRunOutput> {
+    let mut resolver =
+        PathResolver::new_lazy(build_context.clone()).map_err(args::lift_dispatch_error)?;
     resolver.set_workspace_root(build_context.clone());
     let snapshot = resolver.snapshot_handle();
     let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
@@ -336,8 +279,8 @@ pub fn run_steps_with_lazy_snapshot_and_modules_and_entry(
 pub fn enrich_lazy_error(
     snapshot: &Arc<LazyGuardedTempDir>,
     build_context: &GuardedPath,
-    err: anyhow::Error,
-) -> anyhow::Error {
+    err: Diagnostic,
+) -> Diagnostic {
     match snapshot.get() {
         Some(concrete) => {
             let tree = match PathResolver::new(concrete.as_path(), build_context.as_path()) {
@@ -365,7 +308,7 @@ pub fn run_steps_with_fs(
     steps: &[Step],
     stdin: Option<SharedInput>,
     stdout: Option<SharedOutput>,
-) -> Result<GuardedPath> {
+) -> DiagnosticResult<GuardedPath> {
     let io = assemble_default_io(stdin, stdout);
     run_steps_with_fs_with_io(fs, steps, io)
 }
@@ -374,7 +317,7 @@ pub fn run_steps_with_fs_with_io(
     fs: Box<dyn WorkspaceFs>,
     steps: &[Step],
     io: ExecIo,
-) -> Result<GuardedPath> {
+) -> DiagnosticResult<GuardedPath> {
     run_steps_with_manager(fs, steps, default_process_manager(), io).map(|(cwd, _, _)| cwd)
 }
 
@@ -397,7 +340,7 @@ pub fn run_steps_with_manager<P: ProcessManager>(
     steps: &[Step],
     process: P,
     io: ExecIo,
-) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+) -> DiagnosticResult<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
     run_steps_with_manager_with_modules(fs, steps, process, io, Vec::new(), Vec::new())
 }
 
@@ -416,7 +359,7 @@ pub fn run_steps_with_manager_with_modules<P: ProcessManager>(
     io: ExecIo,
     modules: Vec<HostModule<P>>,
     types: Vec<&'static self::typing::TypeDescriptor>,
-) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+) -> DiagnosticResult<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
     run_steps_with_manager_with_modules_and_entry(fs, steps, process, io, modules, types, None)
 }
 
@@ -433,7 +376,7 @@ pub fn run_steps_with_manager_with_modules_and_entry<P: ProcessManager>(
     modules: Vec<HostModule<P>>,
     types: Vec<&'static self::typing::TypeDescriptor>,
     entry_file: Option<GuardedPath>,
-) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+) -> DiagnosticResult<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
     let mut state = new_state(fs, io)?;
     state.entry_file = entry_file;
     state.module_table = build_module_table(&modules);
@@ -448,7 +391,7 @@ pub fn run_steps_with_manager_with_modules_and_entry<P: ProcessManager>(
     for descriptor in types {
         state.register_type(descriptor);
     }
-    Ok(finish_run(state, process, steps)?)
+    finish_run(state, process, steps)
 }
 
 pub(crate) fn new_state<P: ProcessManager>(

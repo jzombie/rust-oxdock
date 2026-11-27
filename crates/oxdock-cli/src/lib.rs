@@ -133,14 +133,14 @@ fn run_cli_steps(
     #[cfg(not(feature = "net"))] registry: Option<&Arc<()>>,
     entry_file: Option<GuardedPath>,
 ) -> Result<oxdock_core::exec::LazyRunOutput> {
-    run_steps_with_lazy_snapshot_and_modules_and_entry(
+    Ok(run_steps_with_lazy_snapshot_and_modules_and_entry(
         workspace_root,
         steps,
         io,
         cli_host_modules_with(registry),
         cli_host_types(),
         entry_file,
-    )
+    )?)
 }
 
 /// Parse a CLI script against STD plus any bundled host modules. Without
@@ -1091,7 +1091,11 @@ fn maybe_reexec_shell_to_temp(opts: &Options) -> Result<()> {
 }
 
 pub fn run_script(workspace_root: &GuardedPath, steps: &[Step]) -> Result<()> {
-    run_steps_with_context(workspace_root, workspace_root, steps)
+    Ok(run_steps_with_context(
+        workspace_root,
+        workspace_root,
+        steps,
+    )?)
 }
 
 fn shell_banner(cwd: &GuardedPath, workspace_root: &GuardedPath) -> String {

@@ -9,8 +9,9 @@ pub mod recording;
 ///
 /// In-process trial runners synthesize stderr with this helper so `expect`
 /// assertions evaluate identical text across in-process (Tier 1/2) and
-/// external-binary (Tier 3) execution paths.
-pub fn format_fixture_stderr(err: &anyhow::Error) -> String {
+/// external-binary (Tier 3) execution paths. Takes `Display` so both the
+/// keyed diagnostic and any anyhow carrier render through one helper.
+pub fn format_fixture_stderr(err: &dyn std::fmt::Display) -> String {
     format!("fixture failed: {err:#}")
 }
 
@@ -1474,7 +1475,7 @@ pub mod expectations {
 
     pub fn assert_error_matches(
         expectation: &ErrorExpectation,
-        err: &anyhow::Error,
+        err: &dyn std::fmt::Display,
         context: &str,
     ) -> Result<()> {
         assert_text_matches(expectation, &err.to_string(), context)

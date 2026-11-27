@@ -8,7 +8,9 @@ fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
     // not subject: `IMPORT` semantics are covered in `import.rs`.
     let steps =
         oxdock_core::parse_script(&format!("IMPORT [STD]\n{script}")).expect("parse script");
-    run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
+    run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new())
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
 }
 
 fn run_script_with_scope(

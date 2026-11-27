@@ -493,6 +493,7 @@ fn missing_asset_fails_naming_the_file() -> Result<()> {
         Vec::new(),
     )
     .map(|_| ())
+    .map_err(anyhow::Error::from)
     .expect_err("missing asset must fail");
     let rendered = format!("{err:#}");
     assert!(
