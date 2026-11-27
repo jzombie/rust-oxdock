@@ -354,18 +354,58 @@ pub(crate) fn resolve_arg_state<P: ProcessManager>(
     }
 }
 
-/// Lift a dispatch-layer `anyhow` failure into a `Diagnostic`: keyed
-/// diagnostics riding in the chain return with their key intact, so
-/// placeholder-unknown listings and handler errors render exactly as
-/// before; anything else renders verbatim through the shared
-/// fallback. Single owner for the anyhow-to-Diagnostic direction:
-/// every dispatch site in this file routes here instead of restating
-/// the downcast.
-fn lift_dispatch_error(err: anyhow::Error) -> Diagnostic {
-    match err.downcast::<Diagnostic>() {
-        Ok(diag) => diag,
-        Err(err) => args_diag::eval_dispatch_failed(&err),
+/// Lift a dispatch-layer `anyhow` failure into a `Diagnostic` without
+/// losing the chain. Outer `.context(...)` frames (such as the `step N`
+/// locations `step_error` attaches around `execute_steps`) replay
+/// natively via `with_contexts`, a keyed diagnostic keeps its
+/// key/span/fields, and a bare `ExitRequest` code rides typed
+/// (chained via `with_source`, preserving the prior source) instead
+/// of flattening into the fallback. Single owner for the
+/// anyhow-to-Diagnostic direction: every dispatch site in this file
+/// routes here instead of restating the downcast. `handlers.rs`
+/// loop/call bodies reuse this owner for the same direction
+/// (`execute_steps`, `inherit_env` interiors) instead of restating it.
+pub(crate) fn lift_dispatch_error(err: anyhow::Error) -> Diagnostic {
+    // Lossless chain reclamation, mirroring `step_error` and `reap`:
+    // outer non-request frames replay natively, the exit code rides
+    // typed only when the chain lacks one, and sources survive.
+    let code = super::exit::exit_code_of(&err);
+    if let Some(found) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+        .cloned()
+    {
+        let mut outer_frames: Vec<String> = Vec::new();
+        for cause in err.chain() {
+            if cause.downcast_ref::<Diagnostic>().is_some() {
+                break;
+            }
+            if cause.downcast_ref::<super::exit::ExitRequest>().is_none() {
+                outer_frames.push(cause.to_string());
+            }
+        }
+        let mut diag = found.with_contexts(outer_frames);
+        if let Some(code) = code
+            && super::exit::exit_code_of_diag(&diag).is_none()
+        {
+            let request = match diag.shared_source() {
+                Some(prior) => super::exit::ExitRequest::with_source(code, prior),
+                None => super::exit::ExitRequest::new(code),
+            };
+            diag = diag.with_source(std::sync::Arc::new(request));
+        }
+        return diag;
     }
+    if let Some(code) = code {
+        let mut outer_frames: Vec<String> = Vec::new();
+        for cause in err.chain() {
+            if cause.downcast_ref::<super::exit::ExitRequest>().is_none() {
+                outer_frames.push(cause.to_string());
+            }
+        }
+        return args_diag::eval_exit_requested(code).with_contexts(outer_frames);
+    }
+    args_diag::eval_dispatch_failed(&err)
 }
 
 /// Resolve an [`Arg`] : handles all variants.
@@ -517,7 +557,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         // Inline block (`LET $a: STRING = { ... }`): run the steps in a
         // fresh scope and yield the boundary value, mirroring a zero-arg
         // function body (see `handlers::block_value`).
-        Expr::Block(body) => super::handlers::block_value(cx, body).map_err(lift_dispatch_error),
+        Expr::Block(body) => super::handlers::block_value(cx, body),
         Expr::Call { name, args } => {
             super::handlers::call_func_value(cx, name, args).map_err(lift_dispatch_error)
         }
@@ -1342,12 +1382,10 @@ fn evaluate_compiled_math<P: ProcessManager>(
                 // in `resolve_call_entry`/`gate_call`/`execute_call_entry`
                 // (`rpn_only`), shared with expression and statement
                 // calls. Stateful fns run only when opted into `rpn`.
-                let entry = super::handlers::resolve_call_entry(cx, name.as_str())
-                    .map_err(lift_dispatch_error)?;
-                super::handlers::gate_call(cx, name.as_str(), &entry, args.len())
-                    .map_err(lift_dispatch_error)?;
-                let val = super::handlers::execute_call_entry(cx, name.as_str(), entry, args, true)
-                    .map_err(lift_dispatch_error)?;
+                let entry = super::handlers::resolve_call_entry(cx, name.as_str())?;
+                super::handlers::gate_call(cx, name.as_str(), &entry, args.len())?;
+                let val =
+                    super::handlers::execute_call_entry(cx, name.as_str(), entry, args, true)?;
                 stack.push(val);
             }
             MathOp::Inspect { name } => {
@@ -2782,6 +2820,31 @@ mod tests {
         let fallback = lift_dispatch_error(anyhow::anyhow!("boom"));
         assert_eq!(fallback.key(), "dsl.eval.dispatch_failed");
         assert_eq!(fallback.message(), "boom");
+    }
+
+    #[test]
+    fn lift_dispatch_error_preserves_frames_and_exit_codes() {
+        use crate::exec::exit::{ExitRequest, exit_code_of_diag};
+
+        // Keyed diagnostic under outer `step N` frames: frames replay
+        // natively via `contexts`, key and message survive intact.
+        let keyed = args_diag::eval_undefined_var("x");
+        let key = keyed.key().to_string();
+        let text = keyed.message().to_string();
+        let framed = anyhow::Error::new(keyed).context("step 2, line 3");
+        let lifted = lift_dispatch_error(framed);
+        assert_eq!(lifted.key(), key);
+        assert_eq!(lifted.message(), text);
+        assert_eq!(lifted.contexts(), &["step 2, line 3".to_string()]);
+
+        // Bare exit request under an outer frame: the code rides typed
+        // on the keyed carrier (never flattened into the fallback)
+        // and the frame survives alongside it.
+        let bare = anyhow::Error::new(ExitRequest::new(3)).context("step 1, line 2");
+        let lifted = lift_dispatch_error(bare);
+        assert_eq!(lifted.message(), ExitRequest::new(3).to_string());
+        assert_eq!(exit_code_of_diag(&lifted), Some(3));
+        assert_eq!(lifted.contexts(), &["step 1, line 2".to_string()]);
     }
 
     #[test]

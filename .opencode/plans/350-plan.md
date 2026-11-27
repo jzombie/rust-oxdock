@@ -32,7 +32,7 @@ All sites already use keyed ctors; flip signatures to
       `resolve_io_streams`, `top_level_flow`,
       `drain_stdin_bounded`, `exact_stdout_bytes`,
       `tty_request`, `resolve_pipe_handle`
-- [ ] H4 call/dispatch cluster (29): `execute_call_entry`,
+- [x] H4 call/dispatch cluster (29): `execute_call_entry`,
       `resolve_call_entry`, `gate_call`, `block_value`,
       `build_script_entry`, `for_loop`, `while_loop`,
       `dispatch_break`, `dispatch_continue`, `with_io_block`,
@@ -612,3 +612,47 @@ All sites already use keyed ctors; flip signatures to
   run green, `cargo clippy --workspace --all-targets` clean,
   `rustfmt --edition 2024 --check` clean on `ast.rs`,
   `commands.rs`, `handlers.rs`, `steps.rs`.
+
+- H4 (2026-11-27): call/dispatch cluster. `workdir`, `sleep`,
+  `with_io_block`, `exit`, `for_loop`, `build_script_entry`,
+  `resolve_call_entry`, `gate_call`, `execute_call_entry`,
+  `block_value`, `while_loop` (`core/exec/handlers.rs`) return
+  `DiagnosticResult`; 22 outer `anyhow::Error::new(diag::...)`
+  wrappers dropped (6 in `execute_call_entry` alone). `dispatch_break`/`dispatch_continue` stay
+  anyhow: the `define_pipeline!` table requires
+  `anyhow::Result` signatures (2 wrappers remain as the
+  pipeline-boundary share, like H3 `with_io`). Ctors keep
+  `&anyhow::Error`/`Diagnostic` params as conversion owners
+  (byte-identical messages). Anyhow interiors hold via the single
+  owners: `execute_steps`/`inherit_env` failures lift through the
+  existing `args::lift_dispatch_error` (now `pub(crate)`,
+  upgraded to lossless chain reclamation mirroring
+  `step_error`/`reap`: outer non-request frames replay natively
+  via `with_contexts`, the exit code rides typed via
+  `ExitRequest::with_source` preserving the prior source only when
+  the reclaimed chain lacks one, bare `ExitRequest` codes return
+  the keyed `eval_exit_requested` carrier with frames instead of
+  flattening into `eval_dispatch_failed`; new test pins frame
+  preservation on a keyed diagnostic and code-plus-frame
+  preservation on a bare request), `Pure`/`Ctx`/`Both` match arms
+  convert through
+  `eval_call_failed`, `fail` bridges via `anyhow::Error::from`.
+  `for_loop`/`while_loop`/`block_value` drop the
+  `.map_err(anyhow::Error::from)` round-trip on `pop_scope`.
+  Already-native callees pass through untouched (`resolve_tag`,
+  `declare_var`, `check_return_tag`, `optional_zero_value`,
+  `check_host_return_value`, `coerce_value`, `evaluate_expr`,
+  `is_truthy`). 4 `dispatch_*` anyhow-parent bridges plus 3
+  `steps.rs` arms (`Workdir`, `Exit`, `Sleep`) and 2
+  `dispatch_flow_step` arms (`For`, `While`) use `Ok(f(...)?)`;
+  `dispatch_for_loop`/`dispatch_while_loop` need no change
+  (already `Ok(top_level_flow(...)?)`). `args.rs` goes native at
+  4 sites: `Expr::Block` and 3 RPN call sites drop
+  `lift_dispatch_error` (types align; `Expr::Call` keeps it via
+  still-anyhow `call_func_value`). `call_func_value` itself stays
+  anyhow and holds the flipped `execute_call_entry` via `From`.
+  New test `lift_dispatch_error_preserves_frames_and_exit_codes`
+  pins frame and exit-code preservation. Gates: pending execution
+  upon PASS (`cargo test --workspace`,
+  `cargo clippy --workspace --all-targets`,
+  `rustfmt --edition 2024 --check` on touched files).

@@ -905,7 +905,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::AsyncBlock { .. } => handlers::dispatch_async_block(cmd, &mut cx),
         StepKind::Workdir(arg) => {
             let path = super::args::resolve_arg(arg, &mut cx)?;
-            handlers::workdir(&mut cx, &path)
+            Ok(handlers::workdir(&mut cx, &path)?)
         }
         StepKind::Workspace(target) => handlers::workspace(&mut cx, target),
         StepKind::RemoteBlock {
@@ -1124,7 +1124,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::WithIoBlock { .. } => Err(step_diag::eval_with_io_unexpanded().into()),
         StepKind::Exit(code) => {
             let code = super::args::resolve_arg_as_int(code, &mut cx)?;
-            handlers::exit(&mut cx, code)
+            Ok(handlers::exit(&mut cx, code)?)
         }
         StepKind::Bind {
             var,
@@ -1149,7 +1149,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::Cancel { var, .. } => handlers::dispatch_cancel(var, &mut cx),
         StepKind::Sleep { duration } => {
             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
-            handlers::sleep(&mut cx, &duration)
+            Ok(handlers::sleep(&mut cx, &duration)?)
         }
         StepKind::TypeAlias { .. } => {
             // Static declaration: collected before the run and
@@ -1750,7 +1750,7 @@ fn dispatch_flow_step<P: ProcessManager>(
             super::import::import_funcs(cx, path, alias.as_deref(), func_names, type_names)?;
             Ok(Flow::Done)
         }
-        StepKind::While { cond, body } => handlers::while_loop(cx, cond, body),
+        StepKind::While { cond, body } => Ok(handlers::while_loop(cx, cond, body)?),
         StepKind::Break => Ok(Flow::Break { idx }),
         StepKind::Continue => Ok(Flow::Continue { idx }),
         StepKind::For {
@@ -1760,7 +1760,7 @@ fn dispatch_flow_step<P: ProcessManager>(
             var_type,
             in_expr,
             body,
-        } => handlers::for_loop(
+        } => Ok(handlers::for_loop(
             cx,
             key_var.as_deref(),
             key_type.clone(),
@@ -1768,7 +1768,7 @@ fn dispatch_flow_step<P: ProcessManager>(
             var_type.clone(),
             in_expr,
             body,
-        ),
+        )?),
         StepKind::If {
             cond,
             then_body,

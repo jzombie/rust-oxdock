@@ -123,12 +123,15 @@ pub(super) fn inherit_env<P: ProcessManager>(
     Ok(())
 }
 
-pub(super) fn workdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> Result<()> {
+pub(super) fn workdir<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    path: &str,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     cx.state.cwd = cx
         .state
         .fs
         .resolve_workdir(&cx.state.cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_workdir_failed(path, &e)))?;
+        .map_err(|e| diag::eval_workdir_failed(path, &e))?;
     Ok(())
 }
 
@@ -701,7 +704,7 @@ pub(crate) fn dispatch_sleep_step<P: ProcessManager>(
         unreachable!()
     };
     let duration = super::args::resolve_arg_as_duration(duration, cx)?;
-    sleep(cx, &duration)
+    Ok(sleep(cx, &duration)?)
 }
 
 /// Dispatch `SLEEP <duration>` : park the step without spawning a shell.
@@ -712,14 +715,14 @@ pub(crate) fn dispatch_sleep_step<P: ProcessManager>(
 pub(crate) fn sleep<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     duration: &std::time::Duration,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
     let start = Instant::now();
     loop {
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            return Err(anyhow::Error::new(diag::eval_sleep_cancelled()));
+            return Err(diag::eval_sleep_cancelled());
         }
         let elapsed = start.elapsed();
         if elapsed >= *duration {
@@ -2161,8 +2164,8 @@ pub(crate) fn with_io_block<P: ProcessManager>(
     _generation: usize,
     _idx: usize,
     _bindings: &[IoBinding],
-) -> Result<()> {
-    Err(anyhow::Error::new(diag::eval_with_io_unexpanded()))
+) -> oxdock_diagnostics::DiagnosticResult<()> {
+    Err(diag::eval_with_io_unexpanded())
 }
 
 /// True when the wrapped command is a lone `RUN`: the only consumer or
@@ -2504,7 +2507,10 @@ fn peel_capture_command<'a, P: ProcessManager>(
     }
 }
 
-pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i64) -> Result<()> {
+pub(super) fn exit<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    code: i64,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     for child in cx.state.bg_children.iter_mut() {
         if let Ok(None) = child.handle.try_wait() {
             let _ = child.handle.kill();
@@ -2512,7 +2518,7 @@ pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i64) -> Res
         }
     }
     cx.state.bg_children.clear();
-    Err(anyhow::Error::new(diag::eval_exit_requested(code)))
+    Err(diag::eval_exit_requested(code))
 }
 
 pub(crate) fn for_loop<P: ProcessManager>(
@@ -2523,7 +2529,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
     val_type: String,
     in_expr: &Expr,
     body: &[Step],
-) -> Result<Flow> {
+) -> oxdock_diagnostics::DiagnosticResult<Flow> {
     let iterable = super::args::evaluate_expr(in_expr, cx)?;
     let clean_val_var = val_var.trim_start_matches('$').to_string();
     let val_tag = cx.state.resolve_tag(&val_type)?;
@@ -2564,10 +2570,10 @@ pub(crate) fn for_loop<P: ProcessManager>(
                 cx.stdin_pipe.clone(),
                 false,
             );
-            let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
+            let pop_res = cx.state.pop_scope();
             let flow = match (res, pop_res) {
                 (Ok(flow), Ok(())) => flow,
-                (Err(e), _) => return Err(e),
+                (Err(e), _) => return Err(super::args::lift_dispatch_error(e)),
                 (Ok(_), Err(e)) => return Err(e),
             };
             match flow {
@@ -2579,8 +2585,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
         return Ok(Flow::Done);
     }
     if let Some(map) = iterable.as_map() {
-        let key_name =
-            key_var.ok_or_else(|| anyhow::Error::new(diag::eval_for_needs_key_value()))?;
+        let key_name = key_var.ok_or_else(diag::eval_for_needs_key_value)?;
         let clean_key_var = key_name.trim_start_matches('$').to_string();
         let mut keys: Vec<_> = map.keys().cloned().collect();
         keys.sort();
@@ -2591,7 +2596,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
             None => TypeTag::String,
         };
         if !matches!(kt, TypeTag::String) {
-            return Err(anyhow::Error::new(diag::eval_for_map_key_type(kt.name())));
+            return Err(diag::eval_for_map_key_type(kt.name()));
         }
         for k in keys {
             let v = map[&k].clone();
@@ -2619,10 +2624,10 @@ pub(crate) fn for_loop<P: ProcessManager>(
                 cx.stdin_pipe.clone(),
                 false,
             );
-            let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
+            let pop_res = cx.state.pop_scope();
             let flow = match (res, pop_res) {
                 (Ok(flow), Ok(())) => flow,
-                (Err(e), _) => return Err(e),
+                (Err(e), _) => return Err(super::args::lift_dispatch_error(e)),
                 (Ok(_), Err(e)) => return Err(e),
             };
             match flow {
@@ -2633,9 +2638,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
         }
         return Ok(Flow::Done);
     }
-    Err(anyhow::Error::new(diag::eval_for_needs_list_or_map(
-        &iterable,
-    )))
+    Err(diag::eval_for_needs_list_or_map(&iterable))
 }
 
 /// Define a user function (`FUNC NAME($p: TYPE, ...) { ... }}).
@@ -2728,11 +2731,11 @@ fn build_script_entry<P: ProcessManager>(
     name: &str,
     raw: &RawFuncDef,
     module: Option<String>,
-) -> Result<super::native::FuncEntry<P>> {
+) -> oxdock_diagnostics::DiagnosticResult<super::native::FuncEntry<P>> {
     let resolved_params = super::native::resolve_script_params(state, name, &raw.params)?;
     let return_tag = state
         .resolve_tag(&raw.return_spelling)
-        .map_err(|err| anyhow::Error::new(diag::eval_call_return_tag_failed(name, err)))?;
+        .map_err(|err| diag::eval_call_return_tag_failed(name, err))?;
     state.check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
     Ok(super::native::FuncEntry {
         meta: super::native::FuncMeta {
@@ -2796,7 +2799,7 @@ fn build_script_entry<P: ProcessManager>(
 pub(crate) fn resolve_call_entry<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     name: &str,
-) -> Result<super::native::FuncEntry<P>> {
+) -> oxdock_diagnostics::DiagnosticResult<super::native::FuncEntry<P>> {
     let canonical = cx
         .state
         .functions
@@ -2805,10 +2808,10 @@ pub(crate) fn resolve_call_entry<P: ProcessManager>(
         Some(key) => match cx.state.functions.get(&key) {
             Some(entry) => entry,
             None => {
-                return Err(anyhow::Error::new(diag::eval_call_unknown(
+                return Err(diag::eval_call_unknown(
                     name,
                     &super::import::missing_import_hint(cx.state, name),
-                )));
+                ));
             }
         },
         None => match cx.state.functions.get(name) {
@@ -2825,10 +2828,10 @@ pub(crate) fn resolve_call_entry<P: ProcessManager>(
                     build_script_entry(cx.state, name, &raw, unit)?
                 }
                 None => {
-                    return Err(anyhow::Error::new(diag::eval_call_unknown(
+                    return Err(diag::eval_call_unknown(
                         name,
                         &super::import::missing_import_hint(cx.state, name),
-                    )));
+                    ));
                 }
             },
         },
@@ -2844,12 +2847,10 @@ pub(crate) fn gate_call<P: ProcessManager>(
     name: &str,
     entry: &super::native::FuncEntry<P>,
     nargs: usize,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     // Global recursion check.
     if cx.state.call_depth >= MAX_CALL_DEPTH {
-        return Err(anyhow::Error::new(diag::eval_call_recursion_limit(
-            super::base_name(name),
-        )));
+        return Err(diag::eval_call_recursion_limit(super::base_name(name)));
     }
     // Pre-evaluation arity gate from the entry metadata. Trailing
     // optional MAP params widen exact counts to ranges; everything
@@ -2858,18 +2859,18 @@ pub(crate) fn gate_call<P: ProcessManager>(
         let required = super::required_arity(params);
         if nargs < required || nargs > params.len() {
             if required == params.len() {
-                return Err(anyhow::Error::new(diag::eval_call_arity_exact(
+                return Err(diag::eval_call_arity_exact(
                     super::base_name(name),
                     params.len(),
                     nargs,
-                )));
+                ));
             }
-            return Err(anyhow::Error::new(diag::eval_call_arity_range(
+            return Err(diag::eval_call_arity_range(
                 super::base_name(name),
                 required,
                 params.len(),
                 nargs,
-            )));
+            ));
         }
     }
     Ok(())
@@ -2892,7 +2893,7 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     for arg in args {
         arg_vals.push(super::args::evaluate_expr(arg, cx)?);
     }
-    execute_call_entry(cx, name, entry, arg_vals, false)
+    Ok(execute_call_entry(cx, name, entry, arg_vals, false)?)
 }
 
 /// Execute a resolved entry with evaluated arguments. Single owner
@@ -2907,7 +2908,7 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
     entry: super::native::FuncEntry<P>,
     mut arg_vals: Vec<Value>,
     rpn_only: bool,
-) -> Result<Value> {
+) -> oxdock_diagnostics::DiagnosticResult<Value> {
     // 5. Execution by body kind. Script returns early (no host
     // return gate); host arms share one context wrap and one
     // return-type check below.
@@ -3003,7 +3004,7 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             } else if let Some((envs, inherit_names, _, _)) = callee_ctx {
                 cx.state.reset_module_env(envs);
                 if !inherit_names.is_empty() {
-                    inherit_env(cx, &inherit_names)?;
+                    inherit_env(cx, &inherit_names).map_err(super::args::lift_dispatch_error)?;
                 }
             }
             // Omitted trailing optionals fill with zero values before
@@ -3012,20 +3013,13 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             // unzeroable optionals, so the fill cannot fail here.
             for (pname, ptype, optional) in def.params.iter().skip(arg_vals.len()) {
                 if !optional {
-                    return Err(anyhow::Error::new(diag::eval_call_missing_param(
-                        pname,
-                        super::base_name(name),
-                    )));
+                    return Err(diag::eval_call_missing_param(pname, super::base_name(name)));
                 }
                 arg_vals.push(super::optional_zero_value(ptype).map_err(|err| {
-                    anyhow::Error::new(diag::eval_call_zero_value_failed(
-                        super::base_name(name),
-                        pname,
-                        err,
-                    ))
+                    diag::eval_call_zero_value_failed(super::base_name(name), pname, err)
                 })?);
             }
-            let outcome: Result<Value> = (|| {
+            let outcome: oxdock_diagnostics::DiagnosticResult<Value> = (|| {
                 // Function-local imports scope to this invocation: push
                 // a fresh frame for this unit so the body's own top-level
                 // imports land here (never the shared unit-top map) and
@@ -3075,19 +3069,23 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
                 // anywhere unwraps them.)
                 let _ = cx.state.call_alias_frames.pop();
                 let _ = cx.state.func_floors.pop();
-                let flow = flow?;
+                let flow = flow.map_err(super::args::lift_dispatch_error)?;
                 match flow {
                     Flow::Done => Ok(Value::string(String::new())),
                     Flow::Return { value, .. } => Ok(value),
-                    Flow::Break { idx } => Err(anyhow::Error::new(
-                        diag::eval_call_flow_crosses_func(idx + 1, KEYWORD_BREAK, name),
+                    Flow::Break { idx } => Err(diag::eval_call_flow_crosses_func(
+                        idx + 1,
+                        KEYWORD_BREAK,
+                        name,
                     )),
-                    Flow::Continue { idx } => Err(anyhow::Error::new(
-                        diag::eval_call_flow_crosses_func(idx + 1, KEYWORD_CONTINUE, name),
+                    Flow::Continue { idx } => Err(diag::eval_call_flow_crosses_func(
+                        idx + 1,
+                        KEYWORD_CONTINUE,
+                        name,
                     )),
                 }
             })();
-            let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
+            let pop_res = cx.state.pop_scope();
             if let Some(saved) = saved_vars {
                 cx.state.var_scopes = saved;
             }
@@ -3110,10 +3108,10 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
         FuncBody::Pure(func) => func(arg_vals),
         FuncBody::Ctx(func) => {
             if rpn_only && !entry.meta.rpn {
-                return Err(anyhow::Error::new(diag::eval_call_unknown_rpn(
+                return Err(diag::eval_call_unknown_rpn(
                     name,
                     &super::import::missing_import_hint(cx.state, name),
-                )));
+                ));
             }
             func(cx, arg_vals)
         }
@@ -3125,7 +3123,7 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             }
         }
     }
-    .map_err(|err| anyhow::Error::new(diag::eval_call_failed(name, &err)))?;
+    .map_err(|err| diag::eval_call_failed(name, &err))?;
     super::args::check_host_return_value(
         &format!("function `{}` returned", super::base_name(name)),
         &entry.meta.returns,
@@ -3145,34 +3143,33 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
 pub(crate) fn block_value<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     body: &[Step],
-) -> Result<Value> {
+) -> oxdock_diagnostics::DiagnosticResult<Value> {
     cx.state.push_scope();
-    let outcome: Result<Value> =
-        (|| {
-            let flow = super::steps::execute_steps(
-                cx.state,
-                cx.process,
-                body,
-                cx.stdin.clone(),
-                false,
-                cx.out.clone(),
-                cx.err.clone(),
-                cx.out_pipe.clone(),
-                cx.stdin_pipe.clone(),
-                false,
-            )?;
-            match flow {
-                Flow::Done => Ok(Value::string(String::new())),
-                Flow::Return { value, .. } => Ok(value),
-                Flow::Break { idx } => Err(anyhow::Error::new(
-                    diag::eval_block_flow_crosses_block(idx + 1, KEYWORD_BREAK),
-                )),
-                Flow::Continue { idx } => Err(anyhow::Error::new(
-                    diag::eval_block_flow_crosses_block(idx + 1, KEYWORD_CONTINUE),
-                )),
-            }
-        })();
-    let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
+    let outcome: oxdock_diagnostics::DiagnosticResult<Value> = (|| {
+        let flow = super::steps::execute_steps(
+            cx.state,
+            cx.process,
+            body,
+            cx.stdin.clone(),
+            false,
+            cx.out.clone(),
+            cx.err.clone(),
+            cx.out_pipe.clone(),
+            cx.stdin_pipe.clone(),
+            false,
+        )
+        .map_err(super::args::lift_dispatch_error)?;
+        match flow {
+            Flow::Done => Ok(Value::string(String::new())),
+            Flow::Return { value, .. } => Ok(value),
+            Flow::Break { idx } => Err(diag::eval_block_flow_crosses_block(idx + 1, KEYWORD_BREAK)),
+            Flow::Continue { idx } => Err(diag::eval_block_flow_crosses_block(
+                idx + 1,
+                KEYWORD_CONTINUE,
+            )),
+        }
+    })();
+    let pop_res = cx.state.pop_scope();
     match (outcome, pop_res) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(e), _) => Err(e),
@@ -3202,11 +3199,11 @@ pub(crate) fn while_loop<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     cond: &Expr,
     body: &[Step],
-) -> Result<Flow> {
+) -> oxdock_diagnostics::DiagnosticResult<Flow> {
     use std::sync::atomic::Ordering;
     loop {
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            return Err(anyhow::Error::new(diag::eval_async_cancelled()));
+            return Err(diag::eval_async_cancelled());
         }
         let val = super::args::evaluate_expr(cond, cx)?;
         if !super::args::is_truthy(&val)? {
@@ -3225,10 +3222,10 @@ pub(crate) fn while_loop<P: ProcessManager>(
             cx.stdin_pipe.clone(),
             false,
         );
-        let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
+        let pop_res = cx.state.pop_scope();
         let flow = match (res, pop_res) {
             (Ok(flow), Ok(())) => flow,
-            (Err(e), _) => return Err(e),
+            (Err(e), _) => return Err(super::args::lift_dispatch_error(e)),
             (Ok(_), Err(e)) => return Err(e),
         };
         match flow {
@@ -3905,7 +3902,7 @@ pub(crate) fn dispatch_workdir<P: ProcessManager>(
         unreachable!()
     };
     let path = super::args::resolve_arg(arg, cx)?;
-    workdir(cx, &path)
+    Ok(workdir(cx, &path)?)
 }
 
 pub(crate) fn dispatch_workspace<P: ProcessManager>(
@@ -4517,7 +4514,7 @@ pub(crate) fn dispatch_exit<P: ProcessManager>(
         unreachable!()
     };
     let code = super::args::resolve_arg_as_int(code, cx)?;
-    exit(cx, code)
+    Ok(exit(cx, code)?)
 }
 
 /// Write a `FAIL` message to stderr: same single-`write_all` atomicity
@@ -4590,7 +4587,9 @@ pub(crate) fn fail<P: ProcessManager>(
         let msg = super::args::resolve_arg(msg, cx)?;
         fail_message(cx, &msg)?;
     }
-    exit(cx, code).map(|()| Flow::Done)
+    exit(cx, code)
+        .map(|()| Flow::Done)
+        .map_err(anyhow::Error::from)
 }
 
 pub(crate) fn dispatch_fail<P: ProcessManager>(
@@ -4721,7 +4720,7 @@ pub(crate) fn dispatch_with_io_block<P: ProcessManager>(
     let StepKind::WithIoBlock { bindings } = step else {
         unreachable!()
     };
-    with_io_block(cx, 0, 0, bindings)
+    Ok(with_io_block(cx, 0, 0, bindings)?)
 }
 
 pub(crate) fn dispatch_func_def<P: ProcessManager>(
