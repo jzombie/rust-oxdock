@@ -3290,7 +3290,6 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             let guard = arm_deadline(cx, deadline);
             let result = if bindings.is_empty() {
                 super::import::import_file(cx, path, alias)
-                    .map_err(super::args::lift_dispatch_error)
             } else {
                 (|| {
                     let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
@@ -3311,7 +3310,6 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                         tty: None,
                     };
                     super::import::import_file(&mut sub_cx, path, alias)
-                        .map_err(super::args::lift_dispatch_error)
                 })()
             };
             let value = disarm_deadline(cx, guard, deadline, result)?;
@@ -4736,7 +4734,7 @@ pub(crate) fn dispatch_import_file<P: ProcessManager>(
     let StepKind::ImportFile { path, alias } = step else {
         unreachable!()
     };
-    super::import::import_file(cx, path, alias).map(|_| ())
+    Ok(super::import::import_file(cx, path, alias).map(|_| ())?)
 }
 
 pub(crate) fn dispatch_import_funcs<P: ProcessManager>(
@@ -4752,7 +4750,13 @@ pub(crate) fn dispatch_import_funcs<P: ProcessManager>(
     else {
         unreachable!()
     };
-    super::import::import_funcs(cx, path, alias.as_deref(), func_names, type_names)
+    Ok(super::import::import_funcs(
+        cx,
+        path,
+        alias.as_deref(),
+        func_names,
+        type_names,
+    )?)
 }
 
 pub(crate) fn dispatch_call<P: ProcessManager>(

@@ -49,11 +49,11 @@ All sites already use keyed ctors; flip signatures to
       `bind_prompt_var`
 
 ### A2. `core/exec/import.rs` boundary returns (9 sites)
-- [ ] Flip with B1: `import_unknown_function`,
+- [x] Flip with B1: `import_unknown_function`,
       `import_stateful_harvest`, `import_type_collision`,
       `import_flow_crosses_boundary` x2, `import_unknown_type`
       host-module probe, `nested_cause`
-- [ ] `pop_scope` `anyhow::Error::from` shim (standard interop;
+- [x] `pop_scope` `anyhow::Error::from` shim (standard interop;
       drops when B1 flips)
 - [x] `import_const_forward_failed` (needs B5, not B1;
       done in B5: `resolve_const_ref` propagates natively)
@@ -766,3 +766,42 @@ All sites already use keyed ctors; flip signatures to
   suites, `cargo clippy --workspace --all-targets` clean,
   `rustfmt --edition 2024 --check` clean on `handlers.rs`,
   `steps.rs`.
+
+- A2 (2026-11-27): import boundary. `import_funcs`,
+  `ensure_module_init`, `import_file` (`core/exec/import.rs`)
+  return `DiagnosticResult`; 7 outer
+  `anyhow::Error::new(import_diag::...)` wrappers dropped (host
+  `import_unknown_type` probe, `import_stateful_harvest`,
+  `import_unknown_function`, `import_unknown_type` None,
+  `import_type_collision`, plus `import_flow_crosses_boundary`
+  BREAK/CONTINUE). `nested_cause` becomes
+  `Option<oxdock_diagnostics::Diagnostic>` (recursive calls now
+  native, no `anyhow` carrier). `pop_scope` shim dropped
+  (`pop_scope` already `DiagnosticResult`; the
+  `.map_err(anyhow::Error::from)` round-trip removed, match arms
+  native). `execute_steps` interior (still anyhow, B1 keystone)
+  lifts via the single owner `args::lift_dispatch_error`
+  (lossless per H4 AMEND, same as `execute_steps`/`inherit_env`
+  in handlers). Already-native callees pass through untouched
+  (`load_import`, `gate_harvested_name`,
+  `insert_imported_type`, `resolve_own_type_harvests`,
+  `collect_type_aliases`, `validate_import_body_types` via
+  `import_failed_validation` taking `Diagnostic` by value,
+  `resolve_script_params`, `resolve_tag`, `check_return_tag`,
+  `import_cannot_read`/`import_bad_utf8`/`import_parse_failed`
+  via `&anyhow::Error`/`&io` ctor params).
+  `read_import_bytes` stays anyhow (fs boundary, B4 permanent).
+  Anyhow parents hold via `From`: `dispatch_import_file`/
+  `dispatch_import_funcs` stay anyhow (`define_pipeline!` table)
+  via `Ok(f(...)?)`; `steps.rs` ImportFile/ImportFuncs arms need
+  no change (Diagnostic converts via `From` into the anyhow
+  `?`); `assign_capture` Import arms (already
+  `DiagnosticResult`) drop the `.map_err(lift_dispatch_error)`
+  round-trip. No test changes. Gates (post-PASS):
+  `cargo test -p oxdock-core` green (433 + 629 + 12 + 2; the two
+  `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
+  expected fixture stderr, not failures), full
+  `cargo test --workspace` green with zero failures across all
+  suites, `cargo clippy --workspace --all-targets` clean,
+  `rustfmt --edition 2024 --check` clean on `import.rs`,
+  `handlers.rs`.
