@@ -346,3 +346,11 @@ All sites already use keyed ctors; flip signatures to
   mcp 11 + 26 + 13, net-plugin 38, logic-tests all green
   (5 + 2 + 8 + 17 + 15 + 19 + 1 + 4 + 4 + 31 + 6 + 12 + 2 +
   19 + 11), clippy clean, rustfmt clean.
+
+- B1h (2026-11-27): `cargo test --workspace` green, exit 0,
+  zero `FAILED`, zero failed counts across every target. The
+  two `error: unexpected argument
+  '--invalid-oxdock-flag-xyz'` lines in filtered output are
+  expected fixture stderr (`run_failure_reporting`
+  buildtime-macro fixture plus `oxdock-core` commands
+  `run_failure_reporting_*` tests), not failures.
