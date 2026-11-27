@@ -1,11 +1,30 @@
 # Remaining work: diagnostics unification (#168)
 
 Goal: every user-facing DSL/CLI error behind one keyed constructor;
-`anyhow` only as carrier where a boundary forces it; drop the dep per
-crate when no `anyhow::` path remains. Changes stay uncommitted for
+`anyhow` only as transparent transport where a foreign/macro/thread
+boundary forces it, never as a construction site. No permanent
+stays for `anyhow`-constructed errors. Changes stay uncommitted for
 review until the user explicitly asks for a commit.
 
+Compliance rule (enforced, no bypass): production code MUST NOT
+construct user-facing errors via `anyhow::Error::new`, `anyhow::bail!`,
+`::anyhow::bail!`, `.context`/`.with_context`, or bare literals.
+Every failure site builds its keyed `Diagnostic` through a single
+conversion owner (ctor taking a typed source, or a `from_anyhow` /
+`lift_dispatch_error`-style lossless lift that reclaims the first
+keyed `Diagnostic` in the chain and replays outer frames via native
+`with_contexts`). `anyhow` survives ONLY as the transport type at a
+named foreign/macro/thread boundary (`From<Diagnostic>`,
+`anyhow::Error::from(diag)`, `Ok(f(...)?)` bridges), with a keyed
+owner on at least one side. `&anyhow::Error` ctor params are NOT
+compliant: replace with typed-source ctors or `from_anyhow`-style
+lifts. Magic strings are never acceptable.
+
 Legend: `- [ ]` open, `- [x]` done, `- [!]` stay (closed as permanent).
+Stays are BANNED for `anyhow`-constructed user-facing errors under
+the compliance rule above: no new `- [!]` may be added for a
+construction site, and all prior `- [!]` construction closes are
+revoked to `- [ ]` until converted.
 Gates per bulk: `cargo test` green, `cargo clippy` no new warnings,
 `rustfmt --edition 2024` clean on touched files. Batches stay
 file-sized; one plan-log entry per bulk in
@@ -77,14 +96,15 @@ All sites already use keyed ctors; flip signatures to
       `anyhow::Error::new(ctor(...))` construction sites
       (`assets.rs` 18 sites already use foreign-error ctors;
       `lib.rs` already anyhow-free)
-- Note: the `anyhow` dep CANNOT be dropped: the
+- Note: the `anyhow` dep CANNOT yet be dropped: the
   `build.*` ctors take `reason: &anyhow::Error`
-  (`diagnostics.rs:26-241`), and that surface is permanent
-  while `oxdock-embed` stays anyhow (Section D). Any
-  `&anyhow::Error` in a signature requires `anyhow` in
-  `[dependencies]`; removal would fail `cargo check` with
-  unresolved crate. `oxdock-build` therefore lives in
-  Section C's permanent carrier list, not its removal list.
+  (`diagnostics.rs:26-241`), and that non-compliant surface
+  converts per Section C/D (typed sources or `from_anyhow`
+  lifts once `oxdock-embed` converts). Any `&anyhow::Error`
+  in a signature requires `anyhow` in `[dependencies]`;
+  removal would fail `cargo check` with unresolved crate.
+  `oxdock-build` therefore stays in Section C's interim
+  carrier list, open until zero construction sites remain.
 
 ### A6. `oxdock-mcp/server.rs` (5 sites)
 - [x] Flip with B1: `session_lock_poisoned_reload`,
@@ -129,8 +149,9 @@ All sites already use keyed ctors; flip signatures to
        premise in B1f/B1g is corrected accordingly.)
 - [x] B2 `ProcessManager` trait (`contract.rs`,
       `shell_manager.rs`, `mock.rs`, `synthetic.rs`,
-      `child.rs`). Flip trait to `DiagnosticResult` OR declare
-      anyhow-at-the-sys-boundary permanent.
+      `child.rs`). Flip trait to `DiagnosticResult` (the
+      anyhow-at-the-sys-boundary permanent option is revoked
+      under the compliance rule).
       Decision: Flip approved. Every failure mode on the run/spawn
       surface is already keyed (`run_command_failed`,
       `run_bg_capture_unsupported`, miri `*_unsupported_miri`,
@@ -142,31 +163,34 @@ All sites already use keyed ctors; flip signatures to
       `CommandBuilder`, `apply_ctx`, `direct_cmd`,
       `spawn_child_with_streams`); only 2 core call sites
       (`handlers.rs` spawn arms) bridge via `anyhow::Error::from`.
-      `child.rs` stays anyhow (B9 Windows-only, accept-as-is) and
-      `expand.rs` `PlaceholderCall` stays anyhow (external-crate
-      boundary per H6b), so the `anyhow` dep stays regardless:
-      Section C `oxdock-process` dep removal waits on B9.
-- [!] B3 `RemoteRunner` trait + `TransferStage`
+      `child.rs` converts per reopened B9 (no accept-as-is)
+      and `expand.rs` `PlaceholderCall` gains a keyed owner or
+      lossless lift at the external-crate boundary per the
+      compliance rule, so the `anyhow` dep drops when zero
+      `anyhow::` construction sites remain: Section C tracks
+      `oxdock-process` open until then.
+- [ ] B3 `RemoteRunner` trait + `TransferStage`
       (`net session.rs` 36 sites, `core/remote.rs`
-      `run_remote_block`). Redesign OR close as permanent
-      (concrete-error params risk flattening chained
-      `RpcServiceError`/`FrameEncodeError` io, proven in the
-      fetch bulk).
-      Decision: Close as permanent. `RemoteRunner` +
-      `TransferStage` stay anyhow; concrete-error params risk
-      flattening chained `RpcServiceError`/`FrameEncodeError`
-      io. Revisit only with a typed-error redesign proposal.
-- [!] B4 `oxdock-fs` exclusion (~200 sites: `io.rs` 68,
+      `run_remote_block`). Redesign REQUIRED under the
+      compliance rule: close-as-permanent is revoked.
+      Concrete-error params that flatten chained
+      `RpcServiceError`/`FrameEncodeError` io are NOT an
+      excuse to keep `anyhow` construction: introduce the
+      typed-error redesign (keyed ctors with typed sources +
+      lossless `from_anyhow`-style lift, same shape as H1/H5/H6b
+      and A5/B6) so every site builds a keyed `Diagnostic`.
+      Decision: REOPENED. No permanent stay; redesign then
+      convert, with reclaim + frame-preservation pins.
+- [ ] B4 `oxdock-fs` conversion (~200 sites: `io.rs` 68,
       `backend.rs` 37, `copy.rs` 27, `git/` 27, `install.rs`
-      12, `path.rs` 10, ...). (a) Permanent exclusion: fs
-      keeps literals, stays anyhow; OR (b) move shared keyword
-      constants to a leaf crate to break the parser cycle,
-      then standard bulk conversion. Largest scope decision
-      left.
-      Decision: Permanent exclusion. `oxdock-fs` keeps
-      literals and stays anyhow (affirms #345). No
-      keyword-constant move; the ~200 sites stay out of
-      scope.
+      12, `path.rs` 10, ...). Permanent exclusion is REVOKED
+      under the compliance rule (affirms-#345 close is
+      rescinded for this plan). Required path: (b) move shared
+      keyword constants to a leaf crate to break the parser
+      cycle, then standard bulk conversion to keyed ctors +
+      `DiagnosticResult`, file-sized bulks with the A1 pattern.
+      No literals ship; no `anyhow` construction remains.
+      Decision: REOPENED. Convert; exclusion is not an option.
 - [x] B5 `ForwardError` redesign (small, self-contained, no
       input needed): `chase_const_forward` ->
       `DiagnosticResult`; unblocks `import_const_forward_failed`
@@ -180,7 +204,7 @@ All sites already use keyed ctors; flip signatures to
       (`tar.pack.failed`, `tar.unpack.failed`, verbatim like
       `build.operation.failed`) plus lossless `from_anyhow`
       (mirroring `lift_dispatch_error`); the `apply` callback
-      stays `anyhow::Result` (callers span permanent-carrier
+      stays `anyhow::Result` (callers span interim-carrier
       crates `cli` + net-plugin), lifted via `from_anyhow`, the
       sanctioned external-boundary shape (H1/H5/H6b).
 - [x] B7 Closure cascade: `write_stdout`/`write_stderr`
@@ -190,87 +214,135 @@ All sites already use keyed ctors; flip signatures to
       Decision: Approved as a B1 cascade. Flips together with
       callers inside B1, not as a separate bulk.
 
-## C. Per-crate closure (grep `anyhow::` paths -> remove dep -> gates)
+## C. Per-crate closure (grep `anyhow::` paths -> keyed owner or
+lossless lift -> remove dep -> gates; `&anyhow::Error` ctor params
+do NOT count as closure)
 
 - [x] `oxdock-diagnostics` (anyhow dev-only already)
-- [x] `oxdock-pty` (sole anyhow paths: 4 `&anyhow::Error`
-      ctor params over portable-pty third-party failures, plus
-      test-only carrier checks; dep stays permanently, same
-      shape as `oxdock-build`)
-- [x] `oxdock-process` (B2 flipped the trait; B9
-      `cfg(windows)` `child.rs` closed accept-as-is per D;
-      dep stays permanently for `from_anyhow`,
-      `&anyhow::Error` ctors, and the external `expand.rs`
-      `PlaceholderCall` boundary)
+- [ ] `oxdock-pty` (REOPENED: 4 `&anyhow::Error`
+      ctor params over portable-pty third-party failures are
+      non-compliant construction sites; replace with typed-source
+      ctors or a `from_anyhow`-style lossless lift, same shape
+      as A5/B6; dep drops only when zero `anyhow::` paths remain
+      in src)
+- [ ] `oxdock-process` (REOPENED: B2 flipped the trait but
+      `from_anyhow` owners stay while `&anyhow::Error` ctor
+      params/bridges, the external `expand.rs`
+      `PlaceholderCall` boundary, and B9 `cfg(windows)`
+      `child.rs` remain; each must gain a keyed owner or
+      lossless lift; dep drops only at zero `anyhow::` paths)
 - [x] `oxdock-pipe` (zero `anyhow` paths in src, no dep;
       trivially clean)
-- [!] Keep permanently as carrier/macro-boundary (staged
-      retirement, not failure): `core`, `parser`, `cli`,
-      `mcp`, all three plugins, `oxdock-build` (foreign
-      `&anyhow::Error` ctor params are permanent while
-      `embed` stays anyhow), `oxdock-pty` (third-party
-      portable-pty failures ride `&anyhow::Error` ctors),
-      `oxdock-process` (B2 flipped; `from_anyhow`,
-      `&anyhow::Error` ctors, external `PlaceholderCall`,
-      `cfg(windows)` `child.rs` per B9), `fs`
-      (per B4), `embed`
+- [ ] `oxdock-build` (REOPENED: `build.*` ctors in
+      `diagnostics.rs:26-241` take `reason: &anyhow::Error`
+      (18 sites); replace with typed-source ctors or
+      `from_anyhow`-style lossless lifts once `embed`
+      converts per D; dep drops only at zero `anyhow::`
+      paths)
+- [ ] `oxdock-utils` (REOPENED: `pack_failed` /
+      `unpack_failed` take `&anyhow::Error`, `tar.rs` uses
+      `anyhow::Error::new(e)` ctor-arg adapters plus the
+      `apply` `anyhow::Result` callback boundary; replace
+      ctors with typed sources or `from_anyhow`-style lifts,
+      lift the callback losslessly; dep drops only at zero
+      `anyhow::` construction sites)
+- [ ] Interim carriers, NOT permanent (anyhow survives ONLY as
+      the transport type with a keyed owner on at least one
+      side; every crate below must reach zero `anyhow::`
+      construction sites, then drop the dep): `core`, `parser`,
+      `cli`, `mcp`, all three plugins, `oxdock-build` (per
+      bullet above), `oxdock-utils` (per bullet above),
+      `oxdock-pty`, `oxdock-process`, `fs` (per reopened B4),
+      `embed` (per reopened D item below)
 
-## D. Stays to record as final (decided, just log them)
+## D. Reopened conversions (no permanent stays)
 
-- [!] `exit_code_of(&anyhow::Error)` (must survive transports;
-      verified: `cli` lib/serve + core steps/remote/state/args +
-      integration pins all read the anyhow carrier)
-- [!] `check_value_at` / `tag.rs` generated extractors
-      (passthrough ctors at call sites: 4 markdown
-      `toc_option_check_failed` sites; normalization
+Compliance note: NO user-facing `anyhow` construction site may
+be recorded here as final. Every item below is either (a) a
+pure-transport read with a keyed `Diagnostic` owner on at least
+one side, or (b) REOPENED as required conversion work. The
+prior "permanent / accept-as-is / won't-fix" closes are revoked.
+
+- [ ] `exit_code_of(&anyhow::Error)` (REOPENED: migrate every
+      call site to `exit_code_of_diag(&Diagnostic)`; the anyhow
+      carrier read survives ONLY until the last transport is
+      keyed, then the `&anyhow::Error` walker is deleted)
+- [ ] `check_value_at` / `tag.rs` generated extractors
+      (REOPENED: normalize the 4 markdown
+      `toc_option_check_failed` sites to keyed passthroughs; no
       won't-fix. The FOLLOW-UP at
-      `diagnostics-unification.md:2957` cannot be marked
-      closed: that file is absent from this repo, so there is
-      no contradicting plan; the won't-fix is recorded here
-      as final)
-- [!] `#[oxdock_func]` fns everywhere + func-macro
-      `::anyhow::bail!` (macro boundary; verified 11 codegen
-      sites in `oxdock-func-macro`)
-- [!] `russh Handler::Error = anyhow::Error`
-      (`ssh auth.rs:93`/`runtime.rs:253`; foreign-trait
-      boundary)
-- [!] `macro_input.rs` proc-macro boundary (verified:
+      `diagnostics-unification.md:2957` is tracked here until
+      that file exists in this repo, then closed there too)
+- [ ] `#[oxdock_func]` fns everywhere + func-macro
+      `::anyhow::bail!` codegen (REOPENED: macro must emit
+      keyed `Diagnostic` construction + `DiagnosticResult`
+      signatures; the 11 codegen sites in `oxdock-func-macro`
+      convert, no `bail!` remains)
+- [ ] `russh Handler::Error = anyhow::Error`
+      (`ssh auth.rs:93`/`runtime.rs:253`; REOPENED: assoc type
+      stays ONLY because the foreign trait names it, but every
+      internal failure builds a keyed `Diagnostic` lifted via
+      `From`/`from_anyhow` at the boundary; zero
+      `anyhow::Error::new`/`bail!` construction inside)
+- [ ] `macro_input.rs` proc-macro boundary (REOPENED:
       `anyhow::Result` over the syn/`TokenStream` surface in
-      `parser/src/macro_input.rs`)
-- [!] `oxdock-embed` gather fns (verified:
-      `use anyhow::{Context, Result}` + `.with_context`
-      chains; callers bridge via build ctors per A5)
-- [!] `PumpDownstreamClosed` sentinel + pump thread fns
-      (thread-error design; verified sentinel + downcast
-      guards in `core/exec/args.rs`)
-- [!] `eval_int_arg_resolve` + `std_pipe_{read,create}_failed`
-      (verified adapters; inners reach sourced
-      `os_pipe_creation_failed` in `pipe/slot.rs`)
-- [!] CLI help/version `bail!` (not error diagnostics;
-      verified `lib.rs` `usage()`/`version()` paths)
-- [!] Out of scope: test-harness / logic-tests / fixture /
-      doc-tests / xtask / render tooling
-- [!] B9 Windows-only code (`process/child.rs` job objects,
+      `parser/src/macro_input.rs` converts to keyed ctors +
+      lossless lift for `syn::Error`; `anyhow` remains ONLY as
+      the transport type where the proc-macro signature forces
+      it)
+- [ ] `oxdock-embed` gather fns (REOPENED: `use
+      anyhow::{Context, Result}` + `.with_context` chains
+      convert to `DiagnosticResult` with keyed ctors; callers
+      keep bridging via build ctors only until then)
+- [ ] `PumpDownstreamClosed` sentinel + pump thread fns
+      (REOPENED: sentinel becomes a keyed `Diagnostic`
+      (`std_pump_*` family); thread fns return
+      `DiagnosticResult` or lift losslessly at the spawn
+      boundary; no `anyhow::Error::new` sentinel, no downcast
+      guards)
+- [ ] `eval_int_arg_resolve` + `std_pipe_{read,create}_failed`
+      (REOPENED: replace the `&anyhow::Error::new(err)`
+      ctor-arg adapters with typed-source ctors or
+      `from_anyhow`-style lifts; inners already reach sourced
+      `os_pipe_creation_failed` in `pipe/slot.rs`, so keep
+      that sourcing while deleting the anyhow adapter)
+- [ ] CLI help/version `bail!` (REOPENED: user-facing CLI
+      errors get keyed owners like every other CLI path;
+      `lib.rs` `usage()`/`version()` paths convert)
+- [ ] Out of scope, transport-only: test-only crates
+      (test-harness / logic-tests / fixture / doc-tests) may
+      hold flipped callees via `From`, but MUST NOT construct
+      user-facing errors via `anyhow::Error::new`/`bail!`;
+      keyed pins stay byte-identical. Dev tooling (`xtask`,
+      render tooling) is exempt from the production
+      `DiagnosticResult` conversion and dep-removal rule, but
+      MUST NOT introduce new user-facing `anyhow`
+      construction sites.
+- [ ] B9 Windows-only code (`process/child.rs` job objects,
       `cli` re-exec x5, `assign_job` + unused
-      `job_assign_failed` ctor): accept-as-is (macOS runner;
-      paths `cfg(windows)`-gated with `cfg(windows)` tests;
-      Windows CI verifies)
-- [!] B3 `RemoteRunner` + `TransferStage` stay anyhow
-      (concrete-error params risk flattening chained io;
-      decided in B3, logged here for the final audit)
-- [!] B4 `oxdock-fs` keeps literals and stays anyhow
-      (affirms #345; decided in B4, logged here for the
-      final audit)
+      `job_assign_failed` ctor): REOPENED, not accept-as-is.
+      Convert to `DiagnosticResult` with the keyed
+      `job_assign_failed` owner; `cfg(windows)`-gated tests pin
+      it; Windows CI verifies. No platform exemption from the
+      compliance rule.
+      (B3/B4 tracked solely in Section B above, not duplicated
+      here.)
 
 ## E. Suggested order
 
-1. Decide B1 -> unlocks A1-A4, A6, A2.
-2. Decide B4 -> settles ~200 sites (fs chapter: convert or
-   close as permanent).
-3. Decide B2/B3 -> end-state of process + net session.
+1. Decide B1 -> unlocks A1-A4, A6, A2. (done)
+2. B4 conversion: keyword-constant leaf move, then file-sized
+   fs bulks to keyed ctors (no exclusion).
+3. B2/B3/B9 end-state: process + net session + windows code to
+   `DiagnosticResult` with lossless lifts (no accept-as-is).
 4. Run bulks (H1-H6b file-sized), B5/B6 designs, B7 inside B1.
-5. Section C per-crate closure.
-6. Section D recorded final; future audit reads zero open items.
+   (done)
+5. Section C per-crate closure: zero `anyhow::` construction
+   sites per crate, then drop the dep. `&anyhow::Error` ctor
+   params do not count.
+6. Section D converted, not recorded: every item above becomes
+   `[x]` by conversion; future audit reads zero `anyhow::`
+   construction sites in src, zero open items.
 
 ## Log
 
@@ -1205,3 +1277,26 @@ All sites already use keyed ctors; flip signatures to
   Gates: no code touched; `cargo test -p oxdock-pipe -p
   oxdock-pty` re-run green (zero failures), workspace state
   inherits the B6 green run.
+
+- Compliance enforcement (2026-11-27): plan-only, no code
+  changes. All prior `- [!]` permanent / accept-as-is /
+  won't-fix closes REVOKED under the compliance rule (no
+  `anyhow`-constructed user-facing errors may stay; `anyhow`
+  survives only as transparent transport with a keyed owner on
+  at least one side; `&anyhow::Error` ctor params are
+  non-compliant; magic strings never acceptable). Reopened as
+  `- [ ]` required work: B3 typed-error redesign, B4 fs
+  conversion via the keyword-constant leaf move, C `pty` +
+  `process` + `build` + `utils` + interim-carrier crates to
+  zero construction sites then dep removal, D `exit_code_of`
+  migration to `exit_code_of_diag`, `check_value_at`/tag
+  normalization, func-macro `bail!` codegen, russh assoc-type
+  lift, `macro_input.rs` syn lift, embed gather conversion,
+  `PumpDownstreamClosed` keyed sentinel, `std_pipe_*`
+  typed-source conversion, CLI help/version keyed owners,
+  test-only transport-only + dev-toolling (`xtask`, render)
+  exempt-but-no-new-construction, B9 windows conversion with
+  Windows CI verification (B3/B4 tracked solely in Section B,
+  D heading renamed, no duplicates). Zero `- [!]` remain;
+  18 `- [ ]` open (B: 2, C: 5, D: 11). Gates: no code touched;
+  workspace state inherits the B6 green run.
