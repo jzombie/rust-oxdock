@@ -624,7 +624,7 @@ impl MuxioSession {
             // re-raises it as its own EXIT (see `run_remote_block`); every
             // other guest failure keeps the plain message.
             if let Some(code) = result.exit_code {
-                return Err(oxdock_core::ExitRequest(code))
+                return Err(oxdock_core::ExitRequest::new(code))
                     .context(net_diag::remote_target_exit_status(&request.target, code));
             }
             return Err(anyhow::Error::new(net_diag::remote_target_failed(

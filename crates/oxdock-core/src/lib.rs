@@ -702,9 +702,7 @@ mod tests {
         let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("ASYNC process exited with status")
-                || msg.contains("exit status: 7")
-                || msg.contains("exit code: 7"),
+            msg.contains("exited with status 7"),
             "should surface failing ASYNC exit code"
         );
     }

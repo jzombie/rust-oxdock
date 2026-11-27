@@ -2246,19 +2246,19 @@ mod tests {
 
     #[test]
     fn process_exit_code_relays_exit_requests() {
-        let exit = anyhow::Error::new(ExitRequest(3));
+        let exit = anyhow::Error::new(ExitRequest::new(3));
         assert_eq!(process_exit_code(&exit), 3);
         let relayed =
-            anyhow::Error::new(ExitRequest(3)).context("REMOTE 'prod' exited with code 3");
+            anyhow::Error::new(ExitRequest::new(3)).context("REMOTE 'prod' exited with code 3");
         assert_eq!(process_exit_code(&relayed), 3);
         assert_eq!(process_exit_code(&anyhow::anyhow!("boom")), 1);
         assert_eq!(
-            process_exit_code(&anyhow::Error::new(ExitRequest(300))),
+            process_exit_code(&anyhow::Error::new(ExitRequest::new(300))),
             255,
             "codes clamp to the portable range"
         );
         assert_eq!(
-            process_exit_code(&anyhow::Error::new(ExitRequest(-1))),
+            process_exit_code(&anyhow::Error::new(ExitRequest::new(-1))),
             0,
             "negative codes clamp to zero"
         );

@@ -31,6 +31,26 @@ use super::function_names::{
     FUNC_PATH_WRITABLE, FUNC_SEMAPHORE_NEW, FUNC_SHELL_SPLIT_ARGS, FUNC_TO_JSON,
 };
 
+/// Structured field keys. Single spelling for the whole module:
+/// constructors reference these, never literals, so a key rename is
+/// one edit. Covers the B1 exit and snapshot family plus every key
+/// in the constructors this bulk touches; remaining keys migrate as
+/// their bulks land.
+const FIELD_ARGV: &str = "argv";
+const FIELD_CODE: &str = "code";
+const FIELD_COMMAND: &str = "command";
+const FIELD_DECLARES: &str = "declares";
+const FIELD_DETAIL: &str = "detail";
+const FIELD_GOT: &str = "got";
+const FIELD_REASON: &str = "reason";
+const FIELD_SNAPSHOT: &str = "snapshot";
+const FIELD_STATUS: &str = "status";
+const FIELD_STEP: &str = "step";
+const FIELD_TARGET: &str = "target";
+const FIELD_TASK: &str = "task";
+const FIELD_VAR: &str = "var";
+const FIELD_YIELD: &str = "yield";
+
 /// Duplicate field name inside one MAP spelling.
 pub fn map_duplicate_field(field: &str) -> Diagnostic {
     let message = format!("duplicate field `{field}` in `{MAP_TYPE_NAME}` spelling");
@@ -1156,7 +1176,7 @@ pub fn std_bool_cannot_coerce(command: &str, got: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.std.bool_cannot_coerce",
         message,
-        Diagnostic::make_fields(&[("command", command), ("got", got)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command), (FIELD_GOT, got)]),
     )
 }
 
@@ -1646,7 +1666,7 @@ pub fn eval_dispatch_failed(reason: &anyhow::Error) -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.dispatch_failed",
         reason_text.clone(),
-        Diagnostic::make_fields(&[("reason", &reason_text)]),
+        Diagnostic::make_fields(&[(FIELD_REASON, reason_text.as_str())]),
     )
 }
 
@@ -1744,12 +1764,39 @@ pub fn eval_async_cancelled() -> Diagnostic {
     )
 }
 
+/// `ASYNC` background thread panicking. Takes the captured panic detail
+/// (payload text or the historic fallback). The message carries the
+/// detail verbatim so the re-emit text stays byte-identical; the key
+/// makes the thread boundary machine readable. No source rides along.
+pub fn eval_async_thread_panicked(detail: &str) -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.async_thread_panicked",
+        detail.to_string(),
+        Diagnostic::make_fields(&[(FIELD_DETAIL, detail)]),
+    )
+}
+
+/// Outer snapshot context for a failed run. Takes the rendered snapshot
+/// section verbatim (filesystem tree or pending notice). Callers attach
+/// the failing diagnostic via `with_source` so the key survives without
+/// flattening the chain. One owner for the snapshot wrapper.
+pub fn eval_run_snapshot_context(snapshot: &str) -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.snapshot_context",
+        snapshot.to_string(),
+        Diagnostic::make_fields(&[(FIELD_SNAPSHOT, snapshot)]),
+    )
+}
+
 /// Background task exiting nonzero. Takes the named task id when the
 /// task is named (`None` for anonymous pipeline handles) and the
 /// platform exit status; the two surfaces share one key. The status
-/// rendering stays platform-native, so tests pin the prefix only.
+/// renders through the shared exit helper. Numeric codes ride as the
+/// `code` field; signal terminations without a code ride as the
+/// `status` field with the platform rendering.
 pub fn eval_async_exit_status(task: Option<u64>, status: &std::process::ExitStatus) -> Diagnostic {
-    let status_text = format!("{status}");
+    let status_text = super::exit::describe_exit_status(status);
+    let code_text = super::exit::exit_status_code(status).map(|code| code.to_string());
     let message = match task {
         Some(id) => format!("named {KEYWORD_ASYNC} task {id} exited with status {status_text}"),
         None => format!("{KEYWORD_ASYNC} process exited with status {status_text}"),
@@ -1757,9 +1804,12 @@ pub fn eval_async_exit_status(task: Option<u64>, status: &std::process::ExitStat
     let task_text = task.map(|id| id.to_string());
     let mut fields: Vec<(&str, &str)> = Vec::with_capacity(2);
     if let Some(task) = task_text.as_deref() {
-        fields.push(("task", task));
+        fields.push((FIELD_TASK, task));
     }
-    fields.push(("status", &status_text));
+    match code_text.as_deref() {
+        Some(code) => fields.push((FIELD_CODE, code)),
+        None => fields.push((FIELD_STATUS, &status_text)),
+    }
     Diagnostic::new(
         "dsl.eval.async_exit_status",
         message,
@@ -2345,15 +2395,21 @@ pub fn eval_await_timeout(var: &str) -> Diagnostic {
 }
 
 /// Awaited task exiting nonzero. Takes the bare variable name and the
-/// platform exit status; the status rendering stays platform-native,
-/// so tests pin the prefix only. No source rides along.
+/// platform exit status; the status renders through the shared exit
+/// helper. Numeric codes ride as the `code` field; signal terminations
+/// without a code ride as the `status` field. No source rides along.
 pub fn eval_await_exit_status(var: &str, status: &std::process::ExitStatus) -> Diagnostic {
-    let status_text = format!("{status}");
+    let status_text = super::exit::describe_exit_status(status);
+    let code_text = super::exit::exit_status_code(status).map(|code| code.to_string());
     let message = format!("{KEYWORD_AWAIT} task '${var}' failed with status {status_text}");
+    let status_field: (&str, &str) = match code_text.as_deref() {
+        Some(code) => (FIELD_CODE, code),
+        None => (FIELD_STATUS, &status_text),
+    };
     Diagnostic::new(
         "dsl.eval.await_exit_status",
         message,
-        Diagnostic::make_fields(&[("var", var), ("status", &status_text)]),
+        Diagnostic::make_fields(&[(FIELD_VAR, var), status_field]),
     )
 }
 
@@ -2579,7 +2635,7 @@ pub fn eval_remote_exit_status(target: &str, code: i64) -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.remote_exit_status",
         message,
-        Diagnostic::make_fields(&[("target", target), ("code", &code.to_string())]),
+        Diagnostic::make_fields(&[(FIELD_TARGET, target), (FIELD_CODE, &code.to_string())]),
     )
 }
 
@@ -2646,7 +2702,7 @@ pub fn eval_run_cancelled(command: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.run_cancelled",
         message,
-        Diagnostic::make_fields(&[("command", command)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command)]),
     )
 }
 
@@ -2657,7 +2713,7 @@ pub fn eval_run_argv_cancelled(argv: &[String]) -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.run_argv_cancelled",
         message,
-        Diagnostic::make_fields(&[("argv", &format!("{argv:?}"))]),
+        Diagnostic::make_fields(&[(FIELD_ARGV, &format!("{argv:?}"))]),
     )
 }
 
@@ -2669,7 +2725,7 @@ pub fn eval_run_unexpected_capture(command: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.run_unexpected_capture",
         message,
-        Diagnostic::make_fields(&[("command", command)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command)]),
     )
 }
 
@@ -2680,35 +2736,47 @@ pub fn eval_run_argv_unexpected_capture(argv: &[String]) -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.run_argv_unexpected_capture",
         message,
-        Diagnostic::make_fields(&[("argv", &format!("{argv:?}"))]),
+        Diagnostic::make_fields(&[(FIELD_ARGV, &format!("{argv:?}"))]),
     )
 }
 
 /// `RUN` shell form exited non-zero. Takes the rendered command and
-/// the platform exit status; `Display` rendering of the status
-/// lives here (platform-specific, so wording pins use
-/// `starts_with`). No source rides along.
+/// the platform exit status; status rendering lives in the shared
+/// exit helper. Numeric codes ride as the `code` field; signal
+/// terminations without a code ride as the `status` field.
+/// No source rides along.
 pub fn eval_run_exit_status(command: &str, status: &std::process::ExitStatus) -> Diagnostic {
-    let message = format!("{KEYWORD_RUN} {command} exited with status {status}");
+    let status_text = super::exit::describe_exit_status(status);
+    let code_text = super::exit::exit_status_code(status).map(|code| code.to_string());
+    let message = format!("{KEYWORD_RUN} {command} exited with status {status_text}");
+    let status_field: (&str, &str) = match code_text.as_deref() {
+        Some(code) => (FIELD_CODE, code),
+        None => (FIELD_STATUS, &status_text),
+    };
     Diagnostic::new(
         "dsl.eval.run_exit_status",
         message,
-        Diagnostic::make_fields(&[("command", command), ("status", &format!("{status}"))]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command), status_field]),
     )
 }
 
 /// `RUN` argv form exited non-zero. Takes the argv slice and the
-/// platform exit status; `Debug`/`Display` rendering lives here.
+/// platform exit status; status rendering lives in the shared exit
+/// helper. Numeric codes ride as the `code` field; signal
+/// terminations without a code ride as the `status` field.
 /// No source rides along.
 pub fn eval_run_argv_exit_status(argv: &[String], status: &std::process::ExitStatus) -> Diagnostic {
-    let message = format!("{KEYWORD_RUN} {argv:?} exited with status {status}");
+    let status_text = super::exit::describe_exit_status(status);
+    let code_text = super::exit::exit_status_code(status).map(|code| code.to_string());
+    let message = format!("{KEYWORD_RUN} {argv:?} exited with status {status_text}");
+    let status_field: (&str, &str) = match code_text.as_deref() {
+        Some(code) => (FIELD_CODE, code),
+        None => (FIELD_STATUS, &status_text),
+    };
     Diagnostic::new(
         "dsl.eval.run_argv_exit_status",
         message,
-        Diagnostic::make_fields(&[
-            ("argv", &format!("{argv:?}")),
-            ("status", &format!("{status}")),
-        ]),
+        Diagnostic::make_fields(&[(FIELD_ARGV, &format!("{argv:?}")), status_field]),
     )
 }
 
@@ -2719,7 +2787,7 @@ pub fn eval_run_needs_program(command: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.run_needs_program",
         message,
-        Diagnostic::make_fields(&[("command", command)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command)]),
     )
 }
 
@@ -2730,7 +2798,7 @@ pub fn eval_run_pty_exit_status(command: &str, code: i64) -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.run_pty_exit_status",
         message,
-        Diagnostic::make_fields(&[("command", command), ("code", &code.to_string())]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command), (FIELD_CODE, &code.to_string())]),
     )
 }
 
@@ -2772,7 +2840,7 @@ pub fn eval_run_spawn_failed(command: &str, reason: &anyhow::Error) -> Diagnosti
     Diagnostic::new(
         "dsl.eval.run_spawn_failed",
         message,
-        Diagnostic::make_fields(&[("command", command), ("reason", &reason_text)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command), (FIELD_REASON, &reason_text)]),
     )
 }
 
@@ -2785,7 +2853,10 @@ pub fn eval_run_argv_spawn_failed(argv: &[String], reason: &anyhow::Error) -> Di
     Diagnostic::new(
         "dsl.eval.run_argv_spawn_failed",
         message,
-        Diagnostic::make_fields(&[("argv", &format!("{argv:?}")), ("reason", &reason_text)]),
+        Diagnostic::make_fields(&[
+            (FIELD_ARGV, &format!("{argv:?}")),
+            (FIELD_REASON, &reason_text),
+        ]),
     )
 }
 
@@ -5474,11 +5545,11 @@ pub fn check_capture_mismatch(
         "dsl.check.capture_mismatch",
         message,
         Diagnostic::make_fields(&[
-            ("step", &step.to_string()),
-            ("command", kw),
-            ("var", var),
-            ("yield", &y),
-            ("declares", &t),
+            (FIELD_STEP, &step.to_string()),
+            (FIELD_COMMAND, kw),
+            (FIELD_VAR, var),
+            (FIELD_YIELD, &y),
+            (FIELD_DECLARES, &t),
         ]),
     )
 }
@@ -6281,10 +6352,49 @@ mod tests {
     }
 
     /// An `ExitStatus` sample built through the shared test helper:
-    /// the status rendering is platform-native, so tests pin the
-    /// prefix only, never the full text.
+    /// numeric codes render through the shared exit helper, so tests
+    /// pin the numeric code in fields, never the platform text.
     fn exit_status_sample() -> std::process::ExitStatus {
         oxdock_sys_test_utils::exit_status_from_code(1)
+    }
+
+    /// A signal-terminated wait status (Unix only): no exit code, so
+    /// the platform rendering applies instead of the numeric helper.
+    #[cfg(unix)]
+    fn exit_status_signal_sample() -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(9)
+    }
+
+    #[test]
+    fn exit_status_fields_carry_code_for_normal_exits() {
+        let status = exit_status_sample();
+        assert_eq!(status.code(), Some(1));
+        for diag in [
+            eval_run_exit_status("echo hi", &status),
+            eval_run_argv_exit_status(&["echo".to_string()], &status),
+            eval_async_exit_status(None, &status),
+            eval_await_exit_status("t", &status),
+        ] {
+            assert_eq!(diag.fields().get(FIELD_CODE), Some(&"1".to_string()));
+            assert!(!diag.fields().contains_key(FIELD_STATUS));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_status_fields_carry_status_for_signals() {
+        let status = exit_status_signal_sample();
+        assert_eq!(status.code(), None);
+        for diag in [
+            eval_run_exit_status("echo hi", &status),
+            eval_run_argv_exit_status(&["echo".to_string()], &status),
+            eval_async_exit_status(None, &status),
+            eval_await_exit_status("t", &status),
+        ] {
+            assert!(diag.fields().contains_key(FIELD_STATUS));
+            assert!(!diag.fields().contains_key(FIELD_CODE));
+        }
     }
 
     #[test]

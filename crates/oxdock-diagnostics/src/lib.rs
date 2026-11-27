@@ -200,6 +200,13 @@ impl Diagnostic {
         self.0.hint.as_deref()
     }
 
+    /// Shared handle to the chained source, when one is attached.
+    /// Lets owners re-chain a cause under a new typed node (such as
+    /// an exit code) without dropping it.
+    pub fn shared_source(&self) -> Option<Arc<dyn std::error::Error + Send + Sync>> {
+        self.0.source.clone()
+    }
+
     /// Attach a source span (builder style).
     pub fn with_span(mut self, span: Span) -> Self {
         self.0.span = Some(span);

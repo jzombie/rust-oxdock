@@ -95,38 +95,67 @@ All sites already use keyed ctors; flip signatures to
       over `Diagnostic`, `ExitStatus`-over-`Diagnostic`
       (Display is platform-specific, never hardcode).
       Unlocks A1-A4, A6, all of A2 except const-forward.
-      Decision:
+      Decision: Approved incremental. `step_error` attaches
+      `Span` via `with_span` on reclaimed `Diagnostic` and keeps
+      the `step N` message prefix byte-identical during migration.
+      `error_with_snapshot` gains an outer `dsl.eval.snapshot_context`
+      ctor with the snapshot as message plus `with_source` chain,
+      preserving `ExitRequest` via `exit_code_of_diag`. `ThreadJoinHandle`
+      stores `Diagnostic` (`Clone` removes flatten re-emit) with panic
+      payloads behind `dsl.eval.async_thread_panicked`.
+      `BackgroundHandle` flips to `DiagnosticResult` now (process crate
+      already depends on diagnostics, no cycle); `ProcessManager`
+      run/spawn surface stays anyhow until B2. `ExitStatus` ctors
+      migrate to numeric code fields via one `describe_exit_status`
+      helper, never hardcoded `Display`.
 - [ ] B2 `ProcessManager` trait (`contract.rs`,
       `shell_manager.rs`, `mock.rs`, `synthetic.rs`,
       `child.rs`). Flip trait to `DiagnosticResult` OR declare
       anyhow-at-the-sys-boundary permanent.
-      Decision:
-- [ ] B3 `RemoteRunner` trait + `TransferStage`
+      Decision: Split. `BackgroundHandle` flips to
+      `DiagnosticResult` inside B1 (no cycle; `builder.rs`
+      already returns it). `ProcessManager` run/spawn/argv
+      surface stays anyhow through B1; a dedicated B2 bulk
+      decides the full-trait flip versus a permanent
+      sys-boundary carrier.
+- [!] B3 `RemoteRunner` trait + `TransferStage`
       (`net session.rs` 36 sites, `core/remote.rs`
       `run_remote_block`). Redesign OR close as permanent
       (concrete-error params risk flattening chained
       `RpcServiceError`/`FrameEncodeError` io, proven in the
       fetch bulk).
-      Decision:
-- [ ] B4 `oxdock-fs` exclusion (~200 sites: `io.rs` 68,
+      Decision: Close as permanent. `RemoteRunner` +
+      `TransferStage` stay anyhow; concrete-error params risk
+      flattening chained `RpcServiceError`/`FrameEncodeError`
+      io. Revisit only with a typed-error redesign proposal.
+- [!] B4 `oxdock-fs` exclusion (~200 sites: `io.rs` 68,
       `backend.rs` 37, `copy.rs` 27, `git/` 27, `install.rs`
       12, `path.rs` 10, ...). (a) Permanent exclusion: fs
       keeps literals, stays anyhow; OR (b) move shared keyword
       constants to a leaf crate to break the parser cycle,
       then standard bulk conversion. Largest scope decision
       left.
-      Decision:
+      Decision: Permanent exclusion. `oxdock-fs` keeps
+      literals and stays anyhow (affirms #345). No
+      keyword-constant move; the ~200 sites stay out of
+      scope.
 - [ ] B5 `ForwardError` redesign (small, self-contained, no
       input needed): `chase_const_forward` ->
       `DiagnosticResult`; unblocks `import_const_forward_failed`
       + `check_ctx_wrap` sites (`import.rs`, `static_check.rs`
       :1022,:5166).
+      Decision: Approved. Small bulk, runs after B1 with no
+      further input.
 - [ ] B6 `oxdock-utils/tar.rs` pack/unpack (3 sites): needs io
       ctors + `apply`-callback migration design first.
+      Decision: Deferred design. Runs after the H-bulks once
+      the io-ctor and callback-migration shape is proposed.
 - [ ] B7 Closure cascade: `write_stdout`/`write_stderr`
       (`core/io.rs:368,392`) + 10+ inline closures in
       `handlers.rs`/`remote.rs`. Flip as one cascade with
       callers, inside B1's blast radius.
+      Decision: Approved as a B1 cascade. Flips together with
+      callers inside B1, not as a separate bulk.
 
 ## C. Per-crate closure (grep `anyhow::` paths -> remove dep -> gates)
 
@@ -135,7 +164,7 @@ All sites already use keyed ctors; flip signatures to
 - [ ] `oxdock-process` (after B2; windows-only `child.rs`
       needs B9)
 - [ ] `oxdock-pipe`
-- [ ] Keep permanently as carrier/macro-boundary (staged
+- [!] Keep permanently as carrier/macro-boundary (staged
       retirement, not failure): `core`, `parser`, `cli`,
       `mcp`, all three plugins, `oxdock-build` (foreign
       `&anyhow::Error` ctor params are permanent while
@@ -168,6 +197,12 @@ All sites already use keyed ctors; flip signatures to
       `cli` re-exec x5, `assign_job` + unused
       `job_assign_failed` ctor): verify on Windows or
       accept-as-is
+- [!] B3 `RemoteRunner` + `TransferStage` stay anyhow
+      (concrete-error params risk flattening chained io;
+      decided in B3, logged here for the final audit)
+- [!] B4 `oxdock-fs` keeps literals and stays anyhow
+      (affirms #345; decided in B4, logged here for the
+      final audit)
 
 ## E. Suggested order
 
@@ -178,3 +213,105 @@ All sites already use keyed ctors; flip signatures to
 4. Run bulks (H1-H6b file-sized), B5/B6 designs, B7 inside B1.
 5. Section C per-crate closure.
 6. Section D recorded final; future audit reads zero open items.
+
+## Log
+
+- B1a (2026-11-26): keystone helpers without signature flips.
+  Added `exit_code_of_diag`, `exit_status_code`,
+  `describe_exit_status` (`core/exec/exit.rs`); new ctors
+  `eval_async_thread_panicked`, `eval_run_snapshot_context`;
+  normalized 4 `ExitStatus` ctors to the shared helper;
+  flipped `ThreadJoinHandle` to store `Diagnostic` (clone re-emit,
+  panic via new ctor, `ExitRequest` re-attached only when the
+  chain lacks one); updated `async_failure_bubbles_status`
+  assertion for numeric status. Gates: `cargo test -p oxdock-core
+  --lib` 413 passed, `cargo clippy -p oxdock-core --all-targets`
+  clean, `rustfmt --edition 2024` clean on touched files.
+  Remaining B1: `step_error` span sync, `error_with_snapshot`
+  Diagnostic outer, `BackgroundHandle` trait flip.
+
+- B1a follow-up (2026-11-26): field-key constants for the B1
+  family. Added `FIELD_ARGV`, `FIELD_CODE`, `FIELD_COMMAND`,
+  `FIELD_DETAIL`, `FIELD_SNAPSHOT`, `FIELD_STATUS` at the top of
+  `core/exec/diagnostics.rs` and replaced all 20 literal sites, so
+  no new hardcoded keys ship with B1a. Mirrors the `FIELD_*`
+  pattern in `oxdock-process`, `oxdock-fs`, and the net plugin.
+  Full key-constant migration (reason 99x, path 49x, etc.) stays a
+  later bulk. Gates: `cargo test -p oxdock-core --lib` 413 passed,
+  clippy clean, rustfmt clean.
+
+- B1b (2026-11-26): review amendments. `ThreadJoinHandle::reap`
+  reclaims wrapped diagnostics via `e.chain().find_map` clone
+  instead of outermost-only `downcast`, so `.context(...)`
+  wrappers no longer strip key/span/fields; genuinely unkeyed
+  errors keep the `eval_dispatch_failed` fallback. Exit-status
+  schema split: the 4 exit ctors emit `code` when
+  `exit_status_code` returns `Some`, `status` (platform
+  rendering) only on signal termination; `async_failure_bubbles_status`
+  asserts the exact `"exited with status 7"` contract. Field
+  constants completed in every touched constructor
+  (`FIELD_DECLARES`, `FIELD_GOT`, `FIELD_REASON`, `FIELD_STEP`,
+  `FIELD_TARGET`, `FIELD_TASK`, `FIELD_VAR`, `FIELD_YIELD`;
+  `FIELD_` constructors verified literal-free). Plan hygiene:
+  duplicate B2 line removed, B2/B3/B4/B5/B6/B7 decisions
+  recorded, log dates corrected. Gates: `cargo test -p oxdock-core`
+  413 + 629 + 12 + 2 passed, clippy clean, rustfmt clean.
+
+- B1c (2026-11-26): second review amendments. `reap` also
+  captures outer context text above the reclaimed diagnostic
+  (`thread_context`, `": "`-joined, re-applied as one anyhow
+  layer) so `step N` location survives until the `step_error`
+  span sync; fallback uses new `eval_dispatch_failed_owned`
+  (owned chain rides as `with_source` via
+  `into_boxed_dyn_error`). `reemit_error` attaches `ExitRequest`
+  via `with_source` only when sourceless, else relays at the
+  anyhow carrier layer (pre-B1 shape), never clobbering an
+  existing source. Plan: B3/B4 marked `- [!]` with Section D
+  stay entries. Tests: 4 `thread_handle_tests` (panic key,
+  wrapped key + outer text, sourceless key + exit, sourced
+  text + exit) and 2 exit-field schema tests (numeric `code`,
+  Unix signal `status`). Gates: `cargo test -p oxdock-core`
+  419 + 629 + 12 + 2 passed, clippy clean, rustfmt clean.
+
+- B1d (2026-11-26): third review amendments, lossless chaining.
+  `ExitRequest` gains an optional chained source
+  (`new`/`with_source`/`code()`; equality ignores the source,
+  mirroring `Diagnostic`) so an exit code attaches behind a
+  diagnostic without dropping its cause: chain is
+  `Diagnostic` -> `ExitRequest` -> prior cause, and both
+  `exit_code_of` walkers match the request node directly.
+  `Diagnostic::shared_source` exposes the `Arc` cause for
+  re-chaining. `reemit_error` has no destructive branch left:
+  key, span, fields, exit code, and original source all survive
+  as typed nodes, which also keeps it working once
+  `BackgroundHandle` flips to `DiagnosticResult`. `reap` skips
+  `ExitRequest` nodes when capturing outer frames (no text
+  duplication) and `thread_context` is now `Vec<String>`
+  replayed innermost-first, preserving individual frames.
+  `eval_dispatch_failed_owned` keeps the chain through a
+  source-forwarding adapter (`into_boxed_dyn_error` was proven
+  to erase downcasting per anyhow's own docs). Tests replaced
+  the false-positive with `sourced_diagnostic_keeps_key_source
+  _and_exit_code` (truly sourced fixture, all three asserts
+  structural) plus an unkeyed-fallback test; wrapped-context
+  test now pins ordered frames. Section C permanent carrier
+  marked `- [!]`. Gates: core 421 + 629 + 12 + 2, diagnostics
+  8, cli `process_exit_code`, net-plugin 38, clippy clean,
+  rustfmt clean.
+
+- B1e (2026-11-27): fourth review amendments, no-duplication
+  relay. Removed `OwnedAnyhow` / `eval_dispatch_failed_owned`:
+  the adapter violated the `Error` display/source contract
+  (message already holds `{reason:#}` while the source
+  re-rendered `{:#}` and re-yielded the chain head, tripling
+  `{err:#}`). Unkeyed threads now use `eval_dispatch_failed(&e)`
+  (sourceless, like every other foreign boundary). Bare
+  `ExitRequest` threads relay cleanly: `reap` stores outer
+  frames with `thread_error = None`, `reemit_error` branches on
+  `(error, exit)` with a direct `ExitRequest::new(code)` arm,
+  and `try_wait`/`wait` trigger on either slot. Tests pin
+  `{err:#}` exactly (sourced `cancelled: EXIT 7: gone`,
+  unkeyed `step 3: denied`, bare `step 2: EXIT 7`) plus a
+  no-`Diagnostic` assert on the bare path. Gates: core
+  422 + 629 + 12 + 2, diagnostics 8, cli `process_exit_code`,
+  net-plugin 38, clippy clean, rustfmt clean.

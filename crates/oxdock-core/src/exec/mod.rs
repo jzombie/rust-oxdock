@@ -196,7 +196,7 @@ fn error_with_snapshot(err: anyhow::Error, snapshot_section: String) -> anyhow::
     // machine readable (context values are invisible to chain traversal,
     // so the typed request must ride as a real error, not as context).
     match exit::exit_code_of(&err) {
-        Some(code) => anyhow::Error::new(exit::ExitRequest(code)).context(msg),
+        Some(code) => anyhow::Error::new(exit::ExitRequest::new(code)).context(msg),
         None => anyhow::anyhow!(msg),
     }
 }
