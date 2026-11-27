@@ -193,15 +193,24 @@ All sites already use keyed ctors; flip signatures to
 ## C. Per-crate closure (grep `anyhow::` paths -> remove dep -> gates)
 
 - [x] `oxdock-diagnostics` (anyhow dev-only already)
-- [ ] `oxdock-pty`
-- [ ] `oxdock-process` (after B2; windows-only `child.rs`
-      needs B9)
-- [ ] `oxdock-pipe`
+- [x] `oxdock-pty` (sole anyhow paths: 4 `&anyhow::Error`
+      ctor params over portable-pty third-party failures, plus
+      test-only carrier checks; dep stays permanently, same
+      shape as `oxdock-build`)
+- [ ] `oxdock-process` (B2 flipped; remaining anyhow paths all
+      permanent-shape: `from_anyhow` owners, `&anyhow::Error`
+      ctor params/bridges, external `expand.rs`
+      `PlaceholderCall` boundary; dep removal waits on B9
+      windows-only `child.rs`)
+- [x] `oxdock-pipe` (zero `anyhow` paths in src, no dep;
+      trivially clean)
 - [!] Keep permanently as carrier/macro-boundary (staged
       retirement, not failure): `core`, `parser`, `cli`,
       `mcp`, all three plugins, `oxdock-build` (foreign
       `&anyhow::Error` ctor params are permanent while
-      `embed` stays anyhow), `fs` (per B4), `embed`
+      `embed` stays anyhow), `oxdock-pty` (third-party
+      portable-pty failures ride `&anyhow::Error` ctors), `fs`
+      (per B4), `embed`
 
 ## D. Stays to record as final (decided, just log them)
 
@@ -1135,3 +1144,23 @@ All sites already use keyed ctors; flip signatures to
   `rustfmt --edition 2024 --check` clean on all 5 touched files
   (`tar.rs`, `diagnostics.rs`, `handlers.rs`, `session.rs`,
   `350-plan.md`).
+
+- C1 (2026-11-27): per-crate closure audit, no code changes.
+  `oxdock-pipe` trivially clean (zero `anyhow` paths in src,
+  no dep; only template/README prose mentions). `oxdock-pty`
+  closed as permanent carrier: sole production anyhow paths
+  are the 4 `&anyhow::Error` ctor params
+  (`pty_alloc_failed`, `pty_master_reader_failed`,
+  `pty_master_writer_failed`, `pty_spawn_failed`) over
+  portable-pty third-party failures, plus test-only carrier
+  checks; dep stays, same shape as the `oxdock-build`
+  foreign-ctor note. `oxdock-process` stays open: B2 flipped
+  the trait, and every remaining anyhow path is
+  permanent-shape (`from_anyhow` owners, `&anyhow::Error`
+  ctor params/bridges, external `expand.rs`
+  `PlaceholderCall` boundary); dep removal waits on B9
+  (windows-only `child.rs` `assign_job` + unused
+  `job_assign_failed` ctor). Permanent-carrier list extended
+  with `oxdock-pty`. Gates: `cargo test -p oxdock-pipe -p
+  oxdock-pty` green (zero failures), no code touched so
+  workspace state inherits the B6 green run.
