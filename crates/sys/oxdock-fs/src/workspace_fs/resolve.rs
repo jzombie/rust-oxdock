@@ -56,7 +56,7 @@ impl PathResolver {
         let new_dir_path = Path::new(new_dir);
         if Self::is_absolute_or_rooted(new_dir_path) {
             if let Ok(resolved) = self.check_access(new_dir_path, AccessMode::Write) {
-                return self.backend.resolve_workdir(resolved);
+                return Ok(self.backend.resolve_workdir(resolved)?);
             }
 
             let rel = Self::root_relative_path(new_dir_path);
@@ -64,14 +64,14 @@ impl PathResolver {
             let resolved = self
                 .check_access(&candidate, AccessMode::Write)
                 .with_context(|| format!("WORKDIR {} escapes root", candidate.display()))?;
-            return self.backend.resolve_workdir(resolved);
+            return Ok(self.backend.resolve_workdir(resolved)?);
         }
 
         let candidate = current.as_path().join(new_dir);
         let resolved = self
             .check_access(&candidate, AccessMode::Write)
             .with_context(|| format!("WORKDIR {} escapes root", candidate.display()))?;
-        self.backend.resolve_workdir(resolved)
+        Ok(self.backend.resolve_workdir(resolved)?)
     }
 
     /// Unconfined workdir resolution for `WORKSPACE SYSTEM` (issue #163).
@@ -83,7 +83,7 @@ impl PathResolver {
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     fn resolve_workdir_system(&self, current: &GuardedPath, new_dir: &str) -> Result<GuardedPath> {
         if new_dir == "/" {
-            return self.backend.resolve_workdir(self.system_anchor.clone());
+            return Ok(self.backend.resolve_workdir(self.system_anchor.clone())?);
         }
         let normalized = to_forward_slashes(new_dir);
         let new_dir_path = Path::new(&normalized);
@@ -100,7 +100,7 @@ impl PathResolver {
             base.join(new_dir_path)
         };
         let wrapped = super::cache::system_wrap_absolute(&absolute);
-        self.backend.resolve_workdir(wrapped)
+        Ok(self.backend.resolve_workdir(wrapped)?)
     }
 
     /// Unconfined read/write resolution for `WORKSPACE SYSTEM` (issue #163).
@@ -141,18 +141,18 @@ impl PathResolver {
             // existing build-context chain below.
             if self.is_system() {
                 let wrapped = super::cache::system_wrap_absolute(from_path);
-                return self.backend.resolve_copy_source(wrapped);
+                return Ok(self.backend.resolve_copy_source(wrapped)?);
             }
             if let Some(workspace_root) = &self.workspace_root
                 && let Ok(guarded) =
                     self.check_access_with_root(workspace_root, from_path, AccessMode::Read)
             {
-                return self.backend.resolve_copy_source(guarded);
+                return Ok(self.backend.resolve_copy_source(guarded)?);
             }
             if let Ok(guarded) =
                 self.check_access_with_root(&self.build_context, from_path, AccessMode::Read)
             {
-                return self.backend.resolve_copy_source(guarded);
+                return Ok(self.backend.resolve_copy_source(guarded)?);
             }
 
             let rel = Self::root_relative_path(from_path);
@@ -161,7 +161,7 @@ impl PathResolver {
             return self
                 .check_access_with_root(root, &candidate, AccessMode::Read)
                 .with_context(|| format!("failed to resolve COPY source {}", candidate.display()))
-                .and_then(|guarded| self.backend.resolve_copy_source(guarded));
+                .and_then(|guarded| Ok(self.backend.resolve_copy_source(guarded)?));
         }
         let candidate = self.build_context.as_path().join(from);
 
@@ -169,7 +169,7 @@ impl PathResolver {
             .check_access_with_root(&self.build_context, &candidate, AccessMode::Read)
             .with_context(|| format!("failed to resolve COPY source {}", candidate.display()))
         {
-            Ok(guarded) => self.backend.resolve_copy_source(guarded),
+            Ok(guarded) => Ok(self.backend.resolve_copy_source(guarded)?),
             Err(primary) => {
                 if let Some(workspace_root) = &self.workspace_root {
                     let workspace_candidate = workspace_root.as_path().join(from);
@@ -178,7 +178,7 @@ impl PathResolver {
                         &workspace_candidate,
                         AccessMode::Read,
                     ) {
-                        return self.backend.resolve_copy_source(workspace_guarded);
+                        return Ok(self.backend.resolve_copy_source(workspace_guarded)?);
                     }
                 }
                 Err(primary)
@@ -223,14 +223,14 @@ impl PathResolver {
                 let from_path = Path::new(from);
                 if Self::is_absolute_or_rooted(from_path) {
                     let wrapped = super::cache::system_wrap_absolute(from_path);
-                    return self.backend.resolve_copy_source(wrapped);
+                    return Ok(self.backend.resolve_copy_source(wrapped)?);
                 }
                 let candidate = self.build_context.as_path().join(from);
                 self.check_access_with_root(&self.build_context, &candidate, AccessMode::Read)
                     .with_context(|| {
                         format!("failed to resolve COPY source {}", candidate.display())
                     })
-                    .and_then(|guarded| self.backend.resolve_copy_source(guarded))
+                    .and_then(|guarded| Ok(self.backend.resolve_copy_source(guarded)?))
             }
         }
     }
@@ -245,13 +245,13 @@ impl PathResolver {
             return self
                 .check_access_with_root(source_root, from_path, AccessMode::Read)
                 .with_context(|| format!("failed to resolve COPY source {}", from_path.display()))
-                .and_then(|guarded| self.backend.resolve_copy_source(guarded));
+                .and_then(|guarded| Ok(self.backend.resolve_copy_source(guarded)?));
         }
 
         let candidate = source_root.as_path().join(from);
         self.check_access_with_root(source_root, &candidate, AccessMode::Read)
             .with_context(|| format!("failed to resolve COPY source {}", candidate.display()))
-            .and_then(|guarded| self.backend.resolve_copy_source(guarded))
+            .and_then(|guarded| Ok(self.backend.resolve_copy_source(guarded)?))
     }
 
     fn resolve(&self, cwd: &GuardedPath, rel: &str, mode: AccessMode) -> Result<GuardedPath> {

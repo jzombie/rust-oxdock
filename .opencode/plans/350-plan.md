@@ -1378,3 +1378,40 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   `cargo clippy --workspace --all-targets` clean (zero
   warnings), `rustfmt --edition 2024 --check` clean on all
   touched files.
+
+- B4c (2026-11-27): fs backend cluster (third B4 conversion
+  bulk). `BackendImpl` trait plus `HostBackend`, `MiriBackend`,
+  the `Backend` delegator, `fd_path` (linux/macos/windows),
+  `verify_fd_within` x2, `synthetic_metadata`, and every
+  `SyntheticRootState` helper (`backend.rs`) return
+  `DiagnosticResult`. Transitional lift throughout, no new
+  typed ctors: bare `std::io` sites lift through two private
+  helpers (`lift_io_err`/`lift_io_ctx`: `anyhow::Error::from`
+  transport into the single owner `from_anyhow`, historic
+  context string replayed natively via `with_contexts`), so the
+  eventual typed-ctor migration touches one place, not 20+
+  call sites. Every historic context string stays
+  byte-identical with one deliberate exception: Linux `fd_path`
+  now emits keyed `fs_diag::fd_path_failed(&e)` (matching the
+  macOS/Windows arms) instead of the old untyped
+  `"failed to resolve open file path"` context frame.
+  Already-keyed `anyhow::Error::new(fs_diag::...)` sites
+  (`fd_path_failed`, `opened_outside_tree`,
+  `unsupported_file_type`, `workdir_not_dir`,
+  `copy_source_missing`, `copy_source_unsupported_kind`,
+  all `synthetic_*`) return the diagnostic directly (no
+  `Error::new`, no `.with_context`, no `Context` import;
+  `MiriBackend::remove_empty_dir` attaches its frame straight
+  onto the already-keyed `Diagnostic`, never round-tripping
+  through `anyhow`).
+  `install.rs`/`io.rs` drop all obsolete
+  `.map_err(fs_diag::from_anyhow)` wrappers on `self.backend.*`
+  calls (now native `DiagnosticResult` passthrough);
+  still-anyhow `resolve.rs` bridges via the A1 pattern
+  (`Ok(self.backend...?)`, keyed owner on the backend side).
+  Gates: `cargo test -p oxdock-fs` green (72 + 8 + 4 + 1),
+  `cargo test -p oxdock-core --lib` green (433), full `cargo
+  test --workspace` green (93 targets, 2715 passed, 0 failed),
+  `cargo clippy --workspace --all-targets` clean (zero warnings),
+  `rustfmt --edition 2024 --check` clean on all 4 touched
+  files (`backend.rs`, `io.rs`, `install.rs`, `resolve.rs`).

@@ -44,9 +44,7 @@ impl PathResolver {
                     path.display()
                 )])
             })?;
-        self.backend
-            .create_dir_all(self.effective_root(), &guarded)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.create_dir_all(self.effective_root(), &guarded)
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -60,9 +58,7 @@ impl PathResolver {
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("read_dir denied for {}", path.display())])
             })?;
-        self.backend
-            .read_dir_entries(&guarded)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.read_dir_entries(&guarded)
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -76,9 +72,7 @@ impl PathResolver {
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("read denied for {}", path.display())])
             })?;
-        self.backend
-            .read_file(&guarded)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.read_file(&guarded)
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -92,9 +86,7 @@ impl PathResolver {
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("open_read denied for {}", path.display())])
             })?;
-        self.backend
-            .open_read(&guarded)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.open_read(&guarded)
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -108,9 +100,7 @@ impl PathResolver {
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("open_write denied for {}", path.display())])
             })?;
-        self.backend
-            .open_write(&guarded)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.open_write(&guarded)
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -124,9 +114,7 @@ impl PathResolver {
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("open_append denied for {}", path.display())])
             })?;
-        self.backend
-            .open_append(&guarded)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.open_append(&guarded)
     }
 
     /// Guard-checked link-refusing read open: containment of the
@@ -150,9 +138,7 @@ impl PathResolver {
                 diag.with_contexts(vec![format!("open_read denied for {}", path.display())])
             })?;
         refuse_final_symlink(path)?;
-        self.backend
-            .open_read_nofollow(path, expected_root)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.open_read_nofollow(path, expected_root)
     }
 
     /// Guard-checked link-refusing write open (same construction, plus
@@ -169,9 +155,7 @@ impl PathResolver {
                 diag.with_contexts(vec![format!("open_write denied for {}", path.display())])
             })?;
         refuse_final_symlink(path)?;
-        self.backend
-            .open_write_nofollow(path, expected_root)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.open_write_nofollow(path, expected_root)
     }
 
     /// Refuse planted intermediate links under `base` along `rel`: a
@@ -256,9 +240,7 @@ impl PathResolver {
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("write denied for {}", path.display())])
             })?;
-        self.backend
-            .write_file(&guarded, contents)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.write_file(&guarded, contents)
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -269,9 +251,7 @@ impl PathResolver {
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("append denied for {}", path.display())])
             })?;
-        self.backend
-            .append_file(&guarded, contents)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.append_file(&guarded, contents)
     }
 
     pub fn ensure_parent_dir(&self, path: &GuardedPath) -> DiagnosticResult<()> {
@@ -286,8 +266,7 @@ impl PathResolver {
                     diag.with_contexts(vec![format!("parent {} escapes root", parent.display())])
                 })?;
             self.backend
-                .create_dir_all(self.effective_root(), &parent_guard)
-                .map_err(fs_diag::from_anyhow)?;
+                .create_dir_all(self.effective_root(), &parent_guard)?;
         }
         Ok(())
     }
@@ -303,9 +282,7 @@ impl PathResolver {
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("canonicalize denied for {}", path.display())])
             })?;
-        self.backend
-            .canonicalize(cand)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.canonicalize(cand)
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -319,9 +296,7 @@ impl PathResolver {
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("metadata denied for {}", path.display())])
             })?;
-        self.backend
-            .metadata(&guarded)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.metadata(&guarded)
     }
 
     /// Byte length plus real Unix mode bits for one archive member (see
@@ -338,21 +313,17 @@ impl PathResolver {
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("metadata denied for {}", path.display())])
             })?;
-        self.backend
-            .archive_member_stat(&guarded)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.archive_member_stat(&guarded)
     }
 
     pub fn entry_kind(&self, path: &GuardedPath) -> DiagnosticResult<super::EntryKind> {
-        self.backend.entry_kind(path).map_err(fs_diag::from_anyhow)
+        self.backend.entry_kind(path)
     }
 
     /// No-follow variant of [`Self::entry_kind`]: reports symlinks as
     /// [`super::EntryKind::Symlink`] instead of resolving through them.
     pub fn entry_kind_no_follow(&self, path: &GuardedPath) -> DiagnosticResult<super::EntryKind> {
-        self.backend
-            .entry_kind_no_follow(path)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.entry_kind_no_follow(path)
     }
 
     /// Lightweight existence check that avoids host `stat` calls under Miri.
@@ -472,9 +443,7 @@ impl PathResolver {
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("remove_file denied for {}", path.display())])
             })?;
-        self.backend
-            .remove_file(&guarded)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.remove_file(&guarded)
     }
 
     /// Remove a directory and its contents after validating it is within allowed roots.
@@ -489,9 +458,7 @@ impl PathResolver {
                     path.display()
                 )])
             })?;
-        self.backend
-            .remove_dir_all(&guarded)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.remove_dir_all(&guarded)
     }
 
     /// Remove an empty directory after validating it is within allowed
@@ -508,9 +475,7 @@ impl PathResolver {
                     path.display()
                 )])
             })?;
-        self.backend
-            .remove_empty_dir(&guarded)
-            .map_err(fs_diag::from_anyhow)
+        self.backend.remove_empty_dir(&guarded)
     }
 
     /// Remove the symlink at the lexical path when one stands there,

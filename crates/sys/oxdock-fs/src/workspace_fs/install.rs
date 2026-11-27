@@ -63,7 +63,7 @@ impl PathResolver {
         dst: &GuardedPath,
         mode: u32,
     ) -> DiagnosticResult<()> {
-        let data = self.backend.read_file(src).map_err(fs_diag::from_anyhow)?;
+        let data = self.backend.read_file(src)?;
         let parent = dst
             .as_path()
             .parent()

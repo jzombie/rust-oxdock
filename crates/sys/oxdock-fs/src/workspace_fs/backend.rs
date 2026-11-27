@@ -1,21 +1,36 @@
-use anyhow::{Context, Result};
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 use std::fs;
 
 use super::{DirEntry, GuardedPath};
 use crate::diagnostics as fs_diag;
 
+/// Transitional lift for bare `std::io` failures (B4c): `anyhow` is
+/// only the transport into the single owner `from_anyhow`, with the
+/// historic context string replayed natively via `with_contexts`.
+/// Confined here so the eventual typed-ctor migration touches one
+/// place, not every call site.
+fn lift_io_err(err: std::io::Error) -> Diagnostic {
+    fs_diag::from_anyhow(anyhow::Error::from(err))
+}
+
+/// Context-carrying form of [`lift_io_err`]: the historic
+/// `.with_context(|| ...)` string lands as one native frame.
+fn lift_io_ctx(err: std::io::Error, ctx: String) -> Diagnostic {
+    lift_io_err(err).with_contexts(vec![ctx])
+}
+
 /// Private trait describing the backend IO interface. Kept private to avoid
 /// expanding the public API surface; used to ensure host/miri implementations
 /// remain in sync.
 trait BackendImpl: Send + Sync {
-    fn create_dir_all(&self, root: &GuardedPath, path: &GuardedPath) -> Result<()>;
-    fn read_dir_entries(&self, path: &GuardedPath) -> Result<Vec<DirEntry>>;
-    fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>>;
-    fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()>;
-    fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()>;
-    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>>;
-    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>>;
-    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>>;
+    fn create_dir_all(&self, root: &GuardedPath, path: &GuardedPath) -> DiagnosticResult<()>;
+    fn read_dir_entries(&self, path: &GuardedPath) -> DiagnosticResult<Vec<DirEntry>>;
+    fn read_file(&self, path: &GuardedPath) -> DiagnosticResult<Vec<u8>>;
+    fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()>;
+    fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()>;
+    fn open_read(&self, path: &GuardedPath) -> DiagnosticResult<Box<dyn std::io::Read + Send>>;
+    fn open_write(&self, path: &GuardedPath) -> DiagnosticResult<Box<dyn std::io::Write + Send>>;
+    fn open_append(&self, path: &GuardedPath) -> DiagnosticResult<Box<dyn std::io::Write + Send>>;
     /// Link-refusing opens for TOCTOU-exposed paths: a final-component
     /// symlink fails instead of redirecting the IO. Archive pack/unpack
     /// use these after their listing probes so a planted link cannot
@@ -24,21 +39,21 @@ trait BackendImpl: Send + Sync {
         &self,
         path: &GuardedPath,
         expected_root: &GuardedPath,
-    ) -> Result<Box<dyn std::io::Read + Send>>;
+    ) -> DiagnosticResult<Box<dyn std::io::Read + Send>>;
     fn open_write_nofollow(
         &self,
         path: &GuardedPath,
         expected_root: &GuardedPath,
-    ) -> Result<Box<dyn std::io::Write + Send>>;
-    fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath>;
-    fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata>;
+    ) -> DiagnosticResult<Box<dyn std::io::Write + Send>>;
+    fn canonicalize(&self, path: GuardedPath) -> DiagnosticResult<GuardedPath>;
+    fn metadata(&self, path: &GuardedPath) -> DiagnosticResult<std::fs::Metadata>;
     /// Byte length plus real Unix mode bits for one archive member, for
     /// callers that cannot use a host `stat`. The default implementation
     /// stats the host path, preserving exact native behavior; backends
     /// without a host filesystem override it from their own state
     /// (exact lengths, `None` mode so callers fall back to conventional
     /// defaults).
-    fn archive_member_stat(&self, path: &GuardedPath) -> Result<(u64, Option<u32>)> {
+    fn archive_member_stat(&self, path: &GuardedPath) -> DiagnosticResult<(u64, Option<u32>)> {
         let meta = self.metadata(path)?;
         let len = meta.len();
         #[cfg(unix)]
@@ -50,13 +65,13 @@ trait BackendImpl: Send + Sync {
         let mode: Option<u32> = None;
         Ok((len, mode))
     }
-    fn entry_kind(&self, path: &GuardedPath) -> Result<super::EntryKind>;
-    fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<super::EntryKind>;
-    fn resolve_workdir(&self, resolved: GuardedPath) -> Result<GuardedPath>;
-    fn resolve_copy_source(&self, guarded: GuardedPath) -> Result<GuardedPath>;
-    fn remove_file(&self, path: &GuardedPath) -> Result<()>;
-    fn remove_dir_all(&self, path: &GuardedPath) -> Result<()>;
-    fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()>;
+    fn entry_kind(&self, path: &GuardedPath) -> DiagnosticResult<super::EntryKind>;
+    fn entry_kind_no_follow(&self, path: &GuardedPath) -> DiagnosticResult<super::EntryKind>;
+    fn resolve_workdir(&self, resolved: GuardedPath) -> DiagnosticResult<GuardedPath>;
+    fn resolve_copy_source(&self, guarded: GuardedPath) -> DiagnosticResult<GuardedPath>;
+    fn remove_file(&self, path: &GuardedPath) -> DiagnosticResult<()>;
+    fn remove_dir_all(&self, path: &GuardedPath) -> DiagnosticResult<()>;
+    fn remove_empty_dir(&self, path: &GuardedPath) -> DiagnosticResult<()>;
 }
 
 // Host implementation (used when not under Miri)
@@ -78,26 +93,24 @@ const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(target_os = "linux")]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 #[cfg_attr(miri, allow(dead_code))]
-fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
+fn fd_path(file: &fs::File) -> DiagnosticResult<std::path::PathBuf> {
     use std::os::unix::io::AsRawFd;
     let link = format!("/proc/self/fd/{}", file.as_raw_fd());
-    std::fs::read_link(&link).with_context(|| "failed to resolve open file path".to_string())
+    std::fs::read_link(&link).map_err(|e| fs_diag::fd_path_failed(&e))
 }
 
 /// True path of an open file descriptor via `fcntl(F_GETPATH)`.
 #[cfg(target_os = "macos")]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 #[cfg_attr(miri, allow(dead_code))]
-fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
+fn fd_path(file: &fs::File) -> DiagnosticResult<std::path::PathBuf> {
     use std::os::unix::io::AsRawFd;
     let mut buf = vec![0 as libc::c_char; libc::MAXPATHLEN as usize];
     // fcntl on a live descriptor with a caller-owned buffer: no
     // aliasing, returns -1 with errno on failure.
     let ret = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
     if ret == -1 {
-        return Err(anyhow::Error::new(fs_diag::fd_path_failed(
-            &std::io::Error::last_os_error(),
-        )));
+        return Err(fs_diag::fd_path_failed(&std::io::Error::last_os_error()));
     }
     let path = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
         .to_string_lossy()
@@ -113,7 +126,7 @@ fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
 #[cfg(windows)]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 #[cfg_attr(miri, allow(dead_code))]
-fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
+fn fd_path(file: &fs::File) -> DiagnosticResult<std::path::PathBuf> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
@@ -141,9 +154,7 @@ fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
         };
     }
     if len == 0 {
-        return Err(anyhow::Error::new(fs_diag::fd_path_failed(
-            &std::io::Error::last_os_error(),
-        )));
+        return Err(fs_diag::fd_path_failed(&std::io::Error::last_os_error()));
     }
     Ok(std::path::PathBuf::from(String::from_utf16_lossy(
         &buf[..len as usize],
@@ -166,22 +177,21 @@ fn verify_fd_within(
     file: &fs::File,
     expected_root: &GuardedPath,
     path: &GuardedPath,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let actual = fd_path(file)?;
-    let root = std::fs::canonicalize(expected_root.as_path()).with_context(|| {
-        format!(
-            "failed to canonicalize expected tree {}",
-            expected_root.display()
+    let root = std::fs::canonicalize(expected_root.as_path()).map_err(|e| {
+        lift_io_ctx(
+            e,
+            format!(
+                "failed to canonicalize expected tree {}",
+                expected_root.display()
+            ),
         )
     })?;
     if cmp_form(&actual).starts_with(cmp_form(&root)) {
         Ok(())
     } else {
-        Err(anyhow::Error::new(fs_diag::opened_outside_tree(
-            path,
-            expected_root,
-            &actual,
-        )))
+        Err(fs_diag::opened_outside_tree(path, expected_root, &actual))
     }
 }
 
@@ -219,14 +229,14 @@ fn verify_fd_within(
     file: &fs::File,
     expected_root: &GuardedPath,
     path: &GuardedPath,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let _ = (file, expected_root, path);
     Ok(())
 }
 
 #[cfg(not(miri))]
 impl HostBackend {
-    fn new(_root: &GuardedPath, _build: &GuardedPath) -> Result<Self> {
+    fn new(_root: &GuardedPath, _build: &GuardedPath) -> DiagnosticResult<Self> {
         Ok(Self {})
     }
 }
@@ -234,30 +244,31 @@ impl HostBackend {
 #[cfg(not(miri))]
 #[allow(clippy::disallowed_methods)]
 impl BackendImpl for HostBackend {
-    fn create_dir_all(&self, root: &GuardedPath, path: &GuardedPath) -> Result<()> {
+    fn create_dir_all(&self, root: &GuardedPath, path: &GuardedPath) -> DiagnosticResult<()> {
         if !root.as_path().exists() {
-            fs::create_dir_all(root.as_path())
-                .with_context(|| format!("creating resolver root {}", root.display()))?;
+            fs::create_dir_all(root.as_path()).map_err(|e| {
+                lift_io_ctx(e, format!("creating resolver root {}", root.display()))
+            })?;
         }
         fs::create_dir_all(path.as_path())
-            .with_context(|| format!("creating dir {}", path.display()))?;
+            .map_err(|e| lift_io_ctx(e, format!("creating dir {}", path.display())))?;
         Ok(())
     }
 
-    fn read_dir_entries(&self, path: &GuardedPath) -> Result<Vec<DirEntry>> {
+    fn read_dir_entries(&self, path: &GuardedPath) -> DiagnosticResult<Vec<DirEntry>> {
         let entries = fs::read_dir(path.as_path())
-            .with_context(|| format!("failed to read dir {}", path.display()))?;
+            .map_err(|e| lift_io_ctx(e, format!("failed to read dir {}", path.display())))?;
 
         let mut result = Vec::new();
         for entry in entries {
-            let entry = entry?;
+            let entry = entry.map_err(lift_io_err)?;
             #[cfg(not(miri))]
             result.push(entry);
 
             #[cfg(miri)]
             {
                 let entry_path = entry.path();
-                let file_type = entry.file_type()?;
+                let file_type = entry.file_type().map_err(lift_io_err)?;
                 let kind = if file_type.is_dir() {
                     super::EntryKind::Dir
                 } else {
@@ -269,67 +280,74 @@ impl BackendImpl for HostBackend {
         Ok(result)
     }
 
-    fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>> {
+    fn read_file(&self, path: &GuardedPath) -> DiagnosticResult<Vec<u8>> {
         let data = fs::read(path.as_path())
-            .with_context(|| format!("failed to read {}", path.display()))?;
+            .map_err(|e| lift_io_ctx(e, format!("failed to read {}", path.display())))?;
         Ok(data)
     }
 
-    fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+    fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         if let Some(parent) = path.as_path().parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("creating dir {}", parent.display()))?;
+                .map_err(|e| lift_io_ctx(e, format!("creating dir {}", parent.display())))?;
         }
         fs::write(path.as_path(), contents)
-            .with_context(|| format!("writing {}", path.display()))?;
+            .map_err(|e| lift_io_ctx(e, format!("writing {}", path.display())))?;
         Ok(())
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+    fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         if let Some(parent) = path.as_path().parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("creating dir {}", parent.display()))?;
+                .map_err(|e| lift_io_ctx(e, format!("creating dir {}", parent.display())))?;
         }
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path.as_path())
-            .with_context(|| format!("opening {} for append", path.display()))?;
+            .map_err(|e| lift_io_ctx(e, format!("opening {} for append", path.display())))?;
         std::io::Write::write_all(&mut file, contents)
-            .with_context(|| format!("appending to {}", path.display()))?;
+            .map_err(|e| lift_io_ctx(e, format!("appending to {}", path.display())))?;
         Ok(())
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
-        let file = fs::File::open(path.as_path())
-            .with_context(|| format!("failed to open {} for reading", path.display()))?;
+    fn open_read(&self, path: &GuardedPath) -> DiagnosticResult<Box<dyn std::io::Read + Send>> {
+        let file = fs::File::open(path.as_path()).map_err(|e| {
+            lift_io_ctx(e, format!("failed to open {} for reading", path.display()))
+        })?;
         Ok(Box::new(file))
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
+    fn open_write(&self, path: &GuardedPath) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         if let Some(parent) = path.as_path().parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("creating dir {}", parent.display()))?;
+                .map_err(|e| lift_io_ctx(e, format!("creating dir {}", parent.display())))?;
         }
-        let file = fs::File::create(path.as_path())
-            .with_context(|| format!("failed to open {} for writing", path.display()))?;
+        let file = fs::File::create(path.as_path()).map_err(|e| {
+            lift_io_ctx(e, format!("failed to open {} for writing", path.display()))
+        })?;
         Ok(Box::new(file))
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
+    fn open_append(&self, path: &GuardedPath) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         if let Some(parent) = path.as_path().parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("creating dir {}", parent.display()))?;
+                .map_err(|e| lift_io_ctx(e, format!("creating dir {}", parent.display())))?;
         }
         let file = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path.as_path())
-            .with_context(|| format!("failed to open {} for appending", path.display()))?;
+            .map_err(|e| {
+                lift_io_ctx(
+                    e,
+                    format!("failed to open {} for appending", path.display()),
+                )
+            })?;
         Ok(Box::new(file))
     }
 
@@ -338,7 +356,7 @@ impl BackendImpl for HostBackend {
         &self,
         path: &GuardedPath,
         expected_root: &GuardedPath,
-    ) -> Result<Box<dyn std::io::Read + Send>> {
+    ) -> DiagnosticResult<Box<dyn std::io::Read + Send>> {
         #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
         #[cfg(windows)]
@@ -353,9 +371,9 @@ impl BackendImpl for HostBackend {
         options.custom_flags(libc::O_NOFOLLOW);
         #[cfg(windows)]
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        let file = options
-            .open(path.as_path())
-            .with_context(|| format!("failed to open {} for reading", path.display()))?;
+        let file = options.open(path.as_path()).map_err(|e| {
+            lift_io_ctx(e, format!("failed to open {} for reading", path.display()))
+        })?;
         verify_fd_within(&file, expected_root, path)?;
         Ok(Box::new(file))
     }
@@ -365,10 +383,10 @@ impl BackendImpl for HostBackend {
         &self,
         path: &GuardedPath,
         expected_root: &GuardedPath,
-    ) -> Result<Box<dyn std::io::Write + Send>> {
+    ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         if let Some(parent) = path.as_path().parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("creating dir {}", parent.display()))?;
+                .map_err(|e| lift_io_ctx(e, format!("creating dir {}", parent.display())))?;
         }
         #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
@@ -386,9 +404,9 @@ impl BackendImpl for HostBackend {
         // Existence before the open decides rollback later: only files
         // this open creates may be removed on mismatch.
         let pre_existing = path.as_path().exists();
-        let file = options
-            .open(path.as_path())
-            .with_context(|| format!("failed to open {} for writing", path.display()))?;
+        let file = options.open(path.as_path()).map_err(|e| {
+            lift_io_ctx(e, format!("failed to open {} for writing", path.display()))
+        })?;
         if let Err(e) = verify_fd_within(&file, expected_root, path) {
             drop(file);
             // Roll back only files this open created: removing a
@@ -403,37 +421,35 @@ impl BackendImpl for HostBackend {
         // Truncate the verified descriptor itself: later swaps cannot
         // redirect an open handle.
         file.set_len(0)
-            .with_context(|| format!("failed to truncate {}", path.display()))?;
+            .map_err(|e| lift_io_ctx(e, format!("failed to truncate {}", path.display())))?;
         Ok(Box::new(file))
     }
 
-    fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath> {
+    fn canonicalize(&self, path: GuardedPath) -> DiagnosticResult<GuardedPath> {
         Ok(path)
     }
 
-    fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata> {
+    fn metadata(&self, path: &GuardedPath) -> DiagnosticResult<std::fs::Metadata> {
         let m = fs::metadata(path.as_path())
-            .with_context(|| format!("failed to stat {}", path.display()))?;
+            .map_err(|e| lift_io_ctx(e, format!("failed to stat {}", path.display())))?;
         Ok(m)
     }
 
-    fn entry_kind(&self, path: &GuardedPath) -> Result<super::EntryKind> {
+    fn entry_kind(&self, path: &GuardedPath) -> DiagnosticResult<super::EntryKind> {
         let meta = self.metadata(path)?;
         if meta.is_dir() {
             Ok(super::EntryKind::Dir)
         } else if meta.is_file() {
             Ok(super::EntryKind::File)
         } else {
-            Err(anyhow::Error::new(fs_diag::unsupported_file_type(
-                path.as_path(),
-            )))
+            Err(fs_diag::unsupported_file_type(path.as_path()))
         }
     }
 
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-    fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<super::EntryKind> {
+    fn entry_kind_no_follow(&self, path: &GuardedPath) -> DiagnosticResult<super::EntryKind> {
         let meta = fs::symlink_metadata(path.as_path())
-            .with_context(|| format!("failed to stat {}", path.display()))?;
+            .map_err(|e| lift_io_ctx(e, format!("failed to stat {}", path.display())))?;
         let file_type = meta.file_type();
         if file_type.is_symlink() {
             Ok(super::EntryKind::Symlink)
@@ -442,52 +458,57 @@ impl BackendImpl for HostBackend {
         } else if file_type.is_file() {
             Ok(super::EntryKind::File)
         } else {
-            Err(anyhow::Error::new(fs_diag::unsupported_file_type(
-                path.as_path(),
-            )))
+            Err(fs_diag::unsupported_file_type(path.as_path()))
         }
     }
 
-    fn resolve_workdir(&self, resolved: GuardedPath) -> Result<GuardedPath> {
+    fn resolve_workdir(&self, resolved: GuardedPath) -> DiagnosticResult<GuardedPath> {
         if let Ok(meta) = fs::metadata(resolved.as_path()) {
             if !meta.is_dir() {
-                return Err(anyhow::Error::new(fs_diag::workdir_not_dir(&resolved)));
+                return Err(fs_diag::workdir_not_dir(&resolved));
             }
             return Ok(resolved);
         }
 
-        fs::create_dir_all(resolved.as_path())
-            .with_context(|| format!("failed to create WORKDIR {}", resolved.display()))?;
+        fs::create_dir_all(resolved.as_path()).map_err(|e| {
+            lift_io_ctx(
+                e,
+                format!("failed to create WORKDIR {}", resolved.display()),
+            )
+        })?;
         Ok(resolved)
     }
 
-    fn resolve_copy_source(&self, guarded: GuardedPath) -> Result<GuardedPath> {
+    fn resolve_copy_source(&self, guarded: GuardedPath) -> DiagnosticResult<GuardedPath> {
         if !guarded.as_path().exists() {
-            return Err(anyhow::Error::new(fs_diag::copy_source_missing(&guarded)));
+            return Err(fs_diag::copy_source_missing(&guarded));
         }
         Ok(guarded)
     }
 
-    fn remove_file(&self, path: &GuardedPath) -> Result<()> {
+    fn remove_file(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         match std::fs::remove_file(path.as_path()) {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                return Err(e).with_context(|| format!("failed to remove file {}", path.display()));
+                return Err(lift_io_ctx(
+                    e,
+                    format!("failed to remove file {}", path.display()),
+                ));
             }
         }
         Ok(())
     }
 
-    fn remove_dir_all(&self, path: &GuardedPath) -> Result<()> {
+    fn remove_dir_all(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         std::fs::remove_dir_all(path.as_path())
-            .with_context(|| format!("failed to remove dir {}", path.display()))?;
+            .map_err(|e| lift_io_ctx(e, format!("failed to remove dir {}", path.display())))?;
         Ok(())
     }
 
-    fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()> {
+    fn remove_empty_dir(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         std::fs::remove_dir(path.as_path())
-            .with_context(|| format!("failed to remove dir {}", path.display()))?;
+            .map_err(|e| lift_io_ctx(e, format!("failed to remove dir {}", path.display())))?;
         Ok(())
     }
 }
@@ -561,7 +582,7 @@ mod miri_backend {
     }
 
     impl MiriBackend {
-        pub(super) fn new(root: &GuardedPath, build: &GuardedPath) -> Result<Self> {
+        pub(super) fn new(root: &GuardedPath, build: &GuardedPath) -> DiagnosticResult<Self> {
             let root_state = shared_state_for(root.as_path());
 
             if root.as_path() == build.as_path() {
@@ -583,15 +604,15 @@ mod miri_backend {
         fn state_for_guard_rc(
             &self,
             guard: &GuardedPath,
-        ) -> Result<Arc<Mutex<SyntheticRootState>>> {
+        ) -> DiagnosticResult<Arc<Mutex<SyntheticRootState>>> {
             if guard.root() == self.root_path.as_path() {
                 self.root_state
                     .clone()
-                    .ok_or_else(|| anyhow::Error::new(fs_diag::synthetic_state_missing_for_root()))
+                    .ok_or_else(fs_diag::synthetic_state_missing_for_root)
             } else {
                 self.build_state
                     .clone()
-                    .ok_or_else(|| anyhow::Error::new(fs_diag::synthetic_state_missing_for_build()))
+                    .ok_or_else(fs_diag::synthetic_state_missing_for_build)
             }
         }
     }
@@ -606,19 +627,19 @@ mod miri_backend {
     }
 
     impl BackendImpl for MiriBackend {
-        fn create_dir_all(&self, _root: &GuardedPath, path: &GuardedPath) -> Result<()> {
+        fn create_dir_all(&self, _root: &GuardedPath, path: &GuardedPath) -> DiagnosticResult<()> {
             let state = self.state_for_guard_rc(path)?;
             let rel = normalize_rel(path);
             state.lock().expect("miri state poisoned").ensure_dir(&rel);
             Ok(())
         }
 
-        fn read_dir_entries(&self, path: &GuardedPath) -> Result<Vec<DirEntry>> {
+        fn read_dir_entries(&self, path: &GuardedPath) -> DiagnosticResult<Vec<DirEntry>> {
             let rel = normalize_rel(path);
             let state_ref = self.state_for_guard_rc(path)?;
             let state = state_ref.lock().expect("miri state poisoned");
             if !state.dir_exists(&rel) {
-                return Err(anyhow::Error::new(fs_diag::synthetic_dir_missing(path)));
+                return Err(fs_diag::synthetic_dir_missing(path));
             }
             let children = state.list_children(&rel);
             Ok(children
@@ -627,7 +648,7 @@ mod miri_backend {
                 .collect())
         }
 
-        fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>> {
+        fn read_file(&self, path: &GuardedPath) -> DiagnosticResult<Vec<u8>> {
             let rel = normalize_rel(path);
             let data = self
                 .state_for_guard_rc(path)?
@@ -637,7 +658,7 @@ mod miri_backend {
             Ok(data)
         }
 
-        fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+        fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
             let rel = normalize_rel(path);
             let binding = self.state_for_guard_rc(path)?;
             binding
@@ -647,7 +668,7 @@ mod miri_backend {
             Ok(())
         }
 
-        fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+        fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
             let rel = normalize_rel(path);
             let binding = self.state_for_guard_rc(path)?;
             binding
@@ -657,7 +678,7 @@ mod miri_backend {
             Ok(())
         }
 
-        fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
+        fn open_read(&self, path: &GuardedPath) -> DiagnosticResult<Box<dyn std::io::Read + Send>> {
             let data = self.read_file(path)?;
             Ok(Box::new(std::io::Cursor::new(data)))
         }
@@ -668,7 +689,7 @@ mod miri_backend {
             &self,
             path: &GuardedPath,
             expected_root: &GuardedPath,
-        ) -> Result<Box<dyn std::io::Read + Send>> {
+        ) -> DiagnosticResult<Box<dyn std::io::Read + Send>> {
             let _ = expected_root;
             self.open_read(path)
         }
@@ -677,12 +698,15 @@ mod miri_backend {
             &self,
             path: &GuardedPath,
             expected_root: &GuardedPath,
-        ) -> Result<Box<dyn std::io::Write + Send>> {
+        ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
             let _ = expected_root;
             self.open_write(path)
         }
 
-        fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
+        fn open_write(
+            &self,
+            path: &GuardedPath,
+        ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
             // Under Miri, we write to a Cursor and then flush to synthetic state
             let rel = normalize_rel(path);
             let state = self.state_for_guard_rc(path)?;
@@ -698,7 +722,10 @@ mod miri_backend {
             }))
         }
 
-        fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
+        fn open_append(
+            &self,
+            path: &GuardedPath,
+        ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
             let rel = normalize_rel(path);
             let state = self.state_for_guard_rc(path)?;
             // Read existing content
@@ -712,18 +739,18 @@ mod miri_backend {
             Ok(Box::new(MiriWriteCursor { state, rel, cursor }))
         }
 
-        fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath> {
+        fn canonicalize(&self, path: GuardedPath) -> DiagnosticResult<GuardedPath> {
             Ok(path)
         }
 
-        fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata> {
+        fn metadata(&self, path: &GuardedPath) -> DiagnosticResult<std::fs::Metadata> {
             let rel = normalize_rel(path);
             let binding = self.state_for_guard_rc(path)?;
             let state = binding.lock().expect("miri state poisoned");
             if let Some(kind) = state.entry_kind(&rel) {
                 synthetic_metadata(kind)
             } else {
-                return Err(anyhow::Error::new(fs_diag::synthetic_stat_failed(path)));
+                return Err(fs_diag::synthetic_stat_failed(path));
             }
         }
 
@@ -731,7 +758,7 @@ mod miri_backend {
         /// forbids): exact lengths from synthetic state, no modes (the
         /// synthetic filesystem has none, so callers use conventional
         /// defaults, matching the non-Unix behavior).
-        fn archive_member_stat(&self, path: &GuardedPath) -> Result<(u64, Option<u32>)> {
+        fn archive_member_stat(&self, path: &GuardedPath) -> DiagnosticResult<(u64, Option<u32>)> {
             let rel = normalize_rel(path);
             let binding = self.state_for_guard_rc(path)?;
             let state = binding.lock().expect("miri state poisoned");
@@ -742,30 +769,28 @@ mod miri_backend {
                 }
                 Some(EntryKind::Dir) => Ok((0, None)),
                 Some(EntryKind::Symlink) => {
-                    return Err(anyhow::Error::new(
-                        fs_diag::synthetic_archive_member_symlink(path),
-                    ));
+                    return Err(fs_diag::synthetic_archive_member_symlink(path));
                 }
-                None => return Err(anyhow::Error::new(fs_diag::synthetic_stat_failed(path))),
+                None => return Err(fs_diag::synthetic_stat_failed(path)),
             }
         }
 
-        fn entry_kind(&self, path: &GuardedPath) -> Result<EntryKind> {
+        fn entry_kind(&self, path: &GuardedPath) -> DiagnosticResult<EntryKind> {
             let rel = normalize_rel(path);
             let binding = self.state_for_guard_rc(path)?;
             let state = binding.lock().expect("miri state poisoned");
             state
                 .entry_kind(&rel)
-                .ok_or_else(|| anyhow::Error::new(fs_diag::synthetic_entry_kind_missing(path)))
+                .ok_or_else(|| fs_diag::synthetic_entry_kind_missing(path))
         }
 
-        fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<EntryKind> {
+        fn entry_kind_no_follow(&self, path: &GuardedPath) -> DiagnosticResult<EntryKind> {
             // The synthetic Miri filesystem has no symlinks, so no-follow
             // inspection coincides with following inspection.
             self.entry_kind(path)
         }
 
-        fn resolve_workdir(&self, resolved: GuardedPath) -> Result<GuardedPath> {
+        fn resolve_workdir(&self, resolved: GuardedPath) -> DiagnosticResult<GuardedPath> {
             let rel = normalize_rel(&resolved);
             let state = self.state_for_guard_rc(&resolved)?;
 
@@ -779,24 +804,22 @@ mod miri_backend {
             Ok(resolved)
         }
 
-        fn resolve_copy_source(&self, guarded: GuardedPath) -> Result<GuardedPath> {
+        fn resolve_copy_source(&self, guarded: GuardedPath) -> DiagnosticResult<GuardedPath> {
             let rel = normalize_rel(&guarded);
             let kind = self
                 .state_for_guard_rc(&guarded)?
                 .lock()
                 .expect("miri state poisoned")
                 .entry_kind(&rel)
-                .ok_or_else(|| anyhow::Error::new(fs_diag::copy_source_missing(&guarded)))?;
+                .ok_or_else(|| fs_diag::copy_source_missing(&guarded))?;
             if matches!(kind, EntryKind::Dir | EntryKind::File) {
                 Ok(guarded)
             } else {
-                Err(anyhow::Error::new(fs_diag::copy_source_unsupported_kind(
-                    &guarded,
-                )))
+                Err(fs_diag::copy_source_unsupported_kind(&guarded))
             }
         }
 
-        fn remove_file(&self, path: &GuardedPath) -> Result<()> {
+        fn remove_file(&self, path: &GuardedPath) -> DiagnosticResult<()> {
             let rel = normalize_rel(path);
             self.state_for_guard_rc(path)?
                 .lock()
@@ -805,7 +828,7 @@ mod miri_backend {
             Ok(())
         }
 
-        fn remove_dir_all(&self, path: &GuardedPath) -> Result<()> {
+        fn remove_dir_all(&self, path: &GuardedPath) -> DiagnosticResult<()> {
             let rel = normalize_rel(path);
             self.state_for_guard_rc(path)?
                 .lock()
@@ -814,32 +837,38 @@ mod miri_backend {
             Ok(())
         }
 
-        fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()> {
+        fn remove_empty_dir(&self, path: &GuardedPath) -> DiagnosticResult<()> {
             let rel = normalize_rel(path);
             self.state_for_guard_rc(path)?
                 .lock()
                 .expect("miri state poisoned")
                 .remove_empty_dir(&rel)
-                .with_context(|| format!("failed to remove dir {}", path.display()))?;
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!("failed to remove dir {}", path.display())])
+                })?;
             Ok(())
         }
     }
 
-    fn synthetic_metadata(_kind: EntryKind) -> Result<std::fs::Metadata> {
+    fn synthetic_metadata(_kind: EntryKind) -> DiagnosticResult<std::fs::Metadata> {
         #[cfg(unix)]
         {
             // Use a stable FD (/dev/null) to obtain metadata without path-based statx.
-            let f = fs::File::open("/dev/null")
-                .with_context(|| "failed to open /dev/null for synthetic metadata")?;
+            let f = fs::File::open("/dev/null").map_err(|e| {
+                lift_io_ctx(
+                    e,
+                    "failed to open /dev/null for synthetic metadata".to_string(),
+                )
+            })?;
             f.metadata()
-                .with_context(|| "failed to fetch synthetic metadata")
+                .map_err(|e| lift_io_ctx(e, "failed to fetch synthetic metadata".to_string()))
         }
 
         #[cfg(not(unix))]
         {
             // Conservative fallback: metadata is not available under Miri on this platform.
             let _ = _kind;
-            Err(anyhow::Error::new(fs_diag::synthetic_metadata_unsupported()))
+            Err(fs_diag::synthetic_metadata_unsupported())
         }
     }
 
@@ -918,11 +947,11 @@ mod miri_backend {
             }
         }
 
-        fn read_file(&self, rel: &str) -> Result<Vec<u8>> {
+        fn read_file(&self, rel: &str) -> DiagnosticResult<Vec<u8>> {
             self.files
                 .get(rel)
                 .cloned()
-                .ok_or_else(|| anyhow::Error::new(fs_diag::synthetic_missing_file(rel)))
+                .ok_or_else(|| fs_diag::synthetic_missing_file(rel))
         }
 
         fn remove_file(&mut self, rel: &str) {
@@ -941,16 +970,12 @@ mod miri_backend {
                 .retain(|dir| !dir.eq(rel) && !dir.starts_with(&prefix));
         }
 
-        fn remove_empty_dir(&mut self, rel: &str) -> Result<()> {
+        fn remove_empty_dir(&mut self, rel: &str) -> DiagnosticResult<()> {
             if !self.dir_exists(rel) {
-                return Err(anyhow::Error::new(fs_diag::synthetic_remove_dir_missing(
-                    rel,
-                )));
+                return Err(fs_diag::synthetic_remove_dir_missing(rel));
             }
             if !self.list_children(rel).is_empty() {
-                return Err(anyhow::Error::new(fs_diag::synthetic_remove_dir_not_empty(
-                    rel,
-                )));
+                return Err(fs_diag::synthetic_remove_dir_not_empty(rel));
             }
             self.dirs.remove(rel);
             Ok(())
@@ -1065,7 +1090,7 @@ impl Clone for Backend {
 }
 
 impl Backend {
-    pub(super) fn new(root: &GuardedPath, build: &GuardedPath) -> Result<Self> {
+    pub(super) fn new(root: &GuardedPath, build: &GuardedPath) -> DiagnosticResult<Self> {
         #[cfg(miri)]
         {
             Ok(Backend::Miri(miri_backend::MiriBackend::new(root, build)?))
@@ -1085,35 +1110,48 @@ impl Backend {
         }
     }
 
-    pub(super) fn create_dir_all(&self, root: &GuardedPath, path: &GuardedPath) -> Result<()> {
+    pub(super) fn create_dir_all(
+        &self,
+        root: &GuardedPath,
+        path: &GuardedPath,
+    ) -> DiagnosticResult<()> {
         self.as_impl().create_dir_all(root, path)
     }
 
-    pub(super) fn read_dir_entries(&self, path: &GuardedPath) -> Result<Vec<DirEntry>> {
+    pub(super) fn read_dir_entries(&self, path: &GuardedPath) -> DiagnosticResult<Vec<DirEntry>> {
         self.as_impl().read_dir_entries(path)
     }
 
-    pub(super) fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>> {
+    pub(super) fn read_file(&self, path: &GuardedPath) -> DiagnosticResult<Vec<u8>> {
         self.as_impl().read_file(path)
     }
 
-    pub(super) fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+    pub(super) fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         self.as_impl().write_file(path, contents)
     }
 
-    pub(super) fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+    pub(super) fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         self.as_impl().append_file(path, contents)
     }
 
-    pub(super) fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
+    pub(super) fn open_read(
+        &self,
+        path: &GuardedPath,
+    ) -> DiagnosticResult<Box<dyn std::io::Read + Send>> {
         self.as_impl().open_read(path)
     }
 
-    pub(super) fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
+    pub(super) fn open_write(
+        &self,
+        path: &GuardedPath,
+    ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         self.as_impl().open_write(path)
     }
 
-    pub(super) fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
+    pub(super) fn open_append(
+        &self,
+        path: &GuardedPath,
+    ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         self.as_impl().open_append(path)
     }
 
@@ -1121,7 +1159,7 @@ impl Backend {
         &self,
         path: &GuardedPath,
         expected_root: &GuardedPath,
-    ) -> Result<Box<dyn std::io::Read + Send>> {
+    ) -> DiagnosticResult<Box<dyn std::io::Read + Send>> {
         self.as_impl().open_read_nofollow(path, expected_root)
     }
 
@@ -1129,47 +1167,56 @@ impl Backend {
         &self,
         path: &GuardedPath,
         expected_root: &GuardedPath,
-    ) -> Result<Box<dyn std::io::Write + Send>> {
+    ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         self.as_impl().open_write_nofollow(path, expected_root)
     }
 
-    pub(super) fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath> {
+    pub(super) fn canonicalize(&self, path: GuardedPath) -> DiagnosticResult<GuardedPath> {
         self.as_impl().canonicalize(path)
     }
 
-    pub(super) fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata> {
+    pub(super) fn metadata(&self, path: &GuardedPath) -> DiagnosticResult<std::fs::Metadata> {
         self.as_impl().metadata(path)
     }
 
-    pub(super) fn archive_member_stat(&self, path: &GuardedPath) -> Result<(u64, Option<u32>)> {
+    pub(super) fn archive_member_stat(
+        &self,
+        path: &GuardedPath,
+    ) -> DiagnosticResult<(u64, Option<u32>)> {
         self.as_impl().archive_member_stat(path)
     }
 
-    pub(super) fn entry_kind(&self, path: &GuardedPath) -> Result<super::EntryKind> {
+    pub(super) fn entry_kind(&self, path: &GuardedPath) -> DiagnosticResult<super::EntryKind> {
         self.as_impl().entry_kind(path)
     }
 
-    pub(super) fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<super::EntryKind> {
+    pub(super) fn entry_kind_no_follow(
+        &self,
+        path: &GuardedPath,
+    ) -> DiagnosticResult<super::EntryKind> {
         self.as_impl().entry_kind_no_follow(path)
     }
 
-    pub(super) fn resolve_workdir(&self, resolved: GuardedPath) -> Result<GuardedPath> {
+    pub(super) fn resolve_workdir(&self, resolved: GuardedPath) -> DiagnosticResult<GuardedPath> {
         self.as_impl().resolve_workdir(resolved)
     }
 
-    pub(super) fn resolve_copy_source(&self, guarded: GuardedPath) -> Result<GuardedPath> {
+    pub(super) fn resolve_copy_source(
+        &self,
+        guarded: GuardedPath,
+    ) -> DiagnosticResult<GuardedPath> {
         self.as_impl().resolve_copy_source(guarded)
     }
 
-    pub(super) fn remove_file(&self, path: &GuardedPath) -> Result<()> {
+    pub(super) fn remove_file(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         self.as_impl().remove_file(path)
     }
 
-    pub(super) fn remove_dir_all(&self, path: &GuardedPath) -> Result<()> {
+    pub(super) fn remove_dir_all(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         self.as_impl().remove_dir_all(path)
     }
 
-    pub(super) fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()> {
+    pub(super) fn remove_empty_dir(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         self.as_impl().remove_empty_dir(path)
     }
 }
