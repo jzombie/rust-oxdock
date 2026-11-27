@@ -197,11 +197,11 @@ All sites already use keyed ctors; flip signatures to
       ctor params over portable-pty third-party failures, plus
       test-only carrier checks; dep stays permanently, same
       shape as `oxdock-build`)
-- [ ] `oxdock-process` (B2 flipped; remaining anyhow paths all
-      permanent-shape: `from_anyhow` owners, `&anyhow::Error`
-      ctor params/bridges, external `expand.rs`
-      `PlaceholderCall` boundary; dep removal waits on B9
-      windows-only `child.rs`)
+- [x] `oxdock-process` (B2 flipped the trait; B9
+      `cfg(windows)` `child.rs` closed accept-as-is per D;
+      dep stays permanently for `from_anyhow`,
+      `&anyhow::Error` ctors, and the external `expand.rs`
+      `PlaceholderCall` boundary)
 - [x] `oxdock-pipe` (zero `anyhow` paths in src, no dep;
       trivially clean)
 - [!] Keep permanently as carrier/macro-boundary (staged
@@ -209,36 +209,52 @@ All sites already use keyed ctors; flip signatures to
       `mcp`, all three plugins, `oxdock-build` (foreign
       `&anyhow::Error` ctor params are permanent while
       `embed` stays anyhow), `oxdock-pty` (third-party
-      portable-pty failures ride `&anyhow::Error` ctors), `fs`
+      portable-pty failures ride `&anyhow::Error` ctors),
+      `oxdock-process` (B2 flipped; `from_anyhow`,
+      `&anyhow::Error` ctors, external `PlaceholderCall`,
+      `cfg(windows)` `child.rs` per B9), `fs`
       (per B4), `embed`
 
 ## D. Stays to record as final (decided, just log them)
 
-- [ ] `exit_code_of(&anyhow::Error)` (must survive transports)
-- [ ] `check_value_at` / `tag.rs` generated extractors
-      (passthrough ctors at call sites; closes
-      `toc_option_check_failed` normalization as won't-fix;
-      recording this final SUPERSEDES and closes the
-      FOLLOW-UP at `diagnostics-unification.md:2957`, which
-      must be marked closed at that time so the two plans
-      do not contradict)
-- [ ] `#[oxdock_func]` fns everywhere + func-macro
-      `::anyhow::bail!` (macro boundary)
-- [ ] `russh Handler::Error = anyhow::Error`
-      (`ssh auth.rs`/`runtime.rs`)
-- [ ] `macro_input.rs` proc-macro boundary
-- [ ] `oxdock-embed` gather fns (fs callers)
-- [ ] `PumpDownstreamClosed` sentinel + pump thread fns
-      (thread-error design)
-- [ ] `eval_int_arg_resolve` + `std_pipe_{read,create}_failed`
-      (inners reach sourced `os_pipe_creation_failed`)
-- [ ] CLI help/version `bail!` (not error diagnostics)
-- [ ] Out of scope: test-harness / logic-tests / fixture /
+- [!] `exit_code_of(&anyhow::Error)` (must survive transports;
+      verified: `cli` lib/serve + core steps/remote/state/args +
+      integration pins all read the anyhow carrier)
+- [!] `check_value_at` / `tag.rs` generated extractors
+      (passthrough ctors at call sites: 4 markdown
+      `toc_option_check_failed` sites; normalization
+      won't-fix. The FOLLOW-UP at
+      `diagnostics-unification.md:2957` cannot be marked
+      closed: that file is absent from this repo, so there is
+      no contradicting plan; the won't-fix is recorded here
+      as final)
+- [!] `#[oxdock_func]` fns everywhere + func-macro
+      `::anyhow::bail!` (macro boundary; verified 11 codegen
+      sites in `oxdock-func-macro`)
+- [!] `russh Handler::Error = anyhow::Error`
+      (`ssh auth.rs:93`/`runtime.rs:253`; foreign-trait
+      boundary)
+- [!] `macro_input.rs` proc-macro boundary (verified:
+      `anyhow::Result` over the syn/`TokenStream` surface in
+      `parser/src/macro_input.rs`)
+- [!] `oxdock-embed` gather fns (verified:
+      `use anyhow::{Context, Result}` + `.with_context`
+      chains; callers bridge via build ctors per A5)
+- [!] `PumpDownstreamClosed` sentinel + pump thread fns
+      (thread-error design; verified sentinel + downcast
+      guards in `core/exec/args.rs`)
+- [!] `eval_int_arg_resolve` + `std_pipe_{read,create}_failed`
+      (verified adapters; inners reach sourced
+      `os_pipe_creation_failed` in `pipe/slot.rs`)
+- [!] CLI help/version `bail!` (not error diagnostics;
+      verified `lib.rs` `usage()`/`version()` paths)
+- [!] Out of scope: test-harness / logic-tests / fixture /
       doc-tests / xtask / render tooling
-- [ ] B9 Windows-only code (`process/child.rs` job objects,
+- [!] B9 Windows-only code (`process/child.rs` job objects,
       `cli` re-exec x5, `assign_job` + unused
-      `job_assign_failed` ctor): verify on Windows or
-      accept-as-is
+      `job_assign_failed` ctor): accept-as-is (macOS runner;
+      paths `cfg(windows)`-gated with `cfg(windows)` tests;
+      Windows CI verifies)
 - [!] B3 `RemoteRunner` + `TransferStage` stay anyhow
       (concrete-error params risk flattening chained io;
       decided in B3, logged here for the final audit)
@@ -1164,3 +1180,28 @@ All sites already use keyed ctors; flip signatures to
   with `oxdock-pty`. Gates: `cargo test -p oxdock-pipe -p
   oxdock-pty` green (zero failures), no code touched so
   workspace state inherits the B6 green run.
+
+- D1 (2026-11-27): final stays recorded, plan-only, no code
+  changes. All 11 open items verified against the tree and
+  marked `- [!]`: `exit_code_of(&anyhow::Error)` carriers
+  (`cli` + core + integration), `check_value_at`/tag.rs
+  passthroughs (`toc_option_check_failed` won't-fix),
+  func-macro `::anyhow::bail!` codegen, russh `Error`
+  assoc types, `macro_input.rs` syn boundary, embed gather
+  `Context` chains, `PumpDownstreamClosed` thread design,
+  `eval_int_arg_resolve`/`std_pipe_*` adapters over sourced
+  `os_pipe_creation_failed`, CLI help/version `bail!`, the
+  out-of-scope list, and B9 (accept-as-is, `cfg(windows)`
+  gated). Note: `diagnostics-unification.md` is absent from
+  this repo, so its :2957 FOLLOW-UP has no target to close;
+  the won't-fix lives here as final. D1 closes the last
+  open checklist item in Plan 350 (`oxdock-process`, shut
+  alongside B9 accept-as-is): every A/B/C/D checkbox now
+  reads `- [x]`/`- [!]`, zero open items remain.
+  AMEND follow-up: `oxdock-process` shut as permanent
+  carrier (dep stays for `from_anyhow`, `&anyhow::Error`
+  ctors, external `PlaceholderCall`, `cfg(windows)`
+  `child.rs`); permanent-carrier list extended accordingly.
+  Gates: no code touched; `cargo test -p oxdock-pipe -p
+  oxdock-pty` re-run green (zero failures), workspace state
+  inherits the B6 green run.
