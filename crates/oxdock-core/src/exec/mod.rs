@@ -166,38 +166,74 @@ pub fn run_steps_with_context_result_with_io(
 /// filesystem-snapshot section. Shared by the eager and lazy runners so both
 /// render identical chains and only differ in the snapshot section.
 fn error_with_snapshot(err: anyhow::Error, snapshot_section: String) -> anyhow::Error {
-    // Build a single error message with the top cause plus a compact fs snapshot.
-    let chain = err.chain().map(|e| e.to_string()).collect::<Vec<_>>();
-    let mut primary = chain
-        .first()
+    // Keyed failures keep their own diagnostic as the head error:
+    // outer call-path frames replay natively, the exit code rides
+    // typed only when the chain lacks one, and the snapshot section
+    // attaches as provenance. Nothing shadows the key, span, hint,
+    // or fields, and `{err:#}` renders the failure plus the tree
+    // with no duplicated tail. Unkeyed failures keep the historic
+    // flattened wrapper under the snapshot key.
+    if let Some(found) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<oxdock_diagnostics::Diagnostic>())
         .cloned()
-        .unwrap_or_else(|| "unknown error".into());
-    let rest = if chain.len() > 1 {
-        let first_cause = chain[1].clone();
-        primary = format!("{primary} ({first_cause})");
-        if chain.len() > 2 {
-            let causes = chain
-                .iter()
-                .skip(2)
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join("\n  ");
-            format!("\ncauses:\n  {}", causes)
+    {
+        let mut outer_frames: Vec<String> = Vec::new();
+        for cause in err.chain() {
+            if cause
+                .downcast_ref::<oxdock_diagnostics::Diagnostic>()
+                .is_some()
+            {
+                break;
+            }
+            if cause.downcast_ref::<exit::ExitRequest>().is_none() {
+                outer_frames.push(cause.to_string());
+            }
+        }
+        let mut diag = found.with_contexts(outer_frames);
+        if let Some(code) = exit::exit_code_of(&err)
+            && exit::exit_code_of_diag(&diag).is_none()
+        {
+            let request = match diag.shared_source() {
+                Some(prior) => exit::ExitRequest::with_source(code, prior),
+                None => exit::ExitRequest::new(code),
+            };
+            diag = diag.with_source(Arc::new(request));
+        }
+        anyhow::Error::new(diag.with_snapshot(&snapshot_section))
+    } else {
+        // Unkeyed fallback only: flatten the chain exactly like the
+        // historic renderer, then wrap under the snapshot key.
+        let chain = err.chain().map(|e| e.to_string()).collect::<Vec<_>>();
+        let mut primary = chain
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "unknown error".into());
+        let rest = if chain.len() > 1 {
+            let first_cause = chain[1].clone();
+            primary = format!("{primary} ({first_cause})");
+            if chain.len() > 2 {
+                let causes = chain
+                    .iter()
+                    .skip(2)
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n  ");
+                format!("\ncauses:\n  {}", causes)
+            } else {
+                String::new()
+            }
         } else {
             String::new()
+        };
+        let failure = format!("{primary}{rest}");
+        let outer = diagnostics::eval_run_snapshot_context(&failure, &snapshot_section);
+        match exit::exit_code_of(&err) {
+            Some(code) => {
+                anyhow::Error::new(outer.with_source(Arc::new(exit::ExitRequest::new(code))))
+            }
+            None => anyhow::Error::new(outer),
         }
-    } else {
-        String::new()
-    };
-    let msg = format!("{}{}\n{}", primary, rest, snapshot_section);
-    // The snapshot renderer flattens the chain into one message for CLI
-    // rendering. Re-attach a relayed EXIT code as the inner error under
-    // that message: the text stays byte-identical while the code stays
-    // machine readable (context values are invisible to chain traversal,
-    // so the typed request must ride as a real error, not as context).
-    match exit::exit_code_of(&err) {
-        Some(code) => anyhow::Error::new(exit::ExitRequest::new(code)).context(msg),
-        None => anyhow::anyhow!(msg),
     }
 }
 

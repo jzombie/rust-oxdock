@@ -98,9 +98,12 @@ All sites already use keyed ctors; flip signatures to
       Decision: Approved incremental. `step_error` attaches
       `Span` via `with_span` on reclaimed `Diagnostic` and keeps
       the `step N` message prefix byte-identical during migration.
-      `error_with_snapshot` gains an outer `dsl.eval.snapshot_context`
-      ctor with the snapshot as message plus `with_source` chain,
-      preserving `ExitRequest` via `exit_code_of_diag`. `ThreadJoinHandle`
+      Keyed failures keep their own diagnostic as the head error
+      with the snapshot section attached via native
+      `Diagnostic::with_snapshot` provenance (frames replayed via
+      `with_contexts`, exit code attached only when the chain
+      lacks one); `dsl.eval.snapshot_context` is reserved for
+      unkeyed fallbacks. `ThreadJoinHandle`
       stores `Diagnostic` (`Clone` removes flatten re-emit) with panic
       payloads behind `dsl.eval.async_thread_panicked`.
       `BackgroundHandle` flips to `DiagnosticResult` now (process crate
@@ -391,3 +394,24 @@ All sites already use keyed ctors; flip signatures to
   19 + 11 + 4 + 1 + 5 + 3 + 15),
   `clippy --workspace --all-targets` clean,
   `rustfmt --edition 2024 --check` clean.
+
+- B1j (2026-11-27): snapshot provenance + Diagnostic-native
+  frame storage. `Diagnostic` gains `contexts: Vec<String>`
+  (outermost first; unwinding prepends later outer frames) and
+  `snapshot: Option<String>`; `message()` stays pure. `Display`
+  renders a `: `-joined prefix without a snapshot, and the
+  failure-then-section chain rule with one (1-node plain,
+  2-node `first (second)`, 3+-node `first (second)` plus a
+  `causes:` block), matching `error_with_snapshot`. Keyed
+  failures keep their own diagnostic as the head error with
+  `with_snapshot` provenance; `dsl.eval.snapshot_context`
+  (`eval_run_snapshot_context(failure, snapshot)`) is reserved
+  for unkeyed fallbacks. `error_with_snapshot` formats
+  `primary`/`rest`/`failure` only in the unkeyed branch. Gates
+  (post-PASS execution): `cargo test --workspace` green (core
+  432 + 629 + 12 + 2, diagnostics 12, cli 50 + 12, mcp
+  11 + 26 + 13, net-plugin 38 + 38, logic-tests
+  5 + 2 + 8 + 17 + 15 + 19 + 1 + 4 + 4 + 31 + 6 + 12 + 2 +
+  19 + 11 + 4 + 1 + 5 + 3 + 15), `cargo clippy --workspace
+  --all-targets` clean, `rustfmt --edition 2024 --check` clean
+  on touched files.

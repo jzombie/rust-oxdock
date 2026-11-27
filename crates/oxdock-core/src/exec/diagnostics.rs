@@ -1811,14 +1811,19 @@ pub(super) fn eval_exit_requested_code(diag: &Diagnostic) -> Option<i64> {
     diag.fields().get(FIELD_CODE)?.parse::<i64>().ok()
 }
 
-/// Outer snapshot context for a failed run. Takes the rendered snapshot
-/// section verbatim (filesystem tree or pending notice). Callers attach
-/// the failing diagnostic via `with_source` so the key survives without
-/// flattening the chain. One owner for the snapshot wrapper.
-pub fn eval_run_snapshot_context(snapshot: &str) -> Diagnostic {
+/// Outer snapshot context for a failed run. Takes the already
+/// rendered failure text plus the snapshot section verbatim
+/// (filesystem tree or pending notice); the message joins both
+/// exactly as the historic flattened renderer did, so `Display`
+/// stays byte-identical while the snapshot also rides as the
+/// `snapshot` field. Callers attach the failing diagnostic (or a
+/// bare `ExitRequest` when no keyed carrier exists) via
+/// `with_source` so keys and codes survive without flattening
+/// the chain. One owner for the snapshot wrapper.
+pub fn eval_run_snapshot_context(failure: &str, snapshot: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.snapshot_context",
-        snapshot.to_string(),
+        format!("{failure}\n{snapshot}"),
         Diagnostic::make_fields(&[(FIELD_SNAPSHOT, snapshot)]),
     )
 }

@@ -11725,3 +11725,50 @@ fn missing_import_hint_names_exporter_and_spelling() {
         "forward-slash FROM path, got: {hint}"
     );
 }
+
+#[test]
+fn snapshot_outer_preserves_keyed_exit_and_text() {
+    let leaf =
+        diagnostics::eval_exit_requested(3).with_span(oxdock_diagnostics::Span::line_col(9, 1));
+    let err = anyhow::Error::new(leaf).context("step 1, line 9");
+    let snapshot = "filesystem snapshot: never materialized (no snapshot directory was created)";
+    let out = error_with_snapshot(err, snapshot.to_string());
+    assert_eq!(crate::exec::exit::exit_code_of(&out), Some(3));
+    let head = out
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<oxdock_diagnostics::Diagnostic>())
+        .expect("keyed head survives, no wrapper shadows it");
+    assert_eq!(head.key(), "dsl.eval.exit_requested");
+    assert_eq!(head.snapshot(), Some(snapshot));
+    let span = head.span().expect("span survives on the head");
+    assert_eq!((span.line, span.col_start), (9, Some(1)));
+    let expected = format!("step 1, line 9 (EXIT requested with code 3)\n{snapshot}");
+    assert_eq!(out.to_string(), expected);
+    assert_eq!(format!("{out:#}"), expected);
+    assert_eq!(out.chain().count(), 1, "zero trailing duplication: {out:#}");
+}
+
+#[test]
+fn snapshot_outer_keeps_bare_request_shape() {
+    let err = anyhow::Error::new(exit::ExitRequest::new(7));
+    let snapshot = "filesystem snapshot: pending";
+    let out = error_with_snapshot(err, snapshot.to_string());
+    assert_eq!(crate::exec::exit::exit_code_of(&out), Some(7));
+    let expected = format!("EXIT requested with code 7\n{snapshot}");
+    assert_eq!(out.to_string(), expected);
+    assert_eq!(
+        format!("{out:#}"),
+        format!("{expected}: EXIT requested with code 7")
+    );
+}
+
+#[test]
+fn snapshot_outer_without_exit_has_no_source() {
+    let out = error_with_snapshot(
+        anyhow::anyhow!("boom"),
+        "filesystem snapshot: pending".to_string(),
+    );
+    assert_eq!(crate::exec::exit::exit_code_of(&out), None);
+    assert_eq!(out.to_string(), "boom\nfilesystem snapshot: pending");
+    assert!(out.chain().count() == 1, "sourceless stays single: {out:#}");
+}
