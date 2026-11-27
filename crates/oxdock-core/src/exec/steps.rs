@@ -1137,16 +1137,28 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             decl_type,
             is_const,
             rhs: oxdock_parser::BindRhs::Async(body),
-        } => handlers::dispatch_assign_async(var, decl_type.clone(), body, &mut cx, *is_const),
+        } => Ok(handlers::dispatch_assign_async(
+            var,
+            decl_type.clone(),
+            body,
+            &mut cx,
+            *is_const,
+        )?),
         StepKind::Bind {
             var,
             decl_type,
             is_const,
             rhs: oxdock_parser::BindRhs::Await { task_var, .. },
-        } => handlers::dispatch_await_capture(var, decl_type.clone(), task_var, &mut cx, *is_const),
+        } => Ok(handlers::dispatch_await_capture(
+            var,
+            decl_type.clone(),
+            task_var,
+            &mut cx,
+            *is_const,
+        )?),
         StepKind::Set { var, expr } => handlers::set_var_value(&mut cx, var, expr),
-        StepKind::Await { var, .. } => handlers::dispatch_await(var, &mut cx),
-        StepKind::Cancel { var, .. } => handlers::dispatch_cancel(var, &mut cx),
+        StepKind::Await { var, .. } => Ok(handlers::dispatch_await(var, &mut cx)?),
+        StepKind::Cancel { var, .. } => Ok(handlers::dispatch_cancel(var, &mut cx)?),
         StepKind::Sleep { duration } => {
             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
             Ok(handlers::sleep(&mut cx, &duration)?)
@@ -1796,7 +1808,15 @@ fn dispatch_flow_step<P: ProcessManager>(
             decl_type,
             is_const,
             rhs: oxdock_parser::BindRhs::Capture(cmd),
-        } => handlers::assign_capture(cx, generation, idx, var, decl_type.clone(), cmd, *is_const),
+        } => Ok(handlers::assign_capture(
+            cx,
+            generation,
+            idx,
+            var,
+            decl_type.clone(),
+            cmd,
+            *is_const,
+        )?),
         _ => {
             unreachable!("dispatch_flow_step handles only compound steps")
         }

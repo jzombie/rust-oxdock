@@ -37,7 +37,7 @@ All sites already use keyed ctors; flip signatures to
       `build_script_entry`, `for_loop`, `while_loop`,
       `dispatch_break`, `dispatch_continue`, `with_io_block`,
       `exit`, `workdir`, `sleep`
-- [ ] H5 async cluster (29): `assign_capture`,
+- [x] H5 async cluster (29): `assign_capture`,
       `dispatch_async_block`, `dispatch_assign_async`,
       `resolve_task_entry`, `resolve_task_entry_by_id`,
       `dispatch_await`, `dispatch_await_capture`,
@@ -660,3 +660,51 @@ All sites already use keyed ctors; flip signatures to
   suites, `cargo clippy --workspace --all-targets` clean,
   `rustfmt --edition 2024 --check` clean on `handlers.rs`,
   `steps.rs`, `args.rs`.
+
+- H5 (2026-11-27): async cluster. `assign_capture`,
+  `dispatch_assign_async`, `resolve_task_entry`,
+  `resolve_task_entry_by_id`, `await_task_entry`, `dispatch_await`,
+  `dispatch_await_capture`, `dispatch_cancel`, `disarm_deadline`,
+  `isolated_inherit_env` (`core/exec/handlers.rs`) plus helpers
+  `peel_capture_command`, `pin_async_keepers` return
+  `DiagnosticResult`; 23 outer `anyhow::Error::new(diag::...)`
+  wrappers dropped (5 more in `await_task_entry` alone).
+  `dispatch_async_block` stays anyhow: the `define_pipeline!`
+  table requires `anyhow::Result` signatures (its 3 thread-closure
+  wrappers remain as the pipeline-boundary share, like H4
+  `dispatch_break`/`dispatch_continue`). Both
+  `std::thread::spawn` closures stay anyhow: `ThreadJoinHandle::new`
+  takes `JoinHandle<anyhow::Result<()>>` (external signature
+  boundary, like H1 `unpack_auto_from`; 4 wrappers remain inside
+  `dispatch_assign_async`'s closure). Ctors keep their params as
+  conversion owners (byte-identical). Anyhow interiors lift through
+  the single owner `args::lift_dispatch_error` (lossless per H4
+  AMEND): `import_file` (x2), `call_func_value` (x2),
+  `execute_single_step_with_generation` in `assign_capture`;
+  `timeout` (stays anyhow) lifts `execute_scoped_steps` then holds
+  flipped `disarm_deadline` via `anyhow::Error::from`.
+  `disarm_deadline`'s `with_context(timeout)` arm goes native:
+  fired+ok returns the bare keyed `eval_timeout_deadline`, fired+err
+  chains the body via `with_source(Arc::new(err))` so the timeout key
+  still wins reclamation with the body preserved. `await_task_entry`
+  drops `.into()` on the `try_wait` error (`BackgroundHandle` is
+  already `DiagnosticResult`-native); `handle.kill()` passes through.
+  `native.rs` `task_poll` (stays anyhow) holds flipped
+  `resolve_task_entry_by_id` via `From`, no change needed.
+  10 anyhow-parent boundaries via `Ok(f(...)?)`: 5 in
+  `handlers.rs` (`dispatch_bind_step` `Async`/`Await` arms,
+  `dispatch_await_step`, `dispatch_cancel_step`,
+  `dispatch_isolated_inherit_env`), 4 in
+  `execute_single_step_with_generation` (`Bind Async`, `Bind Await`,
+  `Await`, `Cancel`), 1 in `dispatch_flow_step` (`Bind Capture`).
+  `dispatch_async_block` needs no bridge (stays anyhow for the
+  `define_pipeline!` table, so the `AsyncBlock` leaf arm passes it
+  through untouched); the `IsolatedInheritEnv` leaf arm needs none
+  either (already `?; Ok(())`). No test changes. Gates (post-PASS):
+  `cargo test -p oxdock-core` green (433 + 629 + 12 + 2; the two
+  `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
+  expected fixture stderr, not failures), full
+  `cargo test --workspace` green with zero failures across all
+  suites, `cargo clippy --workspace --all-targets` clean,
+  `rustfmt --edition 2024 --check` clean on `handlers.rs`,
+  `steps.rs`.

@@ -2468,7 +2468,7 @@ fn merge_io_layers(layers: &[&Vec<IoBinding>]) -> Vec<IoBinding> {
 fn peel_capture_command<'a, P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     cmd: &'a StepKind,
-) -> Result<PeeledCapture<'a>> {
+) -> oxdock_diagnostics::DiagnosticResult<PeeledCapture<'a>> {
     let mut layers: Vec<&Vec<IoBinding>> = Vec::new();
     let mut deadline: Option<std::time::Duration> = None;
     let mut current = cmd;
@@ -3289,7 +3289,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     decl_type: String,
     cmd: &StepKind,
     is_const: bool,
-) -> Result<Flow> {
+) -> oxdock_diagnostics::DiagnosticResult<Flow> {
     use std::sync::Arc;
 
     let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
@@ -3308,11 +3308,12 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                 .iter()
                 .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
             {
-                return Err(anyhow::Error::new(diag::eval_capture_with_io_stdout(kw)));
+                return Err(diag::eval_capture_with_io_stdout(kw));
             }
             let guard = arm_deadline(cx, deadline);
             let result = if bindings.is_empty() {
                 super::import::import_file(cx, path, alias)
+                    .map_err(super::args::lift_dispatch_error)
             } else {
                 (|| {
                     let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
@@ -3333,6 +3334,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                         tty: None,
                     };
                     super::import::import_file(&mut sub_cx, path, alias)
+                        .map_err(super::args::lift_dispatch_error)
                 })()
             };
             let value = disarm_deadline(cx, guard, deadline, result)?;
@@ -3355,11 +3357,11 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                 .iter()
                 .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
             {
-                return Err(anyhow::Error::new(diag::eval_capture_with_io_stdout(kw)));
+                return Err(diag::eval_capture_with_io_stdout(kw));
             }
             let guard = arm_deadline(cx, deadline);
             let result = if bindings.is_empty() {
-                call_func_value(cx, name, args)
+                call_func_value(cx, name, args).map_err(super::args::lift_dispatch_error)
             } else {
                 (|| {
                     let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
@@ -3381,6 +3383,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                         tty: None,
                     };
                     call_func_value(&mut sub_cx, name, args)
+                        .map_err(super::args::lift_dispatch_error)
                 })()
             };
             let value = disarm_deadline(cx, guard, deadline, result)?;
@@ -3410,30 +3413,26 @@ pub(crate) fn assign_capture<P: ProcessManager>(
         // A `WITH_IO [tty]` capture re-resolves its own request when the
         // inner step runs through `with_io`; ambient carriage stays empty.
         cx.tty,
-    )?;
+    )
+    .map_err(super::args::lift_dispatch_error)?;
     match flow {
         Flow::Done => {}
         Flow::Break { idx } => {
-            return Err(anyhow::Error::new(diag::eval_capture_flow_outside_loop(
-                idx + 1,
-                KEYWORD_BREAK,
-            )));
+            return Err(diag::eval_capture_flow_outside_loop(idx + 1, KEYWORD_BREAK));
         }
         Flow::Continue { idx } => {
-            return Err(anyhow::Error::new(diag::eval_capture_flow_outside_loop(
+            return Err(diag::eval_capture_flow_outside_loop(
                 idx + 1,
                 KEYWORD_CONTINUE,
-            )));
+            ));
         }
         Flow::Return { idx, .. } => {
-            return Err(anyhow::Error::new(
-                diag::eval_capture_return_outside_function(idx + 1),
-            ));
+            return Err(diag::eval_capture_return_outside_function(idx + 1));
         }
     }
     let text = sink
         .drain_string_strict()
-        .map_err(|err| anyhow::Error::new(diag::eval_capture_not_utf8(kw, var, err)))?;
+        .map_err(|err| diag::eval_capture_not_utf8(kw, var, err))?;
     let clean_var = var.trim_start_matches('$').to_string();
     let tag = cx.state.resolve_tag(&decl_type)?;
     cx.state
@@ -3702,7 +3701,7 @@ fn pin_async_keepers<P: ProcessManager>(
     cx: &StepCtx<'_, P>,
     body: &[Step],
     worker_task_id: u64,
-) -> Result<Option<super::state::KeeperExpiry>> {
+) -> oxdock_diagnostics::DiagnosticResult<Option<super::state::KeeperExpiry>> {
     struct Acc {
         handle: PipeHandle,
         last_producer: Option<usize>,
@@ -4624,7 +4623,7 @@ pub(crate) fn dispatch_isolated_inherit_env<P: ProcessManager>(
     let StepKind::IsolatedInheritEnv { keys } = step else {
         unreachable!()
     };
-    isolated_inherit_env(cx, keys)
+    Ok(isolated_inherit_env(cx, keys)?)
 }
 
 // ── Structural dispatch wrappers ────────────────────────────────────────────
@@ -4877,7 +4876,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     body: &[Step],
     cx: &mut StepCtx<'_, P>,
     is_const: bool,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     // Generate a unique task ID. Allocation refuses past the live-task
     // cap, so a spawn storm fails the step loudly instead of wedging
     // the host.
@@ -5031,14 +5030,14 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
 fn resolve_task_entry<P: ProcessManager>(
     var: &str,
     cx: &StepCtx<'_, P>,
-) -> Result<Arc<super::state::TaskEntry>> {
+) -> oxdock_diagnostics::DiagnosticResult<Arc<super::state::TaskEntry>> {
     // Resolve the variable to a TaskHandle
     let val = cx
         .state
         .get_var(var)
-        .ok_or_else(|| anyhow::Error::new(diag::eval_task_var_undefined(var)))?;
+        .ok_or_else(|| diag::eval_task_var_undefined(var))?;
     let Some(task_id) = val.as_handle() else {
-        return Err(anyhow::Error::new(diag::eval_task_not_handle(var)));
+        return Err(diag::eval_task_not_handle(var));
     };
     resolve_task_entry_by_id(task_id, &sigil_var(var), cx)
 }
@@ -5051,7 +5050,7 @@ pub(crate) fn resolve_task_entry_by_id<P: ProcessManager>(
     task_id: u64,
     label: &str,
     cx: &StepCtx<'_, P>,
-) -> Result<Arc<super::state::TaskEntry>> {
+) -> oxdock_diagnostics::DiagnosticResult<Arc<super::state::TaskEntry>> {
     // Clone the shared entry under a short map lock.
     let entry = {
         let named = cx
@@ -5062,7 +5061,7 @@ pub(crate) fn resolve_task_entry_by_id<P: ProcessManager>(
         named.get(&task_id).cloned()
     };
     let Some(entry) = entry else {
-        return Err(anyhow::Error::new(diag::eval_task_not_found(label)));
+        return Err(diag::eval_task_not_found(label));
     };
     Ok(entry)
 }
@@ -5076,7 +5075,7 @@ fn await_task_entry(
     entry: &Arc<super::state::TaskEntry>,
     cancel_token: &Arc<std::sync::atomic::AtomicBool>,
     var: &str,
-) -> Result<std::process::ExitStatus> {
+) -> oxdock_diagnostics::DiagnosticResult<std::process::ExitStatus> {
     use super::state::TaskPhase;
 
     // Claim the entry for awaiting.
@@ -5087,12 +5086,10 @@ fn await_task_entry(
                 drop(guard);
                 // Teardown barrier: never outrun the killer's join.
                 entry.wait_reaped();
-                return Err(anyhow::Error::new(diag::eval_await_cancelled(var)));
+                return Err(diag::eval_await_cancelled(var));
             }
             TaskPhase::Completed | TaskPhase::Awaiting => {
-                return Err(anyhow::Error::new(diag::eval_task_not_found(&sigil_var(
-                    var,
-                ))));
+                return Err(diag::eval_task_not_found(&sigil_var(var)));
             }
             TaskPhase::Running => {
                 guard.phase = TaskPhase::Awaiting;
@@ -5151,7 +5148,7 @@ fn await_task_entry(
                             // terminal state below.
                             drop(guard);
                             entry.finish_teardown();
-                            return Err(err.into());
+                            return Err(err);
                         }
                     },
                     // No handle while still active: another thread took it
@@ -5166,21 +5163,19 @@ fn await_task_entry(
             }
             Decision::Cancelled => {
                 entry.wait_reaped();
-                return Err(anyhow::Error::new(diag::eval_await_cancelled(var)));
+                return Err(diag::eval_await_cancelled(var));
             }
             Decision::KillOnTimeout => {
                 if let Some(mut handle) = timeout_kill {
                     let _ = handle.kill();
                 }
                 entry.finish_teardown();
-                return Err(anyhow::Error::new(diag::eval_await_timeout(var)));
+                return Err(diag::eval_await_timeout(var));
             }
             Decision::Done(status) => {
                 entry.finish_teardown();
                 if !status.success() {
-                    return Err(anyhow::Error::new(diag::eval_await_exit_status(
-                        var, &status,
-                    )));
+                    return Err(diag::eval_await_exit_status(var, &status));
                 }
                 return Ok(status);
             }
@@ -5197,11 +5192,14 @@ fn await_task_entry(
 /// `CANCEL` (or a `TIMEOUT` deadline) transitions the entry to `Cancelled`;
 /// this loop observes that within ~10ms and rendezvouses on teardown
 /// completion before reporting cancellation.
-pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -> Result<()> {
+pub(crate) fn dispatch_await<P: ProcessManager>(
+    var: &str,
+    cx: &mut StepCtx<'_, P>,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let val = cx
         .state
         .get_var(var)
-        .ok_or_else(|| anyhow::Error::new(diag::eval_task_var_undefined(var)))?;
+        .ok_or_else(|| diag::eval_task_var_undefined(var))?;
     // A LIST of HANDLEs awaits every member in order, so worker pools
     // collected with PUSH join as a group; an empty LIST is a no-op. The
     // first failing member bails like sequential single AWAITs would.
@@ -5217,10 +5215,7 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
             let member = format!("{var}[{idx}]");
             let label = sigil_var(&member);
             let Some(task_id) = item.as_handle() else {
-                return Err(anyhow::Error::new(diag::eval_await_member_not_handle(
-                    &label,
-                    item.type_name(),
-                )));
+                return Err(diag::eval_await_member_not_handle(&label, item.type_name()));
             };
             let entry = resolve_task_entry_by_id(task_id, &label, cx)?;
             await_task_entry(&entry, &cx.state.cancel_token, &member)?;
@@ -5247,7 +5242,7 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
     task_var: &str,
     cx: &mut StepCtx<'_, P>,
     is_const: bool,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
     let entry = resolve_task_entry(task_var, cx)?;
     await_task_entry(&entry, &cx.state.cancel_token, task_var)?;
@@ -5266,9 +5261,7 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
         return Ok(());
     }
     if returns_value {
-        return Err(anyhow::Error::new(diag::eval_await_fell_off(
-            kw, out_var, task_var,
-        )));
+        return Err(diag::eval_await_fell_off(kw, out_var, task_var));
     }
     let tag = cx.state.resolve_tag(&out_type)?;
     cx.state.declare_binding(
@@ -5287,15 +5280,18 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
 /// process is dead and no residual filesystem/stream mutation can follow.
 /// A concurrent `AWAIT` rendezvouses on teardown completion and reports
 /// cancellation.
-pub(crate) fn dispatch_cancel<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -> Result<()> {
+pub(crate) fn dispatch_cancel<P: ProcessManager>(
+    var: &str,
+    cx: &mut StepCtx<'_, P>,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     use super::state::TaskPhase;
 
     let val = cx
         .state
         .get_var(var)
-        .ok_or_else(|| anyhow::Error::new(diag::eval_task_var_undefined(var)))?;
+        .ok_or_else(|| diag::eval_task_var_undefined(var))?;
     let Some(task_id) = val.as_handle() else {
-        return Err(anyhow::Error::new(diag::eval_task_not_handle(var)));
+        return Err(diag::eval_task_not_handle(var));
     };
 
     let entry = {
@@ -5307,7 +5303,7 @@ pub(crate) fn dispatch_cancel<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_,
         named.get(&task_id).cloned()
     };
     let Some(entry) = entry else {
-        return Err(anyhow::Error::new(diag::eval_cancel_gone(var)));
+        return Err(diag::eval_cancel_gone(var));
     };
 
     // Transition to Cancelled and take the handle under a short lock.
@@ -5315,10 +5311,10 @@ pub(crate) fn dispatch_cancel<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_,
         let mut guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
         match guard.phase {
             TaskPhase::Cancelled => {
-                return Err(anyhow::Error::new(diag::eval_cancel_already(var)));
+                return Err(diag::eval_cancel_already(var));
             }
             TaskPhase::Completed => {
-                return Err(anyhow::Error::new(diag::eval_cancel_gone(var)));
+                return Err(diag::eval_cancel_gone(var));
             }
             TaskPhase::Running | TaskPhase::Awaiting => {
                 guard.phase = TaskPhase::Cancelled;
@@ -5363,10 +5359,20 @@ pub(crate) fn dispatch_bind_step<P: ProcessManager>(
             cmd,
             *is_const,
         )?)?),
-        BindRhs::Async(body) => dispatch_assign_async(var, decl_type.clone(), body, cx, *is_const),
-        BindRhs::Await { task_var, .. } => {
-            dispatch_await_capture(var, decl_type.clone(), task_var, cx, *is_const)
-        }
+        BindRhs::Async(body) => Ok(dispatch_assign_async(
+            var,
+            decl_type.clone(),
+            body,
+            cx,
+            *is_const,
+        )?),
+        BindRhs::Await { task_var, .. } => Ok(dispatch_await_capture(
+            var,
+            decl_type.clone(),
+            task_var,
+            cx,
+            *is_const,
+        )?),
     }
 }
 
@@ -5378,7 +5384,7 @@ pub(crate) fn dispatch_await_step<P: ProcessManager>(
     let StepKind::Await { var, .. } = step else {
         unreachable!()
     };
-    dispatch_await(var, cx)
+    Ok(dispatch_await(var, cx)?)
 }
 
 /// Pipeline dispatch wrapper for `Cancel`
@@ -5389,7 +5395,7 @@ pub(crate) fn dispatch_cancel_step<P: ProcessManager>(
     let StepKind::Cancel { var, .. } = step else {
         unreachable!()
     };
-    dispatch_cancel(var, cx)
+    Ok(dispatch_cancel(var, cx)?)
 }
 
 /// Pipeline dispatch wrapper for `Timeout`
@@ -5508,8 +5514,8 @@ fn disarm_deadline<T, P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     mut guard: Option<DeadlineGuard>,
     duration: Option<std::time::Duration>,
-    result: Result<T>,
-) -> Result<T> {
+    result: oxdock_diagnostics::DiagnosticResult<T>,
+) -> oxdock_diagnostics::DiagnosticResult<T> {
     use std::sync::atomic::Ordering;
 
     let Some(guard) = guard.as_mut() else {
@@ -5536,13 +5542,13 @@ fn disarm_deadline<T, P: ProcessManager>(
     match result {
         Ok(value) => {
             if guard.fired.load(Ordering::SeqCst) {
-                return Err(anyhow::Error::new(diag::eval_timeout_deadline(&budget)));
+                return Err(diag::eval_timeout_deadline(&budget));
             }
             Ok(value)
         }
         Err(err) => {
             if guard.fired.load(Ordering::SeqCst) {
-                Err(err).with_context(|| diag::eval_timeout_deadline(&budget))
+                Err(diag::eval_timeout_deadline(&budget).with_source(std::sync::Arc::new(err)))
             } else {
                 Err(err)
             }
@@ -5575,7 +5581,13 @@ pub(crate) fn timeout<P: ProcessManager>(
         cx.stdin_pipe.clone(),
         true,
     );
-    disarm_deadline(cx, guard, Some(*duration), result)
+    disarm_deadline(
+        cx,
+        guard,
+        Some(*duration),
+        result.map_err(super::args::lift_dispatch_error),
+    )
+    .map_err(anyhow::Error::from)
 }
 
 /// RAII scope for `ISOLATED` bodies: snapshots the script env, clears it,
@@ -5664,9 +5676,9 @@ pub(crate) fn isolated<P: ProcessManager>(cx: &mut StepCtx<'_, P>, body: &[Step]
 pub(crate) fn isolated_inherit_env<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     keys: &[String],
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let Some(snapshot) = cx.state.isolated_stack.last().cloned() else {
-        return Err(anyhow::Error::new(diag::eval_isolated_outside_allowlist()));
+        return Err(diag::eval_isolated_outside_allowlist());
     };
     let envs = Arc::make_mut(&mut cx.state.envs);
     for key in keys {
