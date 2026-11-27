@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
 use oxdock_fs::{CargoScratch, GuardedPath, PolicyPath};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::ExitStatus;
@@ -216,7 +215,7 @@ pub trait ProcessManager: Clone + Send + 'static {
         ctx: &CommandContext,
         script: &str,
         options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>>;
+    ) -> DiagnosticResult<CommandResult<Self::Handle>>;
 
     /// Spawn a command without waiting for completion. Returns a background
     /// handle that can be polled or waited on later. The default implementation
@@ -226,7 +225,7 @@ pub trait ProcessManager: Clone + Send + 'static {
         ctx: &CommandContext,
         script: &str,
         options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>> {
+    ) -> DiagnosticResult<CommandResult<Self::Handle>> {
         self.run_command(ctx, script, options)
     }
 
@@ -239,8 +238,8 @@ pub trait ProcessManager: Clone + Send + 'static {
         _ctx: &CommandContext,
         argv: &[String],
         _options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>> {
-        Err(anyhow::Error::new(proc_diag::run_argv_unimplemented(argv)))
+    ) -> DiagnosticResult<CommandResult<Self::Handle>> {
+        Err(proc_diag::run_argv_unimplemented(argv))
     }
 
     /// Whether host stdin is an interactive terminal. The default
@@ -258,7 +257,7 @@ pub trait ProcessManager: Clone + Send + 'static {
         ctx: &CommandContext,
         argv: &[String],
         options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>> {
+    ) -> DiagnosticResult<CommandResult<Self::Handle>> {
         self.run_argv(ctx, argv, options)
     }
 }

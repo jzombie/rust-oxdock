@@ -264,7 +264,7 @@ pub(super) fn run<P: ProcessManager>(
     let mut handle = match cx
         .process
         .spawn_command(&ctx, cmd, options)
-        .map_err(|e| diag::eval_run_spawn_failed(cmd, &e))?
+        .map_err(|e| diag::eval_run_spawn_failed(cmd, &anyhow::Error::from(e)))?
     {
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),
@@ -393,7 +393,7 @@ pub(super) fn run_argv<P: ProcessManager>(
     let mut handle = match cx
         .process
         .spawn_argv(&ctx, argv, options)
-        .map_err(|e| diag::eval_run_argv_spawn_failed(argv, &e))?
+        .map_err(|e| diag::eval_run_argv_spawn_failed(argv, &anyhow::Error::from(e)))?
     {
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),

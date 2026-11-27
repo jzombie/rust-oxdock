@@ -1409,7 +1409,7 @@ impl oxdock_process::ProcessManager for TtyManager {
         ctx: &oxdock_process::CommandContext,
         script: &str,
         options: oxdock_process::CommandOptions,
-    ) -> anyhow::Result<oxdock_process::CommandResult<Self::Handle>> {
+    ) -> oxdock_diagnostics::DiagnosticResult<oxdock_process::CommandResult<Self::Handle>> {
         self.0.run_command(ctx, script, options)
     }
 }

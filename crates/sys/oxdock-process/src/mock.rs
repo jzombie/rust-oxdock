@@ -3,7 +3,6 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
 use oxdock_sys_test_utils::exit_status_from_code;
 
 use crate::diagnostics as proc_diag;
@@ -140,7 +139,7 @@ impl ProcessManager for MockProcessManager {
         ctx: &CommandContext,
         script: &str,
         options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>> {
+    ) -> DiagnosticResult<CommandResult<Self::Handle>> {
         let CommandOptions {
             mode,
             stdin,
@@ -181,7 +180,7 @@ impl ProcessManager for MockProcessManager {
             }
             CommandMode::Background => {
                 if matches!(stdout, CommandStdout::Capture) {
-                    return Err(anyhow::Error::new(proc_diag::run_bg_capture_unsupported()));
+                    return Err(proc_diag::run_bg_capture_unsupported());
                 }
                 self.spawns
                     .lock()
@@ -217,7 +216,7 @@ impl ProcessManager for MockProcessManager {
         ctx: &CommandContext,
         argv: &[String],
         options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>> {
+    ) -> DiagnosticResult<CommandResult<Self::Handle>> {
         let CommandOptions {
             mode,
             stdin,
@@ -259,7 +258,7 @@ impl ProcessManager for MockProcessManager {
             }
             CommandMode::Background => {
                 if matches!(stdout, CommandStdout::Capture) {
-                    return Err(anyhow::Error::new(proc_diag::run_bg_capture_unsupported()));
+                    return Err(proc_diag::run_bg_capture_unsupported());
                 }
                 self.argv_spawns
                     .lock()
@@ -354,14 +353,15 @@ impl Drop for MockHandle {
     }
 }
 
-fn capture_stdin(stdin: CommandStdin) -> Result<Option<Vec<u8>>> {
+fn capture_stdin(stdin: CommandStdin) -> DiagnosticResult<Option<Vec<u8>>> {
     match stdin {
         CommandStdin::Stream(reader) => {
             let mut guard = reader
                 .lock()
-                .map_err(|_| anyhow::Error::new(proc_diag::run_stdin_lock_failed()))?;
+                .map_err(|_| proc_diag::run_stdin_lock_failed())?;
             let mut buf = Vec::new();
-            std::io::copy(&mut *guard, &mut buf)?;
+            std::io::copy(&mut *guard, &mut buf)
+                .map_err(|err| proc_diag::run_stdin_read_failed(&err))?;
             Ok(Some(buf))
         }
         // A live kernel pipe has no bytes to snapshot in the mock; record

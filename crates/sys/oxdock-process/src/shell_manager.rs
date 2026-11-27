@@ -1,6 +1,5 @@
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::Command as ProcessCommand;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -31,7 +30,7 @@ impl ProcessManager for ShellProcessManager {
         ctx: &CommandContext,
         script: &str,
         options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>> {
+    ) -> DiagnosticResult<CommandResult<Self::Handle>> {
         if std::env::var_os(PROCESS_DEBUG_ENV_VAR).is_some() {
             eprintln!("oxbook run_command: {script}");
         }
@@ -56,7 +55,7 @@ impl ProcessManager for ShellProcessManager {
         ctx: &CommandContext,
         argv: &[String],
         options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>> {
+    ) -> DiagnosticResult<CommandResult<Self::Handle>> {
         if std::env::var_os(PROCESS_DEBUG_ENV_VAR).is_some() {
             eprintln!("oxbook run_argv: {argv:?}");
         }
@@ -84,13 +83,13 @@ fn run_prepared(
     stdin: CommandStdin,
     stdout: CommandStdout,
     stderr: CommandStderr,
-) -> Result<CommandResult<ChildHandle>> {
+) -> DiagnosticResult<CommandResult<ChildHandle>> {
     let (stdout_stream, capture_buf) = match stdout {
         CommandStdout::Inherit => (None, None),
         CommandStdout::Stream(stream) => (Some(stream), None),
         CommandStdout::Capture => {
             if matches!(mode, CommandMode::Background) {
-                return Err(anyhow::Error::new(proc_diag::run_bg_capture_unsupported()));
+                return Err(proc_diag::run_bg_capture_unsupported());
             }
             let buf = Arc::new(Mutex::new(Vec::new()));
             let writer: SharedOutput = buf.clone();
@@ -139,19 +138,16 @@ fn run_prepared(
         CommandMode::Foreground => {
             let mut handle =
                 spawn_child_with_streams(command, stdin_stream, stdout_stream, stderr_stream)?;
-            let status = handle.wait().map_err(|err| {
-                let reason = anyhow::Error::new(err);
-                anyhow::Error::new(proc_diag::run_wait_failed(&*command, &reason))
-            })?;
+            let status = handle
+                .wait()
+                .map_err(|err| proc_diag::run_wait_failed(&*command, &anyhow::Error::from(err)))?;
             if !status.success() {
-                return Err(anyhow::Error::new(proc_diag::run_command_failed(
-                    &*command, &status,
-                )));
+                return Err(proc_diag::run_command_failed(&*command, &status));
             }
             if let Some(buf) = capture_buf {
                 let mut guard = buf
                     .lock()
-                    .map_err(|_| anyhow::Error::new(proc_diag::run_capture_lock_poisoned()))?;
+                    .map_err(|_| proc_diag::run_capture_lock_poisoned())?;
                 return Ok(CommandResult::Captured(std::mem::take(&mut *guard)));
             }
             Ok(CommandResult::Completed)

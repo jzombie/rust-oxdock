@@ -1,6 +1,5 @@
 use super::*;
 
-use anyhow::bail;
 use indoc::indoc;
 use oxdock_fs::{EntryKind, GuardedPath, MockFs, WorkspaceFs, to_forward_slashes};
 use oxdock_parser::{Expr, Guard, GuardExpr, IoBinding, IoStream, STD_MODULE_NAME, StepKind};
@@ -2009,13 +2008,15 @@ impl ProcessManager for FailingRunner {
         ctx: &CommandContext,
         script: &str,
         options: CommandOptions,
-    ) -> anyhow::Result<CommandResult<Self::Handle>> {
+    ) -> DiagnosticResult<CommandResult<Self::Handle>> {
         self.calls
             .lock()
             .expect("poisoned")
             .push(script.to_string());
         if script == self.fail_script {
-            bail!("simulated failure")
+            return Err(diagnostics::eval_dispatch_failed(&anyhow::anyhow!(
+                "simulated failure"
+            )));
         }
         if options.mode == CommandMode::Background {
             // Delegate spawns so we get kill-logging mock handles.
@@ -3650,7 +3651,7 @@ impl ProcessManager for BlockingRunner {
         _ctx: &CommandContext,
         script: &str,
         options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>, anyhow::Error> {
+    ) -> DiagnosticResult<CommandResult<Self::Handle>> {
         match options.mode {
             CommandMode::Foreground => Ok(CommandResult::Completed),
             CommandMode::Background => Ok(CommandResult::Background(BlockingHandle {

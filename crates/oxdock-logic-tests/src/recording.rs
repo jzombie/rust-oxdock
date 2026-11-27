@@ -7,7 +7,6 @@
 //! [`RecordingManager::respond`]: first registered substring match
 //! wins, so register specific needles before general ones.
 
-use anyhow::Result;
 use oxdock_diagnostics::DiagnosticResult;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -143,7 +142,7 @@ impl oxdock_process::ProcessManager for RecordingManager {
         ctx: &oxdock_process::CommandContext,
         script: &str,
         options: oxdock_process::CommandOptions,
-    ) -> Result<oxdock_process::CommandResult<Self::Handle>> {
+    ) -> DiagnosticResult<oxdock_process::CommandResult<Self::Handle>> {
         self.record(Call::Shell(script.to_string()), ctx);
         // Scripted stdout feeds the capture sink behind `LET $x: STRING = RUN`:
         // the engine binds sink bytes, never the result value, so the
@@ -171,7 +170,7 @@ impl oxdock_process::ProcessManager for RecordingManager {
         ctx: &oxdock_process::CommandContext,
         argv: &[String],
         options: oxdock_process::CommandOptions,
-    ) -> Result<oxdock_process::CommandResult<Self::Handle>> {
+    ) -> DiagnosticResult<oxdock_process::CommandResult<Self::Handle>> {
         self.record(Call::Argv(argv.to_vec()), ctx);
         match options.stdout {
             oxdock_process::CommandStdout::Capture => Ok(oxdock_process::CommandResult::Captured(

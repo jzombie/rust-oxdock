@@ -127,16 +127,25 @@ All sites already use keyed ctors; flip signatures to
        `Diagnostic` itself and route `thread_context` plus the
        step wraps through it; the "waiting only on the span sync"
        premise in B1f/B1g is corrected accordingly.)
-- [ ] B2 `ProcessManager` trait (`contract.rs`,
+- [x] B2 `ProcessManager` trait (`contract.rs`,
       `shell_manager.rs`, `mock.rs`, `synthetic.rs`,
       `child.rs`). Flip trait to `DiagnosticResult` OR declare
       anyhow-at-the-sys-boundary permanent.
-      Decision: Split. `BackgroundHandle` flips to
-      `DiagnosticResult` inside B1 (no cycle; `builder.rs`
-      already returns it). `ProcessManager` run/spawn/argv
-      surface stays anyhow through B1; a dedicated B2 bulk
-      decides the full-trait flip versus a permanent
-      sys-boundary carrier.
+      Decision: Flip approved. Every failure mode on the run/spawn
+      surface is already keyed (`run_command_failed`,
+      `run_bg_capture_unsupported`, miri `*_unsupported_miri`,
+      `run_exec_requires_argv`, lock-poison pair); the generic
+      lifts already exist (`from_anyhow` reclaims keyed payloads
+      and names the rest `synthetic_failed`, used by `builder.rs`
+      the same way); the rest of the surface already returned
+      `DiagnosticResult` (`BackgroundHandle` per B1k,
+      `CommandBuilder`, `apply_ctx`, `direct_cmd`,
+      `spawn_child_with_streams`); only 2 core call sites
+      (`handlers.rs` spawn arms) bridge via `anyhow::Error::from`.
+      `child.rs` stays anyhow (B9 Windows-only, accept-as-is) and
+      `expand.rs` `PlaceholderCall` stays anyhow (external-crate
+      boundary per H6b), so the `anyhow` dep stays regardless:
+      Section C `oxdock-process` dep removal waits on B9.
 - [!] B3 `RemoteRunner` trait + `TransferStage`
       (`net session.rs` 36 sites, `core/remote.rs`
       `run_remote_block`). Redesign OR close as permanent
@@ -919,6 +928,52 @@ All sites already use keyed ctors; flip signatures to
   `cargo clippy --workspace --all-targets` clean (zero warnings),
   `rustfmt --edition 2024 --check` clean on touched files
   (`server.rs`, `diagnostics.rs`).
+
+- B2 (2026-11-27): `ProcessManager` trait flip.
+  `run_command`/`spawn_command`/`run_argv`/`spawn_argv`
+  (`contract.rs`) return
+  `DiagnosticResult<CommandResult<Handle>>`; the `run_argv`
+  default body drops its wrapper (`run_argv_unimplemented`
+  directly). Implementors flip with it: `ShellProcessManager`
+  (`run_command`, `run_argv`, plus `run_prepared`; wait arm
+  bridges the keyed `Diagnostic` via `anyhow::Error::from`
+  into `run_wait_failed`, byte-identical rendering),
+  `MockProcessManager` (`run_command`, `run_argv`, plus
+  `capture_stdin`), `SyntheticProcessManager` (miri-only;
+  helpers `execute_sync`/`plan_background`/`execute_argv_sync`/
+  `plan_argv_background`/`resolve_write` stay anyhow, mapped at
+  the two trait fns via the single owner
+  `proc_diag::from_anyhow`, the same lift `builder.rs` uses).
+  One new keyed ctor for the single bare site on the flipped
+  path: `run_stdin_read_failed` (`proc.run.stdin_read_failed`,
+  typed `std::io::Error` source like pty `master_read_failed`;
+  distinct from lock-poison `run_stdin_lock_failed`), with
+  distinct-key + message pins. Core holds via the A6 bridge
+  shape: both `handlers.rs` spawn arms map with
+  `&anyhow::Error::from(e)` into the `&anyhow::Error` eval
+  ctors (unchanged, byte-identical `{reason:#}` inline).
+  Test doubles flip with no assertion changes:
+  `RecordingManager`, `TtyManager` (delegation stays direct),
+  `BlockingRunner` (pure `Ok`), `FailingRunner`
+  (`bail!("simulated failure")` becomes keyed
+  `eval_dispatch_failed`, message verbatim; unused
+  `use anyhow::bail` dropped). `child.rs` untouched (B9),
+  `expand.rs` alias untouched (external boundary). anyhow
+  parents need no change (test `.expect(...)` call sites hold
+  via `Debug`). Gates: `cargo test -p oxdock-process` green
+  (121 + 0), `cargo test -p oxdock-core` green
+  (433 + 629 + 12 + 2; the two
+  `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
+  expected fixture stderr, not failures), full
+  `cargo test --workspace`: first run green everywhere except
+  the known pre-existing environmental `oxdock-fs` pid-reuse
+  flake (`lazy_resolver_bare_snapshot_selection_creates_nothing`;
+  zero B2 files touch `oxdock-fs`, suite passes 71/71 on
+  retry per the H2a precedent); clean re-run green with zero
+  failures across all suites.
+  `cargo clippy --workspace --all-targets` clean (zero
+  warnings), `rustfmt --edition 2024 --check` clean on all 9
+  touched files.
 
 - A4 (2026-11-27): public runner family. All 13 public fns
   (`core/exec/mod.rs`: `run_steps`,

@@ -636,6 +636,25 @@ pub fn run_stdin_lock_failed() -> Diagnostic {
     )
 }
 
+/// Mock stdin snapshot read failed. Takes the I/O failure;
+/// rendering lives here. The typed I/O error rides as the chained
+/// source so `Error::source` and `{err:#}` chains keep it. Distinct
+/// key from `run_stdin_lock_failed`: that names a poisoned stream
+/// lock, while this names a failed read on the live stream.
+pub fn run_stdin_read_failed(err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("failed to read mock stdin: {err_text}");
+    Diagnostic::new(
+        "proc.run.stdin_read_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        err.kind(),
+        err_text,
+    )))
+}
+
 /// Capture buffer losing the lock race. Parameterless: the wording
 /// is fixed.
 pub fn run_capture_lock_poisoned() -> Diagnostic {
@@ -688,6 +707,7 @@ mod tests {
             spawn_requires_path("prog").key(),
             spawn_requires_system_root().key(),
             run_stdin_lock_failed().key(),
+            run_stdin_read_failed(&io_err).key(),
             run_capture_lock_poisoned().key(),
             run_current_exe_failed(&io_err).key(),
             run_failed(&"echo hi", &io_err).key(),
@@ -796,6 +816,10 @@ mod tests {
         assert_eq!(
             run_failed(&"echo hi", &io_err).message(),
             "failed to run \"echo hi\": nope"
+        );
+        assert_eq!(
+            run_stdin_read_failed(&io_err).message(),
+            "failed to read mock stdin: nope"
         );
         assert_eq!(
             run_wait_failed(&"echo hi", &anyhow::anyhow!("boom")).message(),
