@@ -644,7 +644,7 @@ pub(super) fn run_remote_block<P: ProcessManager>(
     body: &[Step],
 ) -> Result<()> {
     if cx.state.io.is_remote_guest() {
-        return super::steps::execute_scoped_remote_body(
+        return Ok(super::steps::execute_scoped_remote_body(
             cx.state,
             cx.process,
             body,
@@ -654,7 +654,7 @@ pub(super) fn run_remote_block<P: ProcessManager>(
             cx.err.clone(),
             cx.out_pipe.clone(),
             cx.stdin_pipe.clone(),
-        );
+        )?);
     }
     let runner =
         cx.state.io.remote_runner(target).ok_or_else(|| {

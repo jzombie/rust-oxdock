@@ -666,8 +666,7 @@ fn finish_run<P: ProcessManager>(
         None,
         None,
         true,
-    )
-    .map_err(args::lift_dispatch_error)?;
+    )?;
     match flow {
         // Concretize on the way out so a bare pending anchor never escapes as
         // the reported final directory (shell entry / OUT_DIR sync need real

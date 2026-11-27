@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -2186,7 +2186,7 @@ pub(crate) fn with_io<P: ProcessManager>(
         resolve_io_streams(cx, bindings, cmd)?;
     let tty = tty_request(bindings, cmd)?;
 
-    super::steps::execute_single_step_with_generation(
+    Ok(super::steps::execute_single_step_with_generation(
         cx.state,
         cx.process,
         cmd,
@@ -2199,7 +2199,7 @@ pub(crate) fn with_io<P: ProcessManager>(
         out_pipe,
         stdin_pipe,
         tty,
-    )
+    )?)
 }
 
 /// Extract the pty request from `WITH_IO` bindings, enforcing the
@@ -2550,7 +2550,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
             let pop_res = cx.state.pop_scope();
             let flow = match (res, pop_res) {
                 (Ok(flow), Ok(())) => flow,
-                (Err(e), _) => return Err(super::args::lift_dispatch_error(e)),
+                (Err(e), _) => return Err(e),
                 (Ok(_), Err(e)) => return Err(e),
             };
             match flow {
@@ -2604,7 +2604,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
             let pop_res = cx.state.pop_scope();
             let flow = match (res, pop_res) {
                 (Ok(flow), Ok(())) => flow,
-                (Err(e), _) => return Err(super::args::lift_dispatch_error(e)),
+                (Err(e), _) => return Err(e),
                 (Ok(_), Err(e)) => return Err(e),
             };
             match flow {
@@ -3046,7 +3046,7 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
                 // anywhere unwraps them.)
                 let _ = cx.state.call_alias_frames.pop();
                 let _ = cx.state.func_floors.pop();
-                let flow = flow.map_err(super::args::lift_dispatch_error)?;
+                let flow = flow?;
                 match flow {
                     Flow::Done => Ok(Value::string(String::new())),
                     Flow::Return { value, .. } => Ok(value),
@@ -3134,8 +3134,7 @@ pub(crate) fn block_value<P: ProcessManager>(
             cx.out_pipe.clone(),
             cx.stdin_pipe.clone(),
             false,
-        )
-        .map_err(super::args::lift_dispatch_error)?;
+        )?;
         match flow {
             Flow::Done => Ok(Value::string(String::new())),
             Flow::Return { value, .. } => Ok(value),
@@ -3202,7 +3201,7 @@ pub(crate) fn while_loop<P: ProcessManager>(
         let pop_res = cx.state.pop_scope();
         let flow = match (res, pop_res) {
             (Ok(flow), Ok(())) => flow,
-            (Err(e), _) => return Err(super::args::lift_dispatch_error(e)),
+            (Err(e), _) => return Err(e),
             (Ok(_), Err(e)) => return Err(e),
         };
         match flow {
@@ -3388,8 +3387,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
         // A `WITH_IO [tty]` capture re-resolves its own request when the
         // inner step runs through `with_io`; ambient carriage stays empty.
         cx.tty,
-    )
-    .map_err(super::args::lift_dispatch_error)?;
+    )?;
     match flow {
         Flow::Done => {}
         Flow::Break { idx } => {
@@ -3424,7 +3422,7 @@ pub(crate) fn if_then<P: ProcessManager>(
 ) -> Result<Flow> {
     let val = super::args::evaluate_expr(cond, cx)?;
     if super::args::is_truthy(&val)? {
-        return super::steps::execute_scoped_steps(
+        return Ok(super::steps::execute_scoped_steps(
             cx.state,
             cx.process,
             then_body,
@@ -3435,12 +3433,12 @@ pub(crate) fn if_then<P: ProcessManager>(
             cx.out_pipe.clone(),
             cx.stdin_pipe.clone(),
             false,
-        );
+        )?);
     }
     for (else_cond, else_block) in else_ifs {
         let val = super::args::evaluate_expr(else_cond.as_ref(), cx)?;
         if super::args::is_truthy(&val)? {
-            return super::steps::execute_scoped_steps(
+            return Ok(super::steps::execute_scoped_steps(
                 cx.state,
                 cx.process,
                 else_block,
@@ -3451,11 +3449,11 @@ pub(crate) fn if_then<P: ProcessManager>(
                 cx.out_pipe.clone(),
                 cx.stdin_pipe.clone(),
                 false,
-            );
+            )?);
         }
     }
     if let Some(body) = else_body {
-        return super::steps::execute_scoped_steps(
+        return Ok(super::steps::execute_scoped_steps(
             cx.state,
             cx.process,
             body,
@@ -3466,7 +3464,7 @@ pub(crate) fn if_then<P: ProcessManager>(
             cx.out_pipe.clone(),
             cx.stdin_pipe.clone(),
             false,
-        );
+        )?);
     }
     Ok(Flow::Done)
 }
@@ -5574,13 +5572,7 @@ pub(crate) fn timeout<P: ProcessManager>(
         cx.stdin_pipe.clone(),
         true,
     );
-    disarm_deadline(
-        cx,
-        guard,
-        Some(*duration),
-        result.map_err(super::args::lift_dispatch_error),
-    )
-    .map_err(anyhow::Error::from)
+    disarm_deadline(cx, guard, Some(*duration), result).map_err(anyhow::Error::from)
 }
 
 /// RAII scope for `ISOLATED` bodies: snapshots the script env, clears it,
@@ -5657,7 +5649,9 @@ pub(crate) fn isolated<P: ProcessManager>(cx: &mut StepCtx<'_, P>, body: &[Step]
     // Inner steps number from the block, not the script: name the
     // boundary so `step 1: RUN ...` inside ISOLATED never reads as the
     // script's first step.
-    result.with_context(diag::eval_inside_isolated)
+    result
+        .map_err(|e| e.with_contexts(vec![diag::eval_inside_isolated().to_string()]))
+        .map_err(anyhow::Error::from)
 }
 
 /// Resolve a block allowlist against the enclosing `ISOLATED` snapshot

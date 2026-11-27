@@ -143,8 +143,7 @@ impl<P: ProcessManager> McpSession<P> {
             None,
             None,
             true,
-        )
-        .map_err(super::args::lift_dispatch_error)?;
+        )?;
         match flow {
             Flow::Done => {}
             Flow::Break { idx } => {

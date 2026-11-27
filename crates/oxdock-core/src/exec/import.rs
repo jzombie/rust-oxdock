@@ -938,7 +938,7 @@ fn ensure_module_init<P: ProcessManager>(
         let _ = cx.state.module_stack.pop();
         let inherit_names = cx.state.init_inherit_stack.pop().unwrap_or_default();
         cx.state.call_depth = saved_call_depth;
-        let flow = flow.map_err(super::args::lift_dispatch_error)?;
+        let flow = flow?;
         // Drain the init frame's top-level bindings into the shared
         // store before the scope pops: this is the module's global
         // state, visible to every module-owned function and alias.

@@ -94,7 +94,7 @@ All sites already use keyed ctors; flip signatures to
 
 ## B. Decisions (record outcome on the Decision line)
 
-- [ ] B1 `execute_steps` keystone. Settle together: `step_error`
+- [x] B1 `execute_steps` keystone. Settle together: `step_error`
       Diagnostic-native (position via `with_span` sync),
       `error_with_snapshot` renderer (`core/exec/mod.rs:168`),
       `ThreadJoinHandle::reemit_error` + panic capture
@@ -855,3 +855,38 @@ All sites already use keyed ctors; flip signatures to
   `cargo test --workspace` green with zero failures across all
   suites, `cargo clippy --workspace --all-targets` clean,
   `rustfmt --edition 2024 --check` clean on `mod.rs`.
+
+- B1l (2026-11-27): `execute_steps` keystone flip.
+  `execute_steps`, `execute_steps_inner`,
+  `execute_single_step_with_generation`, `execute_scoped_steps`,
+  `execute_scoped_remote_body`, `dispatch_flow_step`
+  (`core/exec/steps.rs`) return `DiagnosticResult`; `step_error`
+  takes/returns `Diagnostic` natively (`mut err`, `with_span`
+  innermost-wins plus `with_contexts` prepend, byte-identical
+  `step N` prefix, no anyhow chain walk). Reaper/poll goes
+  native (`failed_status: Option<Diagnostic>`,
+  `Poll::CompletedErr(Diagnostic)`, no `.into()`).
+  `dispatch_flow_step` lifts anyhow callees (`define_func`,
+  `call_func_value`, `handle_return`, `if_then`, `switch_run`,
+  `timeout`, `fail`, `isolated`, `with_io`) via the single owner
+  `args::lift_dispatch_error`; native callees pass through.
+  `execute_single_step` lifts anyhow leaves (`echo`,
+  `dispatch_async_block`, `workspace`, `run_remote_block`, `env`,
+  `inherit_env`, `copy_transfer`, `assign`, `set_var_value`).
+  Callers drop obsolete lifts (`for_loop` x2, `while_loop`,
+  `execute_call_entry`, `block_value`, `assign_capture`,
+  `import.rs`, `mcp.rs`, `mod.rs` `finish_run` now native `?`).
+  Anyhow parents hold via `From` (`with_io`, `if_then` x3 via
+  `Ok(...?)`, `run_remote_block`, `timeout`, `isolated` via native
+  `with_contexts`). Redundant `Ok(handler(...)?)` bridges stripped
+  across `steps.rs` so each arm returns the `DiagnosticResult`
+  directly. `step_error_tests` rewritten Diagnostic-native. No new
+  keys. Gates:
+  `cargo test -p oxdock-core` green (433 + 629 + 12 + 2; the two
+  `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
+  expected fixture stderr, not failures), full
+  `cargo test --workspace` green with zero failures across all
+  suites, `cargo clippy --workspace --all-targets` clean,
+  `rustfmt --edition 2024 --check` clean on touched files
+  (`steps.rs`, `handlers.rs`, `mod.rs`, `import.rs`, `mcp.rs`,
+  `remote.rs`).
