@@ -59,7 +59,7 @@ All sites already use keyed ctors; flip signatures to
       done in B5: `resolve_const_ref` propagates natively)
 
 ### A3. `core/exec/mcp.rs` (4 sites)
-- [ ] Flip with B1: `mcp_export_type_unknown`,
+- [x] Flip with B1: `mcp_export_type_unknown`,
       break/continue/return-outside
 
 ### A4. `core/exec/mod.rs` public runner API
@@ -805,3 +805,24 @@ All sites already use keyed ctors; flip signatures to
   suites, `cargo clippy --workspace --all-targets` clean,
   `rustfmt --edition 2024 --check` clean on `import.rs`,
   `handlers.rs`.
+
+- A3 (2026-11-27): mcp session init. `McpSession::init`
+  (`core/exec/mcp.rs`) returns `DiagnosticResult`; 4 outer
+  `anyhow::Error::new(mcp_diag::...)` wrappers dropped
+  (`mcp_export_type_unknown`, `mcp_break_outside_loop`,
+  `mcp_continue_outside_loop`, `mcp_return_outside_function`).
+  `execute_steps` interior (still anyhow, B1 keystone) lifts via
+  the single owner `args::lift_dispatch_error`. Already-native
+  callees pass through untouched (`new_state`,
+  `check_pre_run`, `validate_closure_for_run`,
+  `exported_metas`); `use anyhow::Result` removed (no remaining
+  `anyhow` site in the file; `std::io::Result` stays fully
+  qualified). Anyhow parents hold via `From`: `oxdock-mcp`
+  `build_inner` (still anyhow) needs no change; test callers
+  unchanged. No test changes. Gates (post-PASS):
+  `cargo test -p oxdock-core` green (433 + 629 + 12 + 2; the two
+  `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
+  expected fixture stderr, not failures), full
+  `cargo test --workspace` green with zero failures across all
+  suites, `cargo clippy --workspace --all-targets` clean,
+  `rustfmt --edition 2024 --check` clean on `mcp.rs`.
