@@ -1740,6 +1740,7 @@ dependencies = [
  "libtest-mimic",
  "line-ending",
  "oxdock-core",
+ "oxdock-diagnostics",
  "oxdock-fixture",
  "oxdock-fs",
  "oxdock-macros",

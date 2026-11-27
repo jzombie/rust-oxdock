@@ -8,6 +8,7 @@ use std::process::ExitStatus;
 use std::sync::Arc;
 
 use crate::diagnostics as proc_diag;
+use oxdock_diagnostics::DiagnosticResult;
 
 // Shared-IO handles and take-once OS pipe halves live in `oxdock-pipe`
 // (leaf crate, no cycle); re-exported here so every existing
@@ -85,10 +86,13 @@ impl CommandContext {
 }
 
 /// Handle for background processes spawned by a [`ProcessManager`].
+/// Poll and wait report keyed diagnostics (`DiagnosticResult`), so the
+/// `step N` call path rides natively via `with_contexts` instead of
+/// anyhow context layers.
 pub trait BackgroundHandle: Send {
-    fn try_wait(&mut self) -> Result<Option<ExitStatus>>;
-    fn kill(&mut self) -> Result<()>;
-    fn wait(&mut self) -> Result<ExitStatus>;
+    fn try_wait(&mut self) -> DiagnosticResult<Option<ExitStatus>>;
+    fn kill(&mut self) -> DiagnosticResult<()>;
+    fn wait(&mut self) -> DiagnosticResult<ExitStatus>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

@@ -52,10 +52,13 @@ pub(super) struct ThreadJoinHandle {
     /// Preserved error from the child thread, if any. Stored as a
     /// `Diagnostic` (`Clone` removes the flatten re-emit): key and
     /// span survive the join boundary without string flattening.
+    /// Outer frames ride separately in `thread_context` and re-attach
+    /// natively via `with_contexts` on re-emit (no anyhow layers),
+    /// so the handle crosses `DiagnosticResult` boundaries.
     thread_error: Option<Diagnostic>,
     /// Plain-text contexts captured above the reclaimed diagnostic
     /// (outer `step N` positions, call frames), outermost first.
-    /// They replay as individual anyhow layers on re-emit; the
+    /// They replay natively via `with_contexts` on re-emit; the
     /// diagnostic itself already carries its innermost position
     /// natively via `step_error`'s `with_span` sync.
     /// `ExitRequest` nodes are never captured here; the code rides in
@@ -88,17 +91,17 @@ impl ThreadJoinHandle {
         }
     }
 
-    /// Re-emit the preserved thread error. Branches on the stored
-    /// pair: a diagnostic clones directly (key, message, span, hint,
-    /// and fields survive, with an `EXIT` code chained through the
-    /// request itself only when the stored chain lacks one); a bare
-    /// exit relays as the keyed exit-requested diagnostic (code in
-    /// the field, no identical source, so `{err:#}` renders once);
-    /// neither stored means the thread vanished without an error.
-    /// Captured plain-text contexts replay outside the carrier,
-    /// innermost first, preserving individual frames.
-    fn reemit_error(&self) -> anyhow::Error {
-        let mut carrier = match (self.thread_error.clone(), self.thread_exit_code) {
+    /// Re-emit the preserved thread error as a `Diagnostic`. Branches
+    /// on the stored pair: a diagnostic clones directly (key, message,
+    /// span, hint, and fields survive, with an `EXIT` code chained
+    /// through the request itself only when the stored chain lacks
+    /// one); a bare exit relays as the keyed exit-requested diagnostic
+    /// (code in the field, no identical source); neither stored means
+    /// the thread vanished without an error. Captured plain-text
+    /// contexts replay natively via `with_contexts` (outermost first),
+    /// preserving the full call path without anyhow layers.
+    fn reemit_error(&self) -> Diagnostic {
+        let diag = match (self.thread_error.clone(), self.thread_exit_code) {
             (Some(mut diag), maybe_code) => {
                 if let Some(code) = maybe_code
                     && super::exit::exit_code_of_diag(&diag).is_none()
@@ -109,17 +112,14 @@ impl ThreadJoinHandle {
                     };
                     diag = diag.with_source(Arc::new(exit));
                 }
-                anyhow::Error::new(diag)
+                diag
             }
-            (None, Some(code)) => anyhow::Error::new(step_diag::eval_exit_requested(code)),
-            (None, None) => anyhow::Error::new(step_diag::eval_async_thread_panicked(
-                "background thread failed without an error",
-            )),
+            (None, Some(code)) => step_diag::eval_exit_requested(code),
+            (None, None) => {
+                step_diag::eval_async_thread_panicked("background thread failed without an error")
+            }
         };
-        for ctx in self.thread_context.iter().rev() {
-            carrier = carrier.context(ctx.clone());
-        }
-        carrier
+        diag.with_contexts(self.thread_context.clone())
     }
 
     /// Whether the caller is the worker thread owned by this handle.
@@ -197,7 +197,7 @@ impl ThreadJoinHandle {
 }
 
 impl BackgroundHandle for ThreadJoinHandle {
-    fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+    fn try_wait(&mut self) -> DiagnosticResult<Option<ExitStatus>> {
         if let Some(join) = &self.join {
             if join.is_finished() {
                 self.reap();
@@ -215,7 +215,7 @@ impl BackgroundHandle for ThreadJoinHandle {
         }
     }
 
-    fn kill(&mut self) -> Result<()> {
+    fn kill(&mut self) -> DiagnosticResult<()> {
         // Signal cancellation
         self.cancel_token.store(true, Ordering::SeqCst);
         // Fan out to pump supervisors waiting on the hub (blocking
@@ -232,7 +232,7 @@ impl BackgroundHandle for ThreadJoinHandle {
         Ok(())
     }
 
-    fn wait(&mut self) -> Result<ExitStatus> {
+    fn wait(&mut self) -> DiagnosticResult<ExitStatus> {
         self.reap();
         // Same chain-preserving re-emit as `try_wait` above.
         if self.thread_error.is_some() || self.thread_exit_code.is_some() {
@@ -1204,8 +1204,9 @@ fn step_error(step: &Step, idx: usize, err: anyhow::Error) -> anyhow::Error {
             // Slow path: context layers bury the diagnostic (synthetic
             // inner step with no coordinates, AWAIT re-emit frames,
             // helper-added context). Reclaim it the same lossless way
-            // `reap` does: outer non-request frames replay as text,
-            // the exit code rides typed, sources survive the clone.
+            // `reap` does: outer non-request frames replay natively via
+            // `with_contexts` (no anyhow layers), the exit code rides
+            // typed, sources survive the clone.
             if found.span().is_none() {
                 let code = super::exit::exit_code_of(&err);
                 let mut outer: Vec<String> = Vec::new();
@@ -1227,10 +1228,7 @@ fn step_error(step: &Step, idx: usize, err: anyhow::Error) -> anyhow::Error {
                     };
                     reclaimed = reclaimed.with_source(Arc::new(exit));
                 }
-                let mut carrier = anyhow::Error::new(reclaimed);
-                for ctx in outer.iter().rev() {
-                    carrier = carrier.context(ctx.clone());
-                }
+                let carrier = anyhow::Error::new(reclaimed.with_contexts(outer));
                 err = carrier;
             }
         }
@@ -1444,7 +1442,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                     }
                     Err(e) => {
                         if failed_status.is_none() {
-                            failed_status = Some(e);
+                            failed_status = Some(e.into());
                         }
                         break;
                     }
@@ -1496,7 +1494,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                         Err(e) => {
                                             let _ = guard.handle.take();
                                             guard.phase = TaskPhase::Completed;
-                                            Poll::CompletedErr(e)
+                                            Poll::CompletedErr(e.into())
                                         }
                                     },
                                     // Handle taken by a concurrent CANCEL/AWAIT
@@ -1790,7 +1788,7 @@ fn dispatch_flow_step<P: ProcessManager>(
 
 #[cfg(test)]
 mod thread_handle_tests {
-    use super::super::exit::exit_code_of;
+    use super::super::exit::{exit_code_of, exit_code_of_diag};
     use super::*;
 
     fn bare_handle(join: Option<std::thread::JoinHandle<Result<()>>>) -> ThreadJoinHandle {
@@ -1812,7 +1810,7 @@ mod thread_handle_tests {
             panic!("boom-payload");
         });
         let mut handle = bare_handle(Some(join));
-        let err = handle.wait().expect_err("panic must surface");
+        let err = anyhow::Error::new(handle.wait().expect_err("panic must surface"));
         let diag = err
             .chain()
             .find_map(|cause| cause.downcast_ref::<Diagnostic>())
@@ -1828,22 +1826,18 @@ mod thread_handle_tests {
             Err(anyhow::Error::new(leaf).context("step 2").context("step 1"))
         });
         let mut handle = bare_handle(Some(join));
-        let err = handle.wait().expect_err("wrapped failure must surface");
+        let err = anyhow::Error::new(handle.wait().expect_err("wrapped failure must surface"));
         let diag = err
             .chain()
             .find_map(|cause| cause.downcast_ref::<Diagnostic>())
             .expect("key survives context wrappers");
         assert_eq!(diag.key(), "dsl.eval.async_cancelled");
-        let frames: Vec<String> = err.chain().take(3).map(|cause| cause.to_string()).collect();
         assert_eq!(
-            frames,
-            vec![
-                "step 1".to_string(),
-                "step 2".to_string(),
-                "ASYNC task cancelled".to_string(),
-            ],
-            "each outer frame replays in order: {err:#}"
+            diag.contexts(),
+            &["step 1".to_string(), "step 2".to_string()],
+            "each outer frame replays natively in order: {err:#}"
         );
+        assert_eq!(err.to_string(), "step 1: step 2: ASYNC task cancelled");
     }
 
     #[test]
@@ -1851,12 +1845,10 @@ mod thread_handle_tests {
         let mut handle = bare_handle(None);
         handle.thread_error = Some(step_diag::eval_async_cancelled());
         handle.thread_exit_code = Some(7);
-        let err = handle.reemit_error();
+        let diag = handle.reemit_error();
+        let err = anyhow::Error::new(diag.clone());
         assert_eq!(exit_code_of(&err), Some(7));
-        let diag = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
-            .expect("key survives alongside the exit code");
+        assert_eq!(exit_code_of_diag(&diag), Some(7));
         assert_eq!(diag.key(), "dsl.eval.async_cancelled");
     }
 
@@ -1873,12 +1865,10 @@ mod thread_handle_tests {
         let mut handle = bare_handle(None);
         handle.thread_error = Some(sourced);
         handle.thread_exit_code = Some(7);
-        let err = handle.reemit_error();
+        let diag = handle.reemit_error();
+        let err = anyhow::Error::new(diag.clone());
         assert_eq!(exit_code_of(&err), Some(7));
-        let diag = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
-            .expect("key survives alongside the exit code");
+        assert_eq!(exit_code_of_diag(&diag), Some(7));
         assert_eq!(diag.key(), "dsl.eval.async_cancelled");
         let io = err
             .chain()
@@ -1901,11 +1891,8 @@ mod thread_handle_tests {
             .context("step 3"))
         });
         let mut handle = bare_handle(Some(join));
-        let err = handle.wait().expect_err("unkeyed failure must surface");
-        let diag = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
-            .expect("fallback diagnostic is produced");
+        let diag = handle.wait().expect_err("unkeyed failure must surface");
+        let err = anyhow::Error::new(diag.clone());
         assert_eq!(diag.key(), "dsl.eval.dispatch_failed");
         assert_eq!(format!("{err:#}"), "step 3: denied");
     }
@@ -1916,12 +1903,10 @@ mod thread_handle_tests {
             Err(anyhow::Error::new(super::super::exit::ExitRequest::new(7)).context("step 2"))
         });
         let mut handle = bare_handle(Some(join));
-        let err = handle.wait().expect_err("exit request must surface");
+        let diag = handle.wait().expect_err("exit request must surface");
+        let err = anyhow::Error::new(diag.clone());
         assert_eq!(exit_code_of(&err), Some(7));
-        let diag = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
-            .expect("bare exit relays as a keyed diagnostic");
+        assert_eq!(exit_code_of_diag(&diag), Some(7));
         assert_eq!(diag.key(), "dsl.eval.exit_requested");
         assert_eq!(diag.fields().get("code"), Some(&"7".to_string()));
         assert_eq!(format!("{err:#}"), "step 2: EXIT requested with code 7");

@@ -692,6 +692,7 @@ impl TaskEntry {
                     error: String::new(),
                 },
                 Err(err) => {
+                    let err = anyhow::Error::new(err);
                     let completion = TaskCompletion {
                         ok: false,
                         exit_code: exit_code_of(&err).unwrap_or(1),

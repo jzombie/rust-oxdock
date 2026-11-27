@@ -5181,7 +5181,7 @@ fn await_task_entry(
                             // terminal state below.
                             drop(guard);
                             entry.finish_teardown();
-                            return Err(err);
+                            return Err(err.into());
                         }
                     },
                     // No handle while still active: another thread took it

@@ -8,6 +8,7 @@
 //! wins, so register specific needles before general ones.
 
 use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -123,13 +124,13 @@ fn exit_success() -> std::process::ExitStatus {
 }
 
 impl oxdock_process::BackgroundHandle for RecordingHandle {
-    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
+    fn try_wait(&mut self) -> DiagnosticResult<Option<std::process::ExitStatus>> {
         Ok(Some(exit_success()))
     }
-    fn kill(&mut self) -> Result<()> {
+    fn kill(&mut self) -> DiagnosticResult<()> {
         Ok(())
     }
-    fn wait(&mut self) -> Result<std::process::ExitStatus> {
+    fn wait(&mut self) -> DiagnosticResult<std::process::ExitStatus> {
         Ok(exit_success())
     }
 }

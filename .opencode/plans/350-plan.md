@@ -415,3 +415,28 @@ All sites already use keyed ctors; flip signatures to
   19 + 11 + 4 + 1 + 5 + 3 + 15), `cargo clippy --workspace
   --all-targets` clean, `rustfmt --edition 2024 --check` clean
   on touched files.
+
+- B1k (2026-11-27): `BackgroundHandle` -> `DiagnosticResult`
+  flip. Trait methods (`try_wait`, `kill`, `wait` in
+  `contract.rs`) plus all implementors (`ChildHandle`,
+  `MockHandle`, miri `SyntheticBgHandle`, core
+  `ThreadJoinHandle`, test `BlockingHandle`, logic-tests
+  `RecordingHandle` with a new `oxdock-diagnostics` dep) return
+  keyed diagnostics. `ThreadJoinHandle::reemit_error` returns
+  `Diagnostic` directly with `thread_context` replayed via
+  native `with_contexts` (no anyhow layers);
+  `step_error`'s slow path replays outer frames the same way
+  (`reclaimed.with_contexts(outer)`), keeping the `step N`
+  text prefix byte-identical. Core poll sites bridge back with
+  `.into()` / `anyhow::Error::new(diag)` at the unflipped
+  `anyhow` boundaries; `shell_manager` wraps the wait failure
+  for `run_wait_failed`. Child wait failures return
+  `wait_failed` directly. Thread tests assert
+  `exit_code_of_diag(&diag)` alongside `exit_code_of(&err)`.
+  Gates (post-PASS execution): `cargo test --workspace` green
+  (core 432 + 629 + 12 + 2, diagnostics 12, process 121, cli
+  50 + 12, mcp 11 + 26 + 13, net-plugin 38 + 38, logic-tests
+  5 + 2 + 8 + 17 + 15 + 19 + 1 + 4 + 4 + 31 + 6 + 12 + 2 +
+  19 + 11 + 4 + 1 + 5 + 3 + 15), `cargo clippy --workspace
+  --all-targets` clean, `rustfmt --edition 2024 --check` clean
+  on touched files.

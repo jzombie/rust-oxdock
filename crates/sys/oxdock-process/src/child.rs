@@ -1,4 +1,3 @@
-use anyhow::Result;
 #[cfg(windows)]
 use std::os::windows::io::OwnedHandle;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -78,13 +77,10 @@ impl ChildHandle {
 }
 
 impl BackgroundHandle for ChildHandle {
-    fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+    fn try_wait(&mut self) -> DiagnosticResult<Option<ExitStatus>> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref mut child) = guard.child {
-            match child
-                .try_wait()
-                .map_err(|e| anyhow::Error::new(proc_diag::wait_failed(&e)))?
-            {
+            match child.try_wait().map_err(|e| proc_diag::wait_failed(&e))? {
                 Some(status) => {
                     // Same post-reap sweep as `wait`: an escapee that
                     // outlived the kill keeps the group (and the pump
@@ -121,7 +117,7 @@ impl BackgroundHandle for ChildHandle {
         }
     }
 
-    fn wait(&mut self) -> Result<ExitStatus> {
+    fn wait(&mut self) -> DiagnosticResult<ExitStatus> {
         // Take the child out of the mutex. This ensures only one thread
         // performs the blocking OS wait, preventing ECHILD from dual waitpid.
         let child_opt = {
@@ -130,9 +126,7 @@ impl BackgroundHandle for ChildHandle {
         };
 
         if let Some(mut child) = child_opt {
-            let status = child
-                .wait()
-                .map_err(|e| anyhow::Error::new(proc_diag::wait_failed(&e)))?;
+            let status = child.wait().map_err(|e| proc_diag::wait_failed(&e))?;
             // Re-acquire lock to store result and join IO threads.
             // Output pumps only: the stdin feeder is detached in `new`
             // since its producer may outlive the child.
@@ -164,7 +158,7 @@ impl BackgroundHandle for ChildHandle {
         }
     }
 
-    fn kill(&mut self) -> Result<()> {
+    fn kill(&mut self) -> DiagnosticResult<()> {
         let pid = self.pid.load(Ordering::SeqCst);
         if pid == 0 {
             return Ok(());
@@ -212,7 +206,7 @@ fn kill_tree(pid: u32) {
 /// matching Unix, where a post-reap kill is a no-op.
 #[cfg(windows)]
 #[allow(clippy::disallowed_types)]
-fn assign_job(child: &Child) -> Result<OwnedHandle> {
+fn assign_job(child: &Child) -> anyhow::Result<OwnedHandle> {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
 

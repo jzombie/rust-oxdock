@@ -15,6 +15,7 @@ use crate::contract::{
 };
 use crate::diagnostics as proc_diag;
 use crate::expand::expand_with_lookup;
+use oxdock_diagnostics::DiagnosticResult;
 
 #[cfg(miri)]
 #[derive(Clone, Default)]
@@ -40,7 +41,7 @@ enum Action {
 
 #[cfg(miri)]
 impl BackgroundHandle for SyntheticBgHandle {
-    fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+    fn try_wait(&mut self) -> DiagnosticResult<Option<ExitStatus>> {
         if self.killed {
             self.applied = true;
             return Ok(Some(self.status));
@@ -56,7 +57,7 @@ impl BackgroundHandle for SyntheticBgHandle {
         self.last_polled = now;
 
         if self.remaining.is_zero() {
-            apply_actions(&self.ctx, &self.actions)?;
+            apply_actions(&self.ctx, &self.actions).map_err(proc_diag::from_anyhow)?;
             self.applied = true;
             Ok(Some(self.status))
         } else {
@@ -64,12 +65,12 @@ impl BackgroundHandle for SyntheticBgHandle {
         }
     }
 
-    fn kill(&mut self) -> Result<()> {
+    fn kill(&mut self) -> DiagnosticResult<()> {
         self.killed = true;
         Ok(())
     }
 
-    fn wait(&mut self) -> Result<ExitStatus> {
+    fn wait(&mut self) -> DiagnosticResult<ExitStatus> {
         if self.killed {
             self.applied = true;
             return Ok(self.status);
@@ -78,7 +79,7 @@ impl BackgroundHandle for SyntheticBgHandle {
             if !self.remaining.is_zero() {
                 std::thread::sleep(self.remaining);
             }
-            apply_actions(&self.ctx, &self.actions)?;
+            apply_actions(&self.ctx, &self.actions).map_err(proc_diag::from_anyhow)?;
             self.applied = true;
         }
         Ok(self.status)

@@ -11,6 +11,7 @@ use crate::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStderr,
     CommandStdin, CommandStdout, ProcessManager,
 };
+use oxdock_diagnostics::DiagnosticResult;
 
 /// Which stderr configuration an invocation carried. A discriminant rather
 /// than the raw `CommandStderr` so the captured calls stay `PartialEq`/`Eq`
@@ -314,7 +315,7 @@ pub struct MockHandle {
 }
 
 impl BackgroundHandle for MockHandle {
-    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
+    fn try_wait(&mut self) -> DiagnosticResult<Option<std::process::ExitStatus>> {
         if self.remaining == 0 {
             self.reaped = true;
             Ok(Some(self.status))
@@ -324,7 +325,7 @@ impl BackgroundHandle for MockHandle {
         }
     }
 
-    fn kill(&mut self) -> Result<()> {
+    fn kill(&mut self) -> DiagnosticResult<()> {
         self.reaped = true;
         self.killed
             .lock()
@@ -333,7 +334,7 @@ impl BackgroundHandle for MockHandle {
         Ok(())
     }
 
-    fn wait(&mut self) -> Result<std::process::ExitStatus> {
+    fn wait(&mut self) -> DiagnosticResult<std::process::ExitStatus> {
         self.reaped = true;
         Ok(self.status)
     }

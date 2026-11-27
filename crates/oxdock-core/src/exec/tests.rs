@@ -3662,7 +3662,7 @@ impl ProcessManager for BlockingRunner {
 }
 
 impl BackgroundHandle for BlockingHandle {
-    fn try_wait(&mut self) -> Result<Option<ExitStatus>, anyhow::Error> {
+    fn try_wait(&mut self) -> oxdock_diagnostics::DiagnosticResult<Option<ExitStatus>> {
         let (lock, _) = &*self.state;
         if *lock.lock().unwrap() {
             Ok(Some(exit_status_from_code(137)))
@@ -3671,7 +3671,7 @@ impl BackgroundHandle for BlockingHandle {
         }
     }
 
-    fn kill(&mut self) -> Result<(), anyhow::Error> {
+    fn kill(&mut self) -> oxdock_diagnostics::DiagnosticResult<()> {
         self.kills.lock().unwrap().push(self.script.clone());
         let (lock, cvar) = &*self.state;
         *lock.lock().unwrap() = true;
@@ -3679,7 +3679,7 @@ impl BackgroundHandle for BlockingHandle {
         Ok(())
     }
 
-    fn wait(&mut self) -> Result<ExitStatus, anyhow::Error> {
+    fn wait(&mut self) -> oxdock_diagnostics::DiagnosticResult<ExitStatus> {
         let (lock, cvar) = &*self.state;
         let mut done = lock.lock().unwrap();
         while !*done {

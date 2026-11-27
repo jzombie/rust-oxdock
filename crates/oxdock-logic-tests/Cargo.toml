@@ -25,6 +25,7 @@ anyhow.workspace = true
 cargo_metadata = "0.23"
 libtest-mimic.workspace = true
 oxdock-core.workspace = true
+oxdock-diagnostics.workspace = true
 oxdock-fixture.workspace = true
 oxdock-fs.workspace = true
 oxdock-parser.workspace = true

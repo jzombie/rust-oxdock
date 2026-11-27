@@ -139,9 +139,10 @@ fn run_prepared(
         CommandMode::Foreground => {
             let mut handle =
                 spawn_child_with_streams(command, stdin_stream, stdout_stream, stderr_stream)?;
-            let status = handle
-                .wait()
-                .map_err(|err| anyhow::Error::new(proc_diag::run_wait_failed(&*command, &err)))?;
+            let status = handle.wait().map_err(|err| {
+                let reason = anyhow::Error::new(err);
+                anyhow::Error::new(proc_diag::run_wait_failed(&*command, &reason))
+            })?;
             if !status.success() {
                 return Err(anyhow::Error::new(proc_diag::run_command_failed(
                     &*command, &status,
