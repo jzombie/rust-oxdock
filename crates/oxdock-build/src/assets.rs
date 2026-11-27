@@ -626,7 +626,7 @@ pub fn stage_materialize(
 
     resolver
         .copy_dir_from_unguarded(final_external, &stage)
-        .map_err(|e| build_diag::stage_copy_failed(&e))?;
+        .map_err(|e| build_diag::stage_copy_failed(&anyhow::Error::from(e)))?;
     for marker in SANDBOX_MARKERS {
         let marker_path = stage.join(marker).map_err(build_diag::from_anyhow)?;
         if resolver.entry_kind(&marker_path).is_ok() {
@@ -674,9 +674,7 @@ pub fn sync_tree(
                 sync_tree(resolver, &src_child, &dst_child)?;
             }
             _ => {
-                resolver
-                    .copy_file(&src_child, &dst_child)
-                    .map_err(build_diag::from_anyhow)?;
+                resolver.copy_file(&src_child, &dst_child)?;
             }
         }
     }

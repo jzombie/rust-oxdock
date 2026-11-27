@@ -321,7 +321,7 @@ impl WorkspaceFs for EmbeddedFiles {
     }
 
     fn copy_file(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<u64> {
-        self.inner.copy_file(src, dst)
+        Ok(self.inner.copy_file(src, dst)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -331,7 +331,7 @@ impl WorkspaceFs for EmbeddedFiles {
 
     #[allow(clippy::disallowed_types)]
     fn copy_file_from_unguarded(&self, src: &UnguardedPath, dst: &GuardedPath) -> Result<u64> {
-        self.inner.copy_file_from_unguarded(src, dst)
+        Ok(self.inner.copy_file_from_unguarded(src, dst)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -340,12 +340,12 @@ impl WorkspaceFs for EmbeddedFiles {
     }
 
     fn copy_dir_recursive(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
-        self.inner.copy_dir_recursive(src, dst)
+        Ok(self.inner.copy_dir_recursive(src, dst)?)
     }
 
     #[allow(clippy::disallowed_types)]
     fn copy_dir_from_unguarded(&self, src: &UnguardedPath, dst: &GuardedPath) -> Result<()> {
-        self.inner.copy_dir_from_unguarded(src, dst)
+        Ok(self.inner.copy_dir_from_unguarded(src, dst)?)
     }
 
     fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {

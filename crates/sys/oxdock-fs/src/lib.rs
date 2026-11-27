@@ -540,7 +540,7 @@ impl WorkspaceFs for PathResolver {
     }
 
     fn copy_file(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<u64> {
-        PathResolver::copy_file(self, src, dst)
+        Ok(PathResolver::copy_file(self, src, dst)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -551,7 +551,7 @@ impl WorkspaceFs for PathResolver {
 
     #[allow(clippy::disallowed_types)]
     fn copy_file_from_unguarded(&self, src: &UnguardedPath, dst: &GuardedPath) -> Result<u64> {
-        PathResolver::copy_file_from_unguarded(self, src, dst)
+        Ok(PathResolver::copy_file_from_unguarded(self, src, dst)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -561,12 +561,12 @@ impl WorkspaceFs for PathResolver {
     }
 
     fn copy_dir_recursive(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
-        PathResolver::copy_dir_recursive(self, src, dst)
+        Ok(PathResolver::copy_dir_recursive(self, src, dst)?)
     }
 
     #[allow(clippy::disallowed_types)]
     fn copy_dir_from_unguarded(&self, src: &UnguardedPath, dst: &GuardedPath) -> Result<()> {
-        PathResolver::copy_dir_from_unguarded(self, src, dst)
+        Ok(PathResolver::copy_dir_from_unguarded(self, src, dst)?)
     }
 
     fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {

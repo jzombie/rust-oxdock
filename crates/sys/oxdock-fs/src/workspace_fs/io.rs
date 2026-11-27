@@ -789,12 +789,9 @@ impl PathResolver {
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_methods)]
     pub fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<()> {
-        let guarded_src = self
-            .recheck_resolved_source(src)
-            .map_err(fs_diag::from_anyhow)
-            .map_err(|diag| {
-                diag.with_contexts(vec![format!("symlink source denied for {}", src.display())])
-            })?;
+        let guarded_src = self.recheck_resolved_source(src).map_err(|diag| {
+            diag.with_contexts(vec![format!("symlink source denied for {}", src.display())])
+        })?;
         let guarded_dst = self
             .check_access(dst.as_path(), AccessMode::Write)
             .map_err(fs_diag::from_anyhow)
@@ -870,12 +867,9 @@ impl PathResolver {
 
     #[cfg(miri)]
     pub fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<()> {
-        let guarded_src = self
-            .recheck_resolved_source(src)
-            .map_err(fs_diag::from_anyhow)
-            .map_err(|diag| {
-                diag.with_contexts(vec![format!("symlink source denied for {}", src.display())])
-            })?;
+        let guarded_src = self.recheck_resolved_source(src).map_err(|diag| {
+            diag.with_contexts(vec![format!("symlink source denied for {}", src.display())])
+        })?;
         let guarded_dst = self
             .check_access_with_root(self.effective_root(), dst.as_path(), AccessMode::Write)
             .map_err(fs_diag::from_anyhow)

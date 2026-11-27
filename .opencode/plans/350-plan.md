@@ -1415,3 +1415,45 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   `cargo clippy --workspace --all-targets` clean (zero warnings),
   `rustfmt --edition 2024 --check` clean on all 4 touched
   files (`backend.rs`, `io.rs`, `install.rs`, `resolve.rs`).
+
+- B4d (2026-11-27): fs copy cluster (fourth B4 conversion
+  bulk). `entry_kind_follow_symlink`, `recheck_resolved_source`,
+  `copy_file` x2, `copy_dir_recursive` x2,
+  `copy_dir_from_unguarded`, `copy_file_from_unguarded`
+  (`copy.rs`) return `DiagnosticResult`. Transitional lift
+  throughout, no new typed ctors: still-anyhow interiors
+  (`check_access`, `check_access_with_root`,
+  `GuardedPath::new`) lift via the single owner `from_anyhow`
+  with native `with_contexts` frames preserving every historic
+  context string byte-identical; already-keyed
+  `anyhow::Error::new(fs_diag::unsupported_file_type)` returns
+  the diagnostic directly; bare `std::io` sites
+  (`fs::metadata`, `fs::read_dir`, entry/`file_type`,
+  `fs::create_dir_all`, `fs::copy`) lift through two private
+  helpers (`lift_io_err`/`lift_io_ctx`: `anyhow::Error::from`
+  transport into `from_anyhow`, historic string replayed
+  natively), mirroring `backend.rs`, so the eventual typed-ctor
+  migration touches one place per file. Already-native callees
+  (`recheck_resolved_source`, `create_dir_all`,
+  `entry_kind_follow_symlink`, `copy_*` recursion, backend
+  read/write/listing) attach frames straight onto the returned
+  `Diagnostic`, never round-tripping through `anyhow` (B4c
+  lesson). `WorkspaceFs` trait surface stays anyhow: `lib.rs`
+  impls bridge via `Ok(...?)` (A1 pattern); render
+  `EmbeddedFiles` delegation bridges the same way (4 sites).
+  Cascade callers updated minimally: `io.rs` `symlink` x2 and
+  `install.rs` drop the obsolete `.map_err(from_anyhow)` on
+  `recheck_resolved_source` (now native passthrough); build
+  `assets.rs` `sync_tree` drops the now-useless
+  `.map_err(from_anyhow)` on `copy_file` to native `?`, and
+  `stage_materialize` bridges the `&anyhow::Error`
+  `stage_copy_failed` ctor via `&anyhow::Error::from(e)` (A4/B2
+  shape, byte-identical `{reason:#}`).
+  Gates: `cargo test -p oxdock-fs` green (72 + 8 + 4 + 1),
+  `cargo test -p oxdock-core --lib` green (433), `cargo test
+  -p oxdock-build` green (27 + 4 + 0), full `cargo test
+  --workspace` green (93 targets, 2715 passed, 0 failed),
+  `cargo clippy --workspace --all-targets` clean (zero warnings),
+  `rustfmt --edition 2024 --check` clean on all 6 touched
+  files (`copy.rs`, `lib.rs`, `io.rs`, `install.rs`,
+  `assets.rs`, `embedded.rs`).

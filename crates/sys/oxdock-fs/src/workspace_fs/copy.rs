@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 use std::fs;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::path::Path;
@@ -10,13 +10,31 @@ use crate::diagnostics as fs_diag;
 #[allow(clippy::disallowed_types)]
 use crate::UnguardedPath;
 
+/// Transitional lift for bare `std::io` failures (B4d): `anyhow` is
+/// only the transport into the single owner `from_anyhow`, with the
+/// historic context string replayed natively via `with_contexts`.
+/// Mirrors the `backend.rs` helpers; confined here so the eventual
+/// typed-ctor migration touches one place, not every call site.
+fn lift_io_err(err: std::io::Error) -> Diagnostic {
+    fs_diag::from_anyhow(anyhow::Error::from(err))
+}
+
+/// Context-carrying form of [`lift_io_err`]: the historic
+/// `.with_context(|| ...)` string lands as one native frame.
+fn lift_io_ctx(err: std::io::Error, ctx: String) -> Diagnostic {
+    lift_io_err(err).with_contexts(vec![ctx])
+}
+
 enum CopyEntryKind {
     Dir,
     File,
 }
 
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-fn entry_kind_follow_symlink(file_type: &fs::FileType, src_path: &Path) -> Result<CopyEntryKind> {
+fn entry_kind_follow_symlink(
+    file_type: &fs::FileType,
+    src_path: &Path,
+) -> DiagnosticResult<CopyEntryKind> {
     if file_type.is_dir() {
         return Ok(CopyEntryKind::Dir);
     }
@@ -24,7 +42,7 @@ fn entry_kind_follow_symlink(file_type: &fs::FileType, src_path: &Path) -> Resul
         return Ok(CopyEntryKind::File);
     }
     if file_type.is_symlink() {
-        let meta = fs::metadata(src_path)?;
+        let meta = fs::metadata(src_path).map_err(lift_io_err)?;
         if meta.is_dir() {
             return Ok(CopyEntryKind::Dir);
         }
@@ -32,7 +50,7 @@ fn entry_kind_follow_symlink(file_type: &fs::FileType, src_path: &Path) -> Resul
             return Ok(CopyEntryKind::File);
         }
     }
-    Err(anyhow::Error::new(fs_diag::unsupported_file_type(src_path)))
+    Err(fs_diag::unsupported_file_type(src_path))
 }
 
 // Copy helpers for guarded and external sources.
@@ -47,7 +65,10 @@ impl PathResolver {
     /// effective-root and build-context fallbacks stay last. Shared by
     /// COPY and SYMLINK.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    pub(crate) fn recheck_resolved_source(&self, src: &GuardedPath) -> Result<GuardedPath> {
+    pub(crate) fn recheck_resolved_source(
+        &self,
+        src: &GuardedPath,
+    ) -> DiagnosticResult<GuardedPath> {
         let root_guard =
             GuardedPath::from_guarded_parts(src.root().to_path_buf(), src.root().to_path_buf());
         if let Ok(guarded) =
@@ -62,17 +83,24 @@ impl PathResolver {
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, src.as_path(), AccessMode::Read)
             })
+            .map_err(fs_diag::from_anyhow)
     }
 
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_methods)]
-    pub fn copy_file(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<u64> {
+    pub fn copy_file(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<u64> {
         let guarded_dst = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .with_context(|| format!("copy destination denied for {}", dst.display()))?;
-        let guarded_src = self
-            .recheck_resolved_source(src)
-            .with_context(|| format!("copy source denied for {}", src.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "copy destination denied for {}",
+                    dst.display()
+                )])
+            })?;
+        let guarded_src = self.recheck_resolved_source(src).map_err(|diag| {
+            diag.with_contexts(vec![format!("copy source denied for {}", src.display())])
+        })?;
         if let Some(parent) = guarded_dst.as_path().parent() {
             // Defer validation to `create_dir_all`'s own checks: the
             // parent of a directory destination (e.g. `COPY file .`)
@@ -82,27 +110,37 @@ impl PathResolver {
                 guarded_dst.root().to_path_buf(),
                 parent.to_path_buf(),
             );
-            self.create_dir_all(&parent_guard)
-                .with_context(|| format!("creating dir {}", parent.display()))?;
+            self.create_dir_all(&parent_guard).map_err(|diag| {
+                diag.with_contexts(vec![format!("creating dir {}", parent.display())])
+            })?;
         }
-        let n = fs::copy(guarded_src.as_path(), guarded_dst.as_path()).with_context(|| {
-            format!(
-                "copying {} to {}",
-                guarded_src.display(),
-                guarded_dst.display()
+        let n = fs::copy(guarded_src.as_path(), guarded_dst.as_path()).map_err(|e| {
+            lift_io_ctx(
+                e,
+                format!(
+                    "copying {} to {}",
+                    guarded_src.display(),
+                    guarded_dst.display()
+                ),
             )
         })?;
         Ok(n)
     }
 
     #[cfg(miri)]
-    pub fn copy_file(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<u64> {
+    pub fn copy_file(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<u64> {
         let guarded_dst = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .with_context(|| format!("copy destination denied for {}", dst.display()))?;
-        let guarded_src = self
-            .recheck_resolved_source(src)
-            .with_context(|| format!("copy source denied for {}", src.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "copy destination denied for {}",
+                    dst.display()
+                )])
+            })?;
+        let guarded_src = self.recheck_resolved_source(src).map_err(|diag| {
+            diag.with_contexts(vec![format!("copy source denied for {}", src.display())])
+        })?;
         // Backend-direct I/O: both guards were validated above, so this
         // must not route through the re-validating `read_file`/`write_file`
         // trait paths (which only know the current selection).
@@ -114,33 +152,49 @@ impl PathResolver {
     #[allow(clippy::disallowed_methods)]
     #[allow(clippy::only_used_in_recursion)]
     #[cfg(not(miri))]
-    pub fn copy_dir_recursive(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
+    pub fn copy_dir_recursive(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<()> {
         let guarded_dst_root = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .with_context(|| format!("copy destination denied for {}", dst.display()))?;
-        self.create_dir_all(&guarded_dst_root)
-            .with_context(|| format!("creating dir {}", guarded_dst_root.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "copy destination denied for {}",
+                    dst.display()
+                )])
+            })?;
+        self.create_dir_all(&guarded_dst_root).map_err(|diag| {
+            diag.with_contexts(vec![format!("creating dir {}", guarded_dst_root.display())])
+        })?;
 
-        for entry in fs::read_dir(src.as_path())? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
+        for entry in fs::read_dir(src.as_path()).map_err(lift_io_err)? {
+            let entry = entry.map_err(lift_io_err)?;
+            let file_type = entry.file_type().map_err(lift_io_err)?;
             let src_path = entry.path();
             let dst_path = guarded_dst_root.as_path().join(entry.file_name());
 
             let entry_guard =
                 GuardedPath::from_guarded_parts(src.root().to_path_buf(), src_path.clone());
-            let guarded_src = self
-                .recheck_resolved_source(&entry_guard)
-                .with_context(|| format!("copy source denied for {}", src_path.display()))?;
-
+            let guarded_src = self.recheck_resolved_source(&entry_guard).map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "copy source denied for {}",
+                    src_path.display()
+                )])
+            })?;
             let guarded_dst = self
                 .check_access(&dst_path, AccessMode::Write)
-                .with_context(|| format!("copy destination denied for {}", dst_path.display()))?;
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
+                        "copy destination denied for {}",
+                        dst_path.display()
+                    )])
+                })?;
 
             match entry_kind_follow_symlink(&file_type, &src_path)? {
                 CopyEntryKind::Dir => {
-                    self.create_dir_all(&guarded_dst)
-                        .with_context(|| format!("creating dir {}", guarded_dst.display()))?;
+                    self.create_dir_all(&guarded_dst).map_err(|diag| {
+                        diag.with_contexts(vec![format!("creating dir {}", guarded_dst.display())])
+                    })?;
                     self.copy_dir_recursive(&guarded_src, &guarded_dst)?;
                 }
                 CopyEntryKind::File => {
@@ -152,14 +206,18 @@ impl PathResolver {
                             guarded_dst.root().to_path_buf(),
                             parent.to_path_buf(),
                         );
-                        self.create_dir_all(&parent_guard)
-                            .with_context(|| format!("creating dir {}", parent.display()))?;
+                        self.create_dir_all(&parent_guard).map_err(|diag| {
+                            diag.with_contexts(vec![format!("creating dir {}", parent.display())])
+                        })?;
                     }
-                    fs::copy(guarded_src.as_path(), guarded_dst.as_path()).with_context(|| {
-                        format!(
-                            "copying {} to {}",
-                            guarded_src.display(),
-                            guarded_dst.display()
+                    fs::copy(guarded_src.as_path(), guarded_dst.as_path()).map_err(|e| {
+                        lift_io_ctx(
+                            e,
+                            format!(
+                                "copying {} to {}",
+                                guarded_src.display(),
+                                guarded_dst.display()
+                            ),
                         )
                     })?;
                 }
@@ -169,33 +227,48 @@ impl PathResolver {
     }
 
     #[cfg(miri)]
-    pub fn copy_dir_recursive(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
+    pub fn copy_dir_recursive(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<()> {
         let guarded_dst_root = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .with_context(|| format!("copy destination denied for {}", dst.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "copy destination denied for {}",
+                    dst.display()
+                )])
+            })?;
         self.create_dir_all(&guarded_dst_root)?;
 
         // Backend-direct listing: `src` was validated by the caller, so
         // this must not route through the re-validating `read_dir_entries`
         // trait path (which only knows the current selection).
         for entry in self.backend.read_dir_entries(src)? {
-            let file_type = entry.file_type()?;
+            let file_type = entry.file_type().map_err(lift_io_err)?;
             let src_path = entry.path();
             let dst_path = guarded_dst_root.as_path().join(entry.file_name());
 
             let entry_guard =
                 GuardedPath::from_guarded_parts(src.root().to_path_buf(), src_path.clone());
-            let guarded_src = self
-                .recheck_resolved_source(&entry_guard)
-                .with_context(|| format!("copy source denied for {}", src_path.display()))?;
-
+            let guarded_src = self.recheck_resolved_source(&entry_guard).map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "copy source denied for {}",
+                    src_path.display()
+                )])
+            })?;
             let guarded_dst = self
                 .check_access(&dst_path, AccessMode::Write)
-                .with_context(|| format!("copy destination denied for {}", dst_path.display()))?;
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
+                        "copy destination denied for {}",
+                        dst_path.display()
+                    )])
+                })?;
 
             if file_type.is_dir() {
-                self.create_dir_all(&guarded_dst)
-                    .with_context(|| format!("creating dir {}", guarded_dst.display()))?;
+                self.create_dir_all(&guarded_dst).map_err(|diag| {
+                    diag.with_contexts(vec![format!("creating dir {}", guarded_dst.display())])
+                })?;
                 self.copy_dir_recursive(&guarded_src, &guarded_dst)?;
             } else {
                 if let Some(parent) = guarded_dst.as_path().parent() {
@@ -206,8 +279,9 @@ impl PathResolver {
                         guarded_dst.root().to_path_buf(),
                         parent.to_path_buf(),
                     );
-                    self.create_dir_all(&parent_guard)
-                        .with_context(|| format!("creating dir {}", parent_guard.display()))?;
+                    self.create_dir_all(&parent_guard).map_err(|diag| {
+                        diag.with_contexts(vec![format!("creating dir {}", parent_guard.display())])
+                    })?;
                 }
                 self.copy_file(&guarded_src, &guarded_dst)?;
             }
@@ -216,35 +290,51 @@ impl PathResolver {
     }
 
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-    pub fn copy_dir_from_unguarded(&self, src: &UnguardedPath, dst: &GuardedPath) -> Result<()> {
+    pub fn copy_dir_from_unguarded(
+        &self,
+        src: &UnguardedPath,
+        dst: &GuardedPath,
+    ) -> DiagnosticResult<()> {
         let guarded_dst_root = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .with_context(|| format!("copy destination denied for {}", dst.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "copy destination denied for {}",
+                    dst.display()
+                )])
+            })?;
         fs::create_dir_all(guarded_dst_root.as_path())
-            .with_context(|| format!("creating dir {}", guarded_dst_root.display()))?;
+            .map_err(|e| lift_io_ctx(e, format!("creating dir {}", guarded_dst_root.display())))?;
 
-        for entry in fs::read_dir(src.as_path())? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
+        for entry in fs::read_dir(src.as_path()).map_err(lift_io_err)? {
+            let entry = entry.map_err(lift_io_err)?;
+            let file_type = entry.file_type().map_err(lift_io_err)?;
             let src_path = entry.path();
             let dst_path = guarded_dst_root.as_path().join(entry.file_name());
 
             match entry_kind_follow_symlink(&file_type, &src_path)? {
                 CopyEntryKind::Dir => {
-                    fs::create_dir_all(&dst_path)
-                        .with_context(|| format!("creating dir {}", dst_path.display()))?;
+                    fs::create_dir_all(&dst_path).map_err(|e| {
+                        lift_io_ctx(e, format!("creating dir {}", dst_path.display()))
+                    })?;
                     self.copy_dir_from_unguarded(
                         &UnguardedPath::external(src_path),
-                        &GuardedPath::new(guarded_dst_root.root(), &dst_path)?,
+                        &GuardedPath::new(guarded_dst_root.root(), &dst_path)
+                            .map_err(fs_diag::from_anyhow)?,
                     )?;
                 }
                 CopyEntryKind::File => {
                     if let Some(parent) = dst_path.parent() {
-                        fs::create_dir_all(parent)
-                            .with_context(|| format!("creating dir {}", parent.display()))?;
+                        fs::create_dir_all(parent).map_err(|e| {
+                            lift_io_ctx(e, format!("creating dir {}", parent.display()))
+                        })?;
                     }
-                    fs::copy(&src_path, &dst_path).with_context(|| {
-                        format!("copying {} to {}", src_path.display(), dst_path.display())
+                    fs::copy(&src_path, &dst_path).map_err(|e| {
+                        lift_io_ctx(
+                            e,
+                            format!("copying {} to {}", src_path.display(), dst_path.display()),
+                        )
                     })?;
                 }
             }
@@ -253,19 +343,32 @@ impl PathResolver {
     }
 
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-    pub fn copy_file_from_unguarded(&self, src: &UnguardedPath, dst: &GuardedPath) -> Result<u64> {
+    pub fn copy_file_from_unguarded(
+        &self,
+        src: &UnguardedPath,
+        dst: &GuardedPath,
+    ) -> DiagnosticResult<u64> {
         let guarded_dst = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .with_context(|| format!("copy destination denied for {}", dst.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "copy destination denied for {}",
+                    dst.display()
+                )])
+            })?;
         if let Some(parent) = guarded_dst.as_path().parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("creating dir {}", parent.display()))?;
+                .map_err(|e| lift_io_ctx(e, format!("creating dir {}", parent.display())))?;
         }
-        let n = fs::copy(src.as_path(), guarded_dst.as_path()).with_context(|| {
-            format!(
-                "copying {} to {}",
-                src.as_path().display(),
-                guarded_dst.display()
+        let n = fs::copy(src.as_path(), guarded_dst.as_path()).map_err(|e| {
+            lift_io_ctx(
+                e,
+                format!(
+                    "copying {} to {}",
+                    src.as_path().display(),
+                    guarded_dst.display()
+                ),
             )
         })?;
         Ok(n)

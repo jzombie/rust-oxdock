@@ -31,12 +31,9 @@ impl PathResolver {
                     dst.display()
                 )])
             })?;
-        let guarded_src = self
-            .recheck_resolved_source(src)
-            .map_err(fs_diag::from_anyhow)
-            .map_err(|diag| {
-                diag.with_contexts(vec![format!("install source denied for {}", src.display())])
-            })?;
+        let guarded_src = self.recheck_resolved_source(src).map_err(|diag| {
+            diag.with_contexts(vec![format!("install source denied for {}", src.display())])
+        })?;
         #[cfg(miri)]
         {
             let data = self
