@@ -258,7 +258,12 @@ pub trait WorkspaceFs: Send + Sync {
     /// Atomically place `src` at `dst` with unix `mode` (`INSTALL` passes
     /// `0o755`). Stages as a temp file in the dest dir, sets the mode,
     /// then renames, so the final path never carries the wrong mode.
-    fn install_file_atomic(&self, src: &GuardedPath, dst: &GuardedPath, mode: u32) -> Result<()>;
+    fn install_file_atomic(
+        &self,
+        src: &GuardedPath,
+        dst: &GuardedPath,
+        mode: u32,
+    ) -> oxdock_diagnostics::DiagnosticResult<()>;
 
     fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()>;
 
@@ -564,7 +569,12 @@ impl WorkspaceFs for PathResolver {
         PathResolver::symlink(self, src, dst)
     }
 
-    fn install_file_atomic(&self, src: &GuardedPath, dst: &GuardedPath, mode: u32) -> Result<()> {
+    fn install_file_atomic(
+        &self,
+        src: &GuardedPath,
+        dst: &GuardedPath,
+        mode: u32,
+    ) -> oxdock_diagnostics::DiagnosticResult<()> {
         PathResolver::install_file_atomic(self, src, dst, mode)
     }
 

@@ -1,7 +1,8 @@
-use anyhow::{Context, Result};
+use oxdock_diagnostics::DiagnosticResult;
 
 use super::{AccessMode, PathResolver};
 use crate::GuardedPath;
+use crate::diagnostics as fs_diag;
 
 // Guarded atomic-install helper: places an already-verified binary with
 // executable modes. Ordering is load-bearing: `ensure_parent_dir` first,
@@ -19,18 +20,32 @@ impl PathResolver {
         src: &GuardedPath,
         dst: &GuardedPath,
         mode: u32,
-    ) -> Result<()> {
-        self.ensure_parent_dir(dst)?;
+    ) -> DiagnosticResult<()> {
+        self.ensure_parent_dir(dst).map_err(fs_diag::from_anyhow)?;
         let guarded_dst = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .with_context(|| format!("install destination denied for {}", dst.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "install destination denied for {}",
+                    dst.display()
+                )])
+            })?;
         let guarded_src = self
             .recheck_resolved_source(src)
-            .with_context(|| format!("install source denied for {}", src.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("install source denied for {}", src.display())])
+            })?;
         #[cfg(miri)]
         {
-            let data = self.backend.read_file(&guarded_src)?;
-            self.backend.write_file(&guarded_dst, &data)?;
+            let data = self
+                .backend
+                .read_file(&guarded_src)
+                .map_err(fs_diag::from_anyhow)?;
+            self.backend
+                .write_file(&guarded_dst, &data)
+                .map_err(fs_diag::from_anyhow)?;
             let _ = mode;
             Ok(())
         }
@@ -47,26 +62,35 @@ impl PathResolver {
         src: &GuardedPath,
         dst: &GuardedPath,
         mode: u32,
-    ) -> Result<()> {
-        let data = self.backend.read_file(src)?;
+    ) -> DiagnosticResult<()> {
+        let data = self.backend.read_file(src).map_err(fs_diag::from_anyhow)?;
         let parent = dst
             .as_path()
             .parent()
-            .with_context(|| format!("install destination has no parent: {}", dst.display()))?;
-        let staged = stage_bytes_in_dir(parent, &data)
-            .with_context(|| format!("staging install payload in {}", parent.display()))?;
+            .ok_or_else(|| fs_diag::install_no_parent(dst))?;
+        let staged = stage_bytes_in_dir(parent, &data).map_err(|diag| {
+            diag.with_contexts(vec![format!(
+                "staging install payload in {}",
+                parent.display()
+            )])
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(mode))
-                .with_context(|| format!("failed to set mode on {}", staged.display()))?;
+                .map_err(|err| fs_diag::install_set_mode_failed(&staged, &err))?;
         }
         #[cfg(not(unix))]
         {
             let _ = mode;
         }
-        rename_staged_into_place(&staged, dst.as_path())
-            .with_context(|| format!("placing {} as {}", staged.display(), dst.display()))?;
+        rename_staged_into_place(&staged, dst.as_path()).map_err(|diag| {
+            diag.with_contexts(vec![format!(
+                "placing {} as {}",
+                staged.display(),
+                dst.display()
+            )])
+        })?;
         Ok(())
     }
 }
@@ -77,7 +101,7 @@ impl PathResolver {
 /// reservation atomic; a failed attempt cleans up its own partial file.
 #[cfg(not(miri))]
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-fn stage_bytes_in_dir(dir: &std::path::Path, data: &[u8]) -> Result<std::path::PathBuf> {
+fn stage_bytes_in_dir(dir: &std::path::Path, data: &[u8]) -> DiagnosticResult<std::path::PathBuf> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
     let mut attempts = 0u32;
@@ -101,7 +125,7 @@ fn stage_bytes_in_dir(dir: &std::path::Path, data: &[u8]) -> Result<std::path::P
         {
             Ok(mut file) => {
                 let write_result = std::io::Write::write_all(&mut file, data)
-                    .with_context(|| format!("failed to stage {}", candidate.display()));
+                    .map_err(|err| fs_diag::install_stage_failed(&candidate, &err));
                 drop(file);
                 if let Err(e) = write_result {
                     let _ = std::fs::remove_file(&candidate);
@@ -113,9 +137,7 @@ fn stage_bytes_in_dir(dir: &std::path::Path, data: &[u8]) -> Result<std::path::P
                 attempts += 1;
             }
             Err(e) => {
-                return Err(e).with_context(|| {
-                    format!("failed to create staging file in {}", dir.display())
-                });
+                return Err(fs_diag::install_stage_failed(dir, &e));
             }
         }
     }
@@ -129,14 +151,15 @@ fn stage_bytes_in_dir(dir: &std::path::Path, data: &[u8]) -> Result<std::path::P
 /// it until handle close, so failure is ignored.
 #[cfg(not(miri))]
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-fn rename_staged_into_place(staged: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+fn rename_staged_into_place(
+    staged: &std::path::Path,
+    dst: &std::path::Path,
+) -> DiagnosticResult<()> {
     #[cfg(unix)]
     {
         if let Err(e) = std::fs::rename(staged, dst) {
             let _ = std::fs::remove_file(staged);
-            return Err(e).with_context(|| {
-                format!("failed to rename {} to {}", staged.display(), dst.display())
-            });
+            return Err(fs_diag::install_place_failed(staged, dst, &e));
         }
         Ok(())
     }
@@ -147,29 +170,19 @@ fn rename_staged_into_place(staged: &std::path::Path, dst: &std::path::Path) -> 
             let aside = aside_path_for(dst);
             if let Err(e) = std::fs::rename(dst, &aside) {
                 let _ = std::fs::remove_file(staged);
-                return Err(e).with_context(|| {
-                    format!(
-                        "failed to move existing {} aside to {}",
-                        dst.display(),
-                        aside.display()
-                    )
-                });
+                return Err(fs_diag::install_place_failed(dst, &aside, &e));
             }
             if let Err(e) = std::fs::rename(staged, dst) {
                 let _ = std::fs::rename(&aside, dst);
                 let _ = std::fs::remove_file(staged);
-                return Err(e).with_context(|| {
-                    format!("failed to rename {} to {}", staged.display(), dst.display())
-                });
+                return Err(fs_diag::install_place_failed(staged, dst, &e));
             }
             let _ = std::fs::remove_file(&aside);
             Ok(())
         } else {
             if let Err(e) = std::fs::rename(staged, dst) {
                 let _ = std::fs::remove_file(staged);
-                return Err(e).with_context(|| {
-                    format!("failed to rename {} to {}", staged.display(), dst.display())
-                });
+                return Err(fs_diag::install_place_failed(staged, dst, &e));
             }
             Ok(())
         }

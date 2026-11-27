@@ -1913,6 +1913,7 @@ dependencies = [
  "base64",
  "indoc",
  "oxdock-core",
+ "oxdock-diagnostics",
  "oxdock-fs",
  "oxdock-func-macro",
  "oxdock-macros",

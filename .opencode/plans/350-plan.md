@@ -1294,9 +1294,39 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   lift, `macro_input.rs` syn lift, embed gather conversion,
   `PumpDownstreamClosed` keyed sentinel, `std_pipe_*`
   typed-source conversion, CLI help/version keyed owners,
-  test-only transport-only + dev-toolling (`xtask`, render)
+  test-only transport-only + dev-tooling (`xtask`, render)
   exempt-but-no-new-construction, B9 windows conversion with
   Windows CI verification (B3/B4 tracked solely in Section B,
   D heading renamed, no duplicates). Zero `- [!]` remain;
   18 `- [ ]` open (B: 2, C: 5, D: 11). Gates: no code touched;
   workspace state inherits the B6 green run.
+
+- B4a (2026-11-27): fs install cluster (first B4 conversion
+  bulk). `install_file_atomic`, `install_file_atomic_host`,
+  `stage_bytes_in_dir`, `rename_staged_into_place`
+  (`sys/oxdock-fs/.../install.rs`) plus the `WorkspaceFs`
+  trait method (`lib.rs`), the mock impl (`mock.rs`), and the
+  render `EmbeddedFiles` delegation (`embedded.rs`) return
+  `DiagnosticResult`; `oxdock-diagnostics` added to
+  `oxdock-render` deps. New single owner `from_anyhow`
+  (lossless: first keyed `Diagnostic` reclaimed, outer frames
+  replayed via native `with_contexts`; unkeyed fallout wraps
+  verbatim via new `install_failed(&str)`, no `&anyhow::Error`
+  param) plus 4 typed-source install ctors
+  (`fs.install.stage_failed/set_mode_failed/place_failed/no_parent`,
+  `std::io::Error` sources like `cache_ensure_failed`, no
+  `&anyhow::Error` params). Anyhow interiors lift via
+  `from_anyhow` (`ensure_parent_dir`, `check_access`,
+  `recheck_resolved_source`, backend read/write); bare io
+  sites map via the new typed ctors. Core `install` holds via
+  the B2 bridge shape (`.map_err(anyhow::Error::from)` into the
+  `&anyhow::Error` eval ctor). Pin tests extended (distinct
+  keys + verbatim messages + reclaim + frame preservation).
+  Gates: `cargo test -p oxdock-fs` green (72 + 8 + 4 + 1),
+  `cargo test -p oxdock-core --lib` green (433), full
+  `cargo test --workspace` green (93 targets, 2715 passed, 0
+  failed; the two `error: unexpected argument
+  '--invalid-oxdock-flag-xyz'` lines are expected fixture
+  stderr, not failures), `cargo clippy --workspace
+  --all-targets` clean (zero warnings), `rustfmt --edition
+  2024 --check` clean on all 6 touched files.

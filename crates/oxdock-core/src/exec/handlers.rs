@@ -4052,6 +4052,7 @@ pub(super) fn install<P: ProcessManager>(
     cx.state
         .fs
         .install_file_atomic(&from_abs, &to_abs, EXECUTABLE_MODE)
+        .map_err(anyhow::Error::from)
         .map_err(|e| diag::eval_install_failed(from, to, &e))?;
     Ok(())
 }

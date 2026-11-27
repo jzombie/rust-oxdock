@@ -601,6 +601,120 @@ pub fn cache_ensure_failed(dir: &std::path::Path, err: &std::io::Error) -> Diagn
 }
 
 // ---------------------------------------------------------------------------
+// Install (`fs.install.*`, `install.rs`)
+// ---------------------------------------------------------------------------
+
+/// Atomic-install staging failure. Takes the staging directory plus
+/// the I/O failure; rendering lives here (same shape as
+/// `cache_ensure_failed`).
+#[allow(clippy::disallowed_types)]
+pub fn install_stage_failed(dir: &std::path::Path, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!(
+        "failed to stage install payload in {}: {err_text}",
+        dir.display()
+    );
+    Diagnostic::new(
+        "fs.install.stage_failed",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_PATH, &dir.display().to_string()),
+            (FIELD_ERR, err_text.as_str()),
+        ]),
+    )
+}
+
+/// Atomic-install mode failure. Takes the staged path plus the I/O
+/// failure; rendering lives here.
+#[allow(clippy::disallowed_types)]
+pub fn install_set_mode_failed(path: &std::path::Path, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("failed to set mode on {}: {err_text}", path.display());
+    Diagnostic::new(
+        "fs.install.set_mode_failed",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_PATH, &path.display().to_string()),
+            (FIELD_ERR, err_text.as_str()),
+        ]),
+    )
+}
+
+/// Atomic-install placement failure. Takes both ends plus the I/O
+/// failure; rendering lives here.
+#[allow(clippy::disallowed_types)]
+pub fn install_place_failed(
+    staged: &std::path::Path,
+    dst: &std::path::Path,
+    err: &std::io::Error,
+) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!(
+        "failed to rename {} to {}: {err_text}",
+        staged.display(),
+        dst.display()
+    );
+    Diagnostic::new(
+        "fs.install.place_failed",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_SRC, &staged.display().to_string()),
+            (FIELD_DST, &dst.display().to_string()),
+            (FIELD_ERR, err_text.as_str()),
+        ]),
+    )
+}
+
+/// Install destination with no parent. Takes the destination;
+/// rendering lives here.
+pub fn install_no_parent(dst: &GuardedPath) -> Diagnostic {
+    let message = format!("install destination has no parent: {}", dst.display());
+    Diagnostic::new(
+        "fs.install.no_parent",
+        message,
+        Diagnostic::make_fields(&[(FIELD_PATH, &dst.display().to_string())]),
+    )
+}
+
+/// Generic install failure. Takes the pre-rendered reason verbatim
+/// (like `proc.run.synthetic_failed`); already-keyed payloads are
+/// reclaimed by [`from_anyhow`], so this only names genuinely
+/// unkeyed fallout.
+pub fn install_failed(reason: &str) -> Diagnostic {
+    Diagnostic::new(
+        "fs.install.failed",
+        reason.to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, reason)]),
+    )
+}
+
+/// Reclaim an already-keyed diagnostic from an `anyhow` failure,
+/// wrapping anything else as a generic install failure. Single owner
+/// for the fs-surface mapping so callers converting file-by-file
+/// preserve keys instead of restating the downcast. Outer
+/// `.context(...)` frames above the keyed payload replay natively
+/// via `with_contexts` (mirroring `lift_dispatch_error`), so no
+/// chain text is lost at the flip boundary.
+pub fn from_anyhow(err: anyhow::Error) -> Diagnostic {
+    if let Some(found) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+        .cloned()
+    {
+        let mut outer_frames: Vec<String> = Vec::new();
+        for cause in err.chain() {
+            if cause.downcast_ref::<Diagnostic>().is_some() {
+                break;
+            }
+            outer_frames.push(cause.to_string());
+        }
+        return found.with_contexts(outer_frames);
+    }
+    let reason_text = format!("{err:#}");
+    install_failed(&reason_text)
+}
+
+// ---------------------------------------------------------------------------
 // Snapshot root (`fs.snapshot.*`, `mod.rs`)
 // ---------------------------------------------------------------------------
 
@@ -947,6 +1061,11 @@ mod tests {
             path_rel_not_prefix("a", "b").key(),
             scratch_collided(plain).key(),
             cache_ensure_failed(plain, &err).key(),
+            install_stage_failed(plain, &err).key(),
+            install_set_mode_failed(plain, &err).key(),
+            install_place_failed(plain, plain, &err).key(),
+            install_no_parent(&dir).key(),
+            install_failed("boom").key(),
             cwd_outside_snapshot_root(&dir).key(),
             unguarded_read_dir_miri().key(),
             mock_join_failed(&chain).key(),
@@ -1202,6 +1321,23 @@ mod tests {
             "failed to ensure cache dir a/b.txt: boom"
         );
         assert_eq!(
+            install_stage_failed(plain, &err).message(),
+            "failed to stage install payload in a/b.txt: boom"
+        );
+        assert_eq!(
+            install_set_mode_failed(plain, &err).message(),
+            "failed to set mode on a/b.txt: boom"
+        );
+        assert_eq!(
+            install_place_failed(plain, plain, &err).message(),
+            "failed to rename a/b.txt to a/b.txt: boom"
+        );
+        assert_eq!(
+            install_no_parent(&dir).message(),
+            format!("install destination has no parent: {}", dir.display())
+        );
+        assert_eq!(install_failed("boom").message(), "boom");
+        assert_eq!(
             cwd_outside_snapshot_root(&dir).message(),
             format!("cwd outside snapshot root: {}", dir.display())
         );
@@ -1282,5 +1418,19 @@ mod tests {
             git_submodule_unsupported("sub").message(),
             "submodule entries are not supported: sub"
         );
+    }
+
+    #[test]
+    fn from_anyhow_reclaims_keyed_payload_with_frames() {
+        let file = guarded("a.txt");
+        let keyed = missing_file(&file);
+        let key = keyed.key().to_string();
+        let framed = anyhow::Error::new(keyed).context("outer frame");
+        let reclaimed = from_anyhow(framed);
+        assert_eq!(reclaimed.key(), key);
+        assert_eq!(reclaimed.contexts(), &["outer frame".to_string()]);
+        let bare = from_anyhow(anyhow::Error::msg("boom"));
+        assert_eq!(bare.key(), "fs.install.failed");
+        assert_eq!(bare.message(), "boom");
     }
 }

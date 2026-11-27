@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::diagnostics as fs_diag;
 
@@ -516,10 +517,15 @@ impl WorkspaceFs for MockFs {
         Err(anyhow::Error::new(fs_diag::mock_symlink_unsupported()))
     }
 
-    fn install_file_atomic(&self, src: &GuardedPath, dst: &GuardedPath, _mode: u32) -> Result<()> {
-        let data = self.read_file(src)?;
-        self.ensure_parent_dir(dst)?;
-        self.write_file(dst, &data)?;
+    fn install_file_atomic(
+        &self,
+        src: &GuardedPath,
+        dst: &GuardedPath,
+        _mode: u32,
+    ) -> DiagnosticResult<()> {
+        let data = self.read_file(src).map_err(fs_diag::from_anyhow)?;
+        self.ensure_parent_dir(dst).map_err(fs_diag::from_anyhow)?;
+        self.write_file(dst, &data).map_err(fs_diag::from_anyhow)?;
         Ok(())
     }
 

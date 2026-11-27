@@ -9,6 +9,7 @@
 //! carrying stale copies from older releases know to delete them.
 
 use anyhow::{Context, Result};
+use oxdock_diagnostics::DiagnosticResult;
 #[allow(clippy::disallowed_types)]
 use oxdock_fs::UnguardedPath;
 use oxdock_fs::{
@@ -351,7 +352,12 @@ impl WorkspaceFs for EmbeddedFiles {
         self.inner.symlink(src, dst)
     }
 
-    fn install_file_atomic(&self, src: &GuardedPath, dst: &GuardedPath, mode: u32) -> Result<()> {
+    fn install_file_atomic(
+        &self,
+        src: &GuardedPath,
+        dst: &GuardedPath,
+        mode: u32,
+    ) -> DiagnosticResult<()> {
         self.inner.install_file_atomic(src, dst, mode)
     }
 
