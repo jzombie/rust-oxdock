@@ -45,7 +45,7 @@ All sites already use keyed ctors; flip signatures to
       `isolated_inherit_env`
 - [x] H6a assert cluster (35): `assert_equality`,
       `assert_contains`
-- [ ] H6b replace/prompt cluster (18): `replace`, `prompt`,
+- [x] H6b replace/prompt cluster (18): `replace`, `prompt`,
       `bind_prompt_var`
 
 ### A2. `core/exec/import.rs` boundary returns (9 sites)
@@ -733,3 +733,32 @@ All sites already use keyed ctors; flip signatures to
   suites, `cargo clippy --workspace --all-targets` clean,
   `rustfmt --edition 2024 --check` clean on `handlers.rs`,
   `steps.rs`.
+
+- H6b (2026-11-27): replace/prompt cluster. `replace`, `prompt`,
+  `bind_prompt_var` (`core/exec/handlers.rs`) return
+  `DiagnosticResult`; 7 outer `anyhow::Error::new(diag::...)`
+  wrappers dropped (5 in `prompt`, 2 in `bind_prompt_var`).
+  `replace` internals were already native (no outer wrappers to
+  drop); its `{{ MODULE::FUNC }}` closure stays anyhow: the
+  `PlaceholderCall` alias in `oxdock-process` (`expand.rs`) is an
+  external-crate `anyhow::Result` boundary (same as H1
+  `unpack_auto_from`, H5 thread closures). The single
+  `&anyhow::Error::new(e)` bridge for `eval_expand_read_failed`
+  stays as a ctor-argument adapter (the ctor takes
+  `&anyhow::Error`; same pattern as H2a/H2b/H3). Already-native
+  callees pass through untouched (`command_ctx`, `resolve_read`,
+  `open_read`, `expand`/`read`/`stdin` ctors,
+  `StreamingExpand::process_bytes`/`flush`, `write_stdout`,
+  `mutate_var`/`declare_var` via `eval_prompt_bind_failed`
+  taking `Diagnostic` by value). `dispatch_expand`/
+  `dispatch_prompt` stay anyhow: the `define_pipeline!` table
+  requires `anyhow::Result` signatures (same as H6a
+  `dispatch_assert_*`, H5 `dispatch_async_block`, H4
+  `dispatch_break`/`dispatch_continue`). 4 anyhow-parent
+  boundaries via `Ok(f(...)?)`: 2 in `handlers.rs`
+  (`dispatch_prompt`, `dispatch_expand`), 2 in
+  `execute_single_step_with_generation` (`Prompt`, `Expand` arms).
+  No test changes. Gates: pending execution upon PASS
+  (`cargo test --workspace`,
+  `cargo clippy --workspace --all-targets`,
+  `rustfmt --edition 2024 --check` on touched files).

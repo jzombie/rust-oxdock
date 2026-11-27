@@ -1046,7 +1046,12 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
                 Some(d) => Some(super::args::resolve_arg(d, &mut cx)?),
                 None => None,
             };
-            handlers::prompt(&mut cx, var, &message_resolved, default_resolved.as_deref())
+            Ok(handlers::prompt(
+                &mut cx,
+                var,
+                &message_resolved,
+                default_resolved.as_deref(),
+            )?)
         }
         StepKind::ListAppend { list, item } => {
             let value = super::args::evaluate_assert_operand(item, &mut cx)?;
@@ -1086,7 +1091,11 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::Expand { path, overrides } => {
             let path_resolved = super::args::resolve_arg_opt(path, &mut cx)?;
             let overrides_resolved = super::args::resolve_overrides(overrides, &mut cx)?;
-            handlers::replace(&mut cx, &path_resolved, &overrides_resolved)
+            Ok(handlers::replace(
+                &mut cx,
+                &path_resolved,
+                &overrides_resolved,
+            )?)
         }
         StepKind::AssertEq {
             hash,

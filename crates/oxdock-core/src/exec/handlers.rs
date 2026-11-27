@@ -1706,7 +1706,7 @@ pub(super) fn replace<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path_opt: &Option<String>,
     overrides: &[(String, String)],
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let ctx = cx.state.command_ctx()?;
     let vars = cx.state.all_vars();
     // Dispatch `{{ MODULE::FUNC(args) }}` through the shared pure table.
@@ -4142,7 +4142,7 @@ pub(super) fn prompt<P: ProcessManager>(
     var: &str,
     message: &str,
     default: Option<&str>,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     // No Miri special-case: `SyntheticProcessManager::stdin_is_terminal`
     // reports false without touching a fd, so under Miri this always
     // takes the non-interactive branch below (default binds, else
@@ -4160,7 +4160,7 @@ pub(super) fn prompt<P: ProcessManager>(
                 return Ok(());
             }
             None => {
-                return Err(anyhow::Error::new(diag::eval_prompt_no_answer(message)));
+                return Err(diag::eval_prompt_no_answer(message));
             }
         }
     }
@@ -4169,16 +4169,16 @@ pub(super) fn prompt<P: ProcessManager>(
         use std::io::Write;
         let mut err = std::io::stderr().lock();
         err.write_all(rendered.as_bytes())
-            .map_err(|e| anyhow::Error::new(diag::eval_prompt_write_failed(message, &e)))?;
+            .map_err(|e| diag::eval_prompt_write_failed(message, &e))?;
         err.flush()
-            .map_err(|e| anyhow::Error::new(diag::eval_prompt_flush_failed(message, &e)))?;
+            .map_err(|e| diag::eval_prompt_flush_failed(message, &e))?;
     }
     let mut line = String::new();
     let n = std::io::stdin()
         .read_line(&mut line)
-        .map_err(|e| anyhow::Error::new(diag::eval_prompt_read_failed(message, &e)))?;
+        .map_err(|e| diag::eval_prompt_read_failed(message, &e))?;
     if n == 0 && line.is_empty() {
-        return Err(anyhow::Error::new(diag::eval_prompt_eof(message)));
+        return Err(diag::eval_prompt_eof(message));
     }
     let trimmed = line
         .strip_suffix("\r\n")
@@ -4194,15 +4194,15 @@ fn bind_prompt_var<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     clean_var: &str,
     text: Value,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     if cx.state.get_var_typed(clean_var).is_some() {
         cx.state
             .mutate_var(clean_var, text)
-            .map_err(|e| anyhow::Error::new(diag::eval_prompt_bind_failed(clean_var, e)))?;
+            .map_err(|e| diag::eval_prompt_bind_failed(clean_var, e))?;
     } else {
         cx.state
             .declare_var(clean_var.to_string(), TypeTag::String, text)
-            .map_err(|e| anyhow::Error::new(diag::eval_prompt_bind_failed(clean_var, e)))?;
+            .map_err(|e| diag::eval_prompt_bind_failed(clean_var, e))?;
     }
     Ok(())
 }
@@ -4224,7 +4224,12 @@ pub(crate) fn dispatch_prompt<P: ProcessManager>(
         Some(d) => Some(super::args::resolve_arg(d, cx)?),
         None => None,
     };
-    prompt(cx, var, &message_resolved, default_resolved.as_deref())
+    Ok(prompt(
+        cx,
+        var,
+        &message_resolved,
+        default_resolved.as_deref(),
+    )?)
 }
 
 /// Dispatch `LIST_APPEND $list <item>` : append to a LIST binding in
@@ -4407,7 +4412,7 @@ pub(crate) fn dispatch_expand<P: ProcessManager>(
     };
     let path_resolved = super::args::resolve_arg_opt(path, cx)?;
     let overrides_resolved = super::args::resolve_overrides(overrides, cx)?;
-    replace(cx, &path_resolved, &overrides_resolved)
+    Ok(replace(cx, &path_resolved, &overrides_resolved)?)
 }
 
 fn dispatch_assert_equality<P: ProcessManager>(
