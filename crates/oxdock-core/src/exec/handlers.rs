@@ -940,7 +940,7 @@ fn collect_archive_tree(
                 // subtree walk: the rel prefixes must be real
                 // directories before listing.
                 PathResolver::refuse_link_ancestors(src_abs, &dir_rel)
-                    .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
+                    .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?;
                 let mut entries = fs
                     .read_dir_entries(&dir_abs)
                     .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
@@ -1165,7 +1165,11 @@ pub(super) fn unarchive<P: ProcessManager>(
                     ))
                 })?;
                 PathResolver::refuse_link_ancestors(&dst_abs, &rel).map_err(|e| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(
+                        src,
+                        dst,
+                        &anyhow::Error::new(e),
+                    ))
                 })?;
                 let dir = dst_abs.join(&rel).map_err(|e| {
                     anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
@@ -1184,7 +1188,11 @@ pub(super) fn unarchive<P: ProcessManager>(
                     ))
                 })?;
                 PathResolver::refuse_link_ancestors(&dst_abs, &rel).map_err(|e| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(
+                        src,
+                        dst,
+                        &anyhow::Error::new(e),
+                    ))
                 })?;
                 let file = dst_abs.join(&rel).map_err(|e| {
                     anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))

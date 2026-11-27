@@ -317,15 +317,15 @@ pub trait WorkspaceFs: Send + Sync {
 
 impl WorkspaceFs for PathResolver {
     fn canonicalize(&self, path: &GuardedPath) -> Result<GuardedPath> {
-        PathResolver::canonicalize(self, path)
+        Ok(PathResolver::canonicalize(self, path)?)
     }
 
     fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata> {
-        PathResolver::metadata(self, path)
+        Ok(PathResolver::metadata(self, path)?)
     }
 
     fn archive_member_stat(&self, path: &GuardedPath) -> Result<(u64, Option<u32>)> {
-        PathResolver::archive_member_stat(self, path)
+        Ok(PathResolver::archive_member_stat(self, path)?)
     }
 
     /// Miri has no host stat, and fabricated metadata cannot report
@@ -343,7 +343,7 @@ impl WorkspaceFs for PathResolver {
 
     #[allow(clippy::disallowed_types)]
     fn metadata_unguarded(&self, path: &UnguardedPath) -> Result<std::fs::Metadata> {
-        PathResolver::metadata_unguarded(self, path)
+        Ok(PathResolver::metadata_unguarded(self, path)?)
     }
 
     fn root(&self) -> &GuardedPath {
@@ -399,7 +399,7 @@ impl WorkspaceFs for PathResolver {
     }
 
     fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>> {
-        PathResolver::read_file(self, path)
+        Ok(PathResolver::read_file(self, path)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -409,15 +409,15 @@ impl WorkspaceFs for PathResolver {
     }
 
     fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
-        PathResolver::open_read(self, path)
+        Ok(PathResolver::open_read(self, path)?)
     }
 
     fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
-        PathResolver::open_write(self, path)
+        Ok(PathResolver::open_write(self, path)?)
     }
 
     fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
-        PathResolver::open_append(self, path)
+        Ok(PathResolver::open_append(self, path)?)
     }
 
     fn open_read_nofollow(
@@ -425,7 +425,7 @@ impl WorkspaceFs for PathResolver {
         path: &GuardedPath,
         expected_root: &GuardedPath,
     ) -> Result<Box<dyn std::io::Read + Send>> {
-        PathResolver::open_read_nofollow(self, path, expected_root)
+        Ok(PathResolver::open_read_nofollow(self, path, expected_root)?)
     }
 
     fn open_write_nofollow(
@@ -433,11 +433,15 @@ impl WorkspaceFs for PathResolver {
         path: &GuardedPath,
         expected_root: &GuardedPath,
     ) -> Result<Box<dyn std::io::Write + Send>> {
-        PathResolver::open_write_nofollow(self, path, expected_root)
+        Ok(PathResolver::open_write_nofollow(
+            self,
+            path,
+            expected_root,
+        )?)
     }
 
     fn read_to_string(&self, path: &GuardedPath) -> Result<String> {
-        PathResolver::read_to_string(self, path)
+        Ok(PathResolver::read_to_string(self, path)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -447,7 +451,7 @@ impl WorkspaceFs for PathResolver {
     }
 
     fn read_dir_entries(&self, path: &GuardedPath) -> Result<Vec<DirEntry>> {
-        PathResolver::read_dir_entries(self, path)
+        Ok(PathResolver::read_dir_entries(self, path)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -466,7 +470,7 @@ impl WorkspaceFs for PathResolver {
     }
 
     fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
-        PathResolver::write_file(self, path, contents)
+        Ok(PathResolver::write_file(self, path, contents)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -476,7 +480,7 @@ impl WorkspaceFs for PathResolver {
     }
 
     fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
-        PathResolver::append_file(self, path, contents)
+        Ok(PathResolver::append_file(self, path, contents)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -494,7 +498,7 @@ impl WorkspaceFs for PathResolver {
     }
 
     fn create_dir_all(&self, path: &GuardedPath) -> Result<()> {
-        PathResolver::create_dir_all(self, path)
+        Ok(PathResolver::create_dir_all(self, path)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -504,11 +508,11 @@ impl WorkspaceFs for PathResolver {
     }
 
     fn ensure_parent_dir(&self, path: &GuardedPath) -> Result<()> {
-        PathResolver::ensure_parent_dir(self, path)
+        Ok(PathResolver::ensure_parent_dir(self, path)?)
     }
 
     fn remove_file(&self, path: &GuardedPath) -> Result<()> {
-        PathResolver::remove_file(self, path)
+        Ok(PathResolver::remove_file(self, path)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -518,15 +522,15 @@ impl WorkspaceFs for PathResolver {
     }
 
     fn remove_dir_all(&self, path: &GuardedPath) -> Result<()> {
-        PathResolver::remove_dir_all(self, path)
+        Ok(PathResolver::remove_dir_all(self, path)?)
     }
 
     fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()> {
-        PathResolver::remove_empty_dir(self, path)
+        Ok(PathResolver::remove_empty_dir(self, path)?)
     }
 
     fn remove_link_if_symlink(&self, cwd: &GuardedPath, rel: &str) -> Result<bool> {
-        PathResolver::remove_link_if_symlink(self, cwd, rel)
+        Ok(PathResolver::remove_link_if_symlink(self, cwd, rel)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -566,7 +570,7 @@ impl WorkspaceFs for PathResolver {
     }
 
     fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
-        PathResolver::symlink(self, src, dst)
+        Ok(PathResolver::symlink(self, src, dst)?)
     }
 
     fn install_file_atomic(
@@ -580,11 +584,11 @@ impl WorkspaceFs for PathResolver {
 
     #[allow(clippy::disallowed_types)]
     fn open_file_unguarded(&self, path: &UnguardedPath) -> Result<std::fs::File> {
-        PathResolver::open_file_unguarded(self, path)
+        Ok(PathResolver::open_file_unguarded(self, path)?)
     }
 
     fn set_permissions_mode_unix(&self, path: &GuardedPath, mode: u32) -> Result<()> {
-        PathResolver::set_permissions_mode_unix(self, path, mode)
+        Ok(PathResolver::set_permissions_mode_unix(self, path, mode)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -636,11 +640,11 @@ impl WorkspaceFs for PathResolver {
     }
 
     fn entry_kind(&self, path: &GuardedPath) -> Result<EntryKind> {
-        PathResolver::entry_kind(self, path)
+        Ok(PathResolver::entry_kind(self, path)?)
     }
 
     fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<EntryKind> {
-        PathResolver::entry_kind_no_follow(self, path)
+        Ok(PathResolver::entry_kind_no_follow(self, path)?)
     }
 
     #[allow(clippy::disallowed_types)]

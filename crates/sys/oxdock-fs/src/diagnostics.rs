@@ -677,9 +677,9 @@ pub fn install_no_parent(dst: &GuardedPath) -> Diagnostic {
 }
 
 /// Generic install failure. Takes the pre-rendered reason verbatim
-/// (like `proc.run.synthetic_failed`); already-keyed payloads are
-/// reclaimed by [`from_anyhow`], so this only names genuinely
-/// unkeyed fallout.
+/// (like `proc.run.synthetic_failed`); kept for install-specific
+/// unkeyed fallout now that [`from_anyhow`] falls back to the
+/// generic [`operation_failed`].
 pub fn install_failed(reason: &str) -> Diagnostic {
     Diagnostic::new(
         "fs.install.failed",
@@ -688,8 +688,20 @@ pub fn install_failed(reason: &str) -> Diagnostic {
     )
 }
 
+/// Generic filesystem-operation failure. Takes the pre-rendered
+/// reason verbatim (like `build.operation.failed`);
+/// already-keyed payloads are reclaimed by [`from_anyhow`], so
+/// this only names genuinely unkeyed fallout.
+pub fn operation_failed(reason: &str) -> Diagnostic {
+    Diagnostic::new(
+        "fs.operation.failed",
+        reason.to_string(),
+        Diagnostic::make_fields(&[(FIELD_ERR, reason)]),
+    )
+}
+
 /// Reclaim an already-keyed diagnostic from an `anyhow` failure,
-/// wrapping anything else as a generic install failure. Single owner
+/// wrapping anything else as a generic operation failure. Single owner
 /// for the fs-surface mapping so callers converting file-by-file
 /// preserve keys instead of restating the downcast. Outer
 /// `.context(...)` frames above the keyed payload replay natively
@@ -711,7 +723,7 @@ pub fn from_anyhow(err: anyhow::Error) -> Diagnostic {
         return found.with_contexts(outer_frames);
     }
     let reason_text = format!("{err:#}");
-    install_failed(&reason_text)
+    operation_failed(&reason_text)
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,6 +1078,7 @@ mod tests {
             install_place_failed(plain, plain, &err).key(),
             install_no_parent(&dir).key(),
             install_failed("boom").key(),
+            operation_failed("boom").key(),
             cwd_outside_snapshot_root(&dir).key(),
             unguarded_read_dir_miri().key(),
             mock_join_failed(&chain).key(),
@@ -1337,6 +1350,7 @@ mod tests {
             format!("install destination has no parent: {}", dir.display())
         );
         assert_eq!(install_failed("boom").message(), "boom");
+        assert_eq!(operation_failed("boom").message(), "boom");
         assert_eq!(
             cwd_outside_snapshot_root(&dir).message(),
             format!("cwd outside snapshot root: {}", dir.display())
@@ -1430,7 +1444,7 @@ mod tests {
         assert_eq!(reclaimed.key(), key);
         assert_eq!(reclaimed.contexts(), &["outer frame".to_string()]);
         let bare = from_anyhow(anyhow::Error::msg("boom"));
-        assert_eq!(bare.key(), "fs.install.failed");
+        assert_eq!(bare.key(), "fs.operation.failed");
         assert_eq!(bare.message(), "boom");
     }
 }

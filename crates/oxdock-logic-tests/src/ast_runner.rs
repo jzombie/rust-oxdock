@@ -1221,7 +1221,7 @@ fn read_trimmed_root(root: &GuardedPath, rel: &str) -> Result<String> {
 /// `"payload"` and `"payload\n"` are distinct expectations.
 fn read_root_exact(root: &GuardedPath, rel: &str) -> Result<String> {
     let resolver = PathResolver::new(root.as_path(), root.as_path())?;
-    resolver.read_to_string(&root.join(rel)?)
+    Ok(resolver.read_to_string(&root.join(rel)?)?)
 }
 
 fn guard_root(temp: &GuardedTempDir) -> GuardedPath {

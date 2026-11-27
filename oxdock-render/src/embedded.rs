@@ -135,17 +135,17 @@ pub(crate) fn warn_on_shadowed_dist(resolver: &PathResolver, root: &GuardedPath)
 
 impl WorkspaceFs for EmbeddedFiles {
     fn canonicalize(&self, path: &GuardedPath) -> Result<GuardedPath> {
-        self.inner.canonicalize(path)
+        Ok(self.inner.canonicalize(path)?)
     }
 
     #[allow(clippy::disallowed_types)]
     fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata> {
-        self.inner.metadata(path)
+        Ok(self.inner.metadata(path)?)
     }
 
     #[allow(clippy::disallowed_types)]
     fn metadata_unguarded(&self, path: &UnguardedPath) -> Result<std::fs::Metadata> {
-        self.inner.metadata_unguarded(path)
+        Ok(self.inner.metadata_unguarded(path)?)
     }
 
     fn root(&self) -> &GuardedPath {
@@ -200,7 +200,7 @@ impl WorkspaceFs for EmbeddedFiles {
         if let Some(bytes) = embedded_for(path) {
             return Ok(bytes.to_vec());
         }
-        self.inner.read_file(path)
+        Ok(self.inner.read_file(path)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -212,15 +212,15 @@ impl WorkspaceFs for EmbeddedFiles {
         if let Some(bytes) = embedded_for(path) {
             return Ok(Box::new(std::io::Cursor::new(bytes)));
         }
-        self.inner.open_read(path)
+        Ok(self.inner.open_read(path)?)
     }
 
     fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
-        self.inner.open_write(path)
+        Ok(self.inner.open_write(path)?)
     }
 
     fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
-        self.inner.open_append(path)
+        Ok(self.inner.open_append(path)?)
     }
 
     fn open_read_nofollow(
@@ -231,7 +231,7 @@ impl WorkspaceFs for EmbeddedFiles {
         if let Some(bytes) = embedded_for(path) {
             return Ok(Box::new(std::io::Cursor::new(bytes)));
         }
-        self.inner.open_read_nofollow(path, expected_root)
+        Ok(self.inner.open_read_nofollow(path, expected_root)?)
     }
 
     fn open_write_nofollow(
@@ -239,14 +239,14 @@ impl WorkspaceFs for EmbeddedFiles {
         path: &GuardedPath,
         expected_root: &GuardedPath,
     ) -> Result<Box<dyn std::io::Write + Send>> {
-        self.inner.open_write_nofollow(path, expected_root)
+        Ok(self.inner.open_write_nofollow(path, expected_root)?)
     }
 
     fn read_to_string(&self, path: &GuardedPath) -> Result<String> {
         if let Some(bytes) = embedded_for(path) {
             return String::from_utf8(bytes.to_vec()).context("embedded pipeline is not UTF-8");
         }
-        self.inner.read_to_string(path)
+        Ok(self.inner.read_to_string(path)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -255,7 +255,7 @@ impl WorkspaceFs for EmbeddedFiles {
     }
 
     fn read_dir_entries(&self, path: &GuardedPath) -> Result<Vec<DirEntry>> {
-        self.inner.read_dir_entries(path)
+        Ok(self.inner.read_dir_entries(path)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -264,7 +264,7 @@ impl WorkspaceFs for EmbeddedFiles {
     }
 
     fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
-        self.inner.write_file(path, contents)
+        Ok(self.inner.write_file(path, contents)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -273,7 +273,7 @@ impl WorkspaceFs for EmbeddedFiles {
     }
 
     fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
-        self.inner.append_file(path, contents)
+        Ok(self.inner.append_file(path, contents)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -282,7 +282,7 @@ impl WorkspaceFs for EmbeddedFiles {
     }
 
     fn create_dir_all(&self, path: &GuardedPath) -> Result<()> {
-        self.inner.create_dir_all(path)
+        Ok(self.inner.create_dir_all(path)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -291,11 +291,11 @@ impl WorkspaceFs for EmbeddedFiles {
     }
 
     fn ensure_parent_dir(&self, path: &GuardedPath) -> Result<()> {
-        self.inner.ensure_parent_dir(path)
+        Ok(self.inner.ensure_parent_dir(path)?)
     }
 
     fn remove_file(&self, path: &GuardedPath) -> Result<()> {
-        self.inner.remove_file(path)
+        Ok(self.inner.remove_file(path)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -304,7 +304,7 @@ impl WorkspaceFs for EmbeddedFiles {
     }
 
     fn remove_dir_all(&self, path: &GuardedPath) -> Result<()> {
-        self.inner.remove_dir_all(path)
+        Ok(self.inner.remove_dir_all(path)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -313,11 +313,11 @@ impl WorkspaceFs for EmbeddedFiles {
     }
 
     fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()> {
-        self.inner.remove_empty_dir(path)
+        Ok(self.inner.remove_empty_dir(path)?)
     }
 
     fn remove_link_if_symlink(&self, cwd: &GuardedPath, rel: &str) -> Result<bool> {
-        self.inner.remove_link_if_symlink(cwd, rel)
+        Ok(self.inner.remove_link_if_symlink(cwd, rel)?)
     }
 
     fn copy_file(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<u64> {
@@ -349,7 +349,7 @@ impl WorkspaceFs for EmbeddedFiles {
     }
 
     fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
-        self.inner.symlink(src, dst)
+        Ok(self.inner.symlink(src, dst)?)
     }
 
     fn install_file_atomic(
@@ -363,11 +363,11 @@ impl WorkspaceFs for EmbeddedFiles {
 
     #[allow(clippy::disallowed_types)]
     fn open_file_unguarded(&self, path: &UnguardedPath) -> Result<std::fs::File> {
-        self.inner.open_file_unguarded(path)
+        Ok(self.inner.open_file_unguarded(path)?)
     }
 
     fn set_permissions_mode_unix(&self, path: &GuardedPath, mode: u32) -> Result<()> {
-        self.inner.set_permissions_mode_unix(path, mode)
+        Ok(self.inner.set_permissions_mode_unix(path, mode)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -407,7 +407,7 @@ impl WorkspaceFs for EmbeddedFiles {
         if embedded_for(path).is_some() {
             return Ok(EntryKind::File);
         }
-        self.inner.entry_kind(path)
+        Ok(self.inner.entry_kind(path)?)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -419,7 +419,7 @@ impl WorkspaceFs for EmbeddedFiles {
         if embedded_for(path).is_some() {
             return Ok(EntryKind::File);
         }
-        self.inner.entry_kind_no_follow(path)
+        Ok(self.inner.entry_kind_no_follow(path)?)
     }
 
     fn copy_from_git(

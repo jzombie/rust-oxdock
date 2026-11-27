@@ -20,7 +20,7 @@ fn load_settings_script() -> Result<String> {
     let script_path = resolver
         .root()
         .join(".github/scripts/gha-apply-settings.oxfile")?;
-    resolver.read_to_string(&script_path)
+    Ok(resolver.read_to_string(&script_path)?)
 }
 
 /// The settings applier must always parse, and it must own every

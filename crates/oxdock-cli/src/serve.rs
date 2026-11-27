@@ -608,10 +608,13 @@ fn pack_manifest(
                                 stack.push((child, child_rel));
                             }
                             _ => {
-                                let len = resolver
-                                    .metadata(&child)
-                                    .map(|m| m.len())
-                                    .map_err(|e| errors::push_source_unreadable(&child_rel, &e))?;
+                                let len =
+                                    resolver.metadata(&child).map(|m| m.len()).map_err(|e| {
+                                        errors::push_source_unreadable(
+                                            &child_rel,
+                                            &anyhow::Error::new(e),
+                                        )
+                                    })?;
                                 files.push((
                                     child_rel,
                                     len,
@@ -623,10 +626,9 @@ fn pack_manifest(
                 }
             }
             Ok(_) => {
-                let len = resolver
-                    .metadata(&src)
-                    .map(|m| m.len())
-                    .map_err(|e| errors::push_source_unreadable(guest_src, &e))?;
+                let len = resolver.metadata(&src).map(|m| m.len()).map_err(|e| {
+                    errors::push_source_unreadable(guest_src, &anyhow::Error::new(e))
+                })?;
                 files.push((
                     guest_src.clone(),
                     len,
@@ -634,7 +636,10 @@ fn pack_manifest(
                 ));
             }
             Err(err) => {
-                return Err(errors::push_source_missing(guest_src, &err));
+                return Err(errors::push_source_missing(
+                    guest_src,
+                    &anyhow::Error::new(err),
+                ));
             }
         }
     }

@@ -1330,3 +1330,51 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   stderr, not failures), `cargo clippy --workspace
   --all-targets` clean (zero warnings), `rustfmt --edition
   2024 --check` clean on all 6 touched files.
+
+- B4b (2026-11-27): fs io cluster (second B4 conversion
+  bulk). All `PathResolver` io helpers (`io.rs`: `create_dir_all`,
+  `read_dir_entries`, `read_file`, `open_read/write/append`,
+  `open_read/write_nofollow`, `refuse_link_ancestors`,
+  `read_to_string` x2, `write_file`, `append_file`,
+  `ensure_parent_dir`, `canonicalize`, `metadata`,
+  `archive_member_stat`, `entry_kind`, `entry_kind_no_follow`,
+  `metadata_unguarded`, `set_permissions_mode_unix` x2,
+  `open_file_unguarded`, `remove_file`, `remove_dir_all`,
+  `remove_empty_dir`, `remove_link_if_symlink` x2, spill
+  `create/open/truncate` x2, `write_private_file` x2,
+  `SpillFile::set_len`, `symlink` x2) return
+  `DiagnosticResult`. Transitional lift throughout, no new
+  typed ctors: still-anyhow interiors (`check_access`,
+  `check_access_with_root`, `recheck_resolved_source`,
+  `resolve_write`, backend) lift via the single owner
+  `from_anyhow` with native `with_contexts` frames preserving
+  every historic context string byte-identical;
+  already-keyed `anyhow::Error::new(fs_diag::...)` sites
+  return the diagnostic directly; bare `std::io` sites lift
+  via `anyhow::Error::from` transport into `from_anyhow` plus
+  frames (no `.with_context`, no `Error::new`, no `Context`
+  import). `from_anyhow` fallback generalized from
+  install-specific to the new generic
+  `operation_failed(&str)` (`fs.operation.failed`, mirroring
+  `build.operation.failed`); `install_failed` kept for
+  install-specific fallout. `WorkspaceFs` trait surface
+  stays anyhow: `PathResolver` impls bridge via `Ok(...?)`
+  (A1 pattern), as does render `EmbeddedFiles`
+  (`install_file_atomic` already native passes through).
+  Cascade callers updated minimally: core `handlers.rs`
+  direct `refuse_link_ancestors` sites bridge via the
+  `&anyhow::Error::new(e)` ctor-arg adapter (H2b precedent);
+  build `assets.rs` flipped-method sites drop the now-useless
+  `.map_err(from_anyhow)` to native `?` (same keyed payload)
+  and adapter-bridge the three `&anyhow::Error` ctors;
+  mcp/cli/ssh-plugin ctor sites take the same adapter;
+  `is_io_kind` guard clones into `anyhow::Error::from`;
+  anyhow test helpers take `Ok(...?)`. Pin tests extended
+  (new `operation_failed` key + message, fallback key
+  updated to `fs.operation.failed`). Gates: `cargo test -p
+  oxdock-fs` green (72 + 8 + 4 + 1), `cargo test -p
+  oxdock-core --lib` green (433), full `cargo test
+  --workspace` green (93 targets, 2715 passed, 0 failed),
+  `cargo clippy --workspace --all-targets` clean (zero
+  warnings), `rustfmt --edition 2024 --check` clean on all
+  touched files.

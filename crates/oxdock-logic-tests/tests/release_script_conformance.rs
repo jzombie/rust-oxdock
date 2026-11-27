@@ -25,7 +25,7 @@ fn load_release_script() -> Result<String> {
     let script_path = resolver
         .root()
         .join(".github/scripts/gha-rust-release.oxfile")?;
-    resolver.read_to_string(&script_path)
+    Ok(resolver.read_to_string(&script_path)?)
 }
 
 /// Shared helpers backing the release scripts above: read from the
@@ -38,7 +38,7 @@ fn load_helpers_module() -> Result<String> {
     let helper_path = resolver
         .root()
         .join(".github/scripts/helpers/ci-helpers.oxfile")?;
-    resolver.read_to_string(&helper_path)
+    Ok(resolver.read_to_string(&helper_path)?)
 }
 
 /// The release script imports MARKDOWN, so it parses against a module
@@ -423,7 +423,7 @@ impl ReleaseRun {
 
     fn notes(&self) -> Result<String> {
         let reader = PathResolver::new_guarded(self.root.clone(), self.root.clone())?;
-        reader.read_to_string(&self.root.join("target/release-notes.md")?)
+        Ok(reader.read_to_string(&self.root.join("target/release-notes.md")?)?)
     }
 }
 

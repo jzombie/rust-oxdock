@@ -212,12 +212,10 @@ pub fn try_embed_assets(spec: &EmbedSpec) -> DiagnosticResult<Vec<String>> {
         let module_path = module_guarded_path(&out_dir, &module_file_name(&spec.name))?;
         // Placeholder keeps symbol resolution intact; no directives means
         // cargo's conservative default invalidation still applies.
-        resolver
-            .write_file(
-                &module_path,
-                placeholder_module_source(&spec.name).as_bytes(),
-            )
-            .map_err(build_diag::from_anyhow)?;
+        resolver.write_file(
+            &module_path,
+            placeholder_module_source(&spec.name).as_bytes(),
+        )?;
         return Ok(Vec::new());
     }
 
@@ -239,9 +237,7 @@ pub fn try_embed_assets(spec: &EmbedSpec) -> DiagnosticResult<Vec<String>> {
     let name_ident = syn::Ident::new(&spec.name, proc_macro2::Span::call_site());
     let module = emit_embed_module(&name_ident, &assets)
         .map_err(|e| build_diag::from_anyhow(anyhow::Error::new(e)))?;
-    resolver
-        .write_file(&module_path, module.to_string().as_bytes())
-        .map_err(build_diag::from_anyhow)?;
+    resolver.write_file(&module_path, module.to_string().as_bytes())?;
     Ok(directives)
 }
 
@@ -305,7 +301,7 @@ fn script_text(source: DslSource) -> DiagnosticResult<(String, Option<String>)> 
                 .map_err(|e| build_diag::dsl_path_escapes_manifest(rel, &e))?;
             let text = resolver
                 .read_to_string(&guarded)
-                .map_err(|err| build_diag::dsl_script_read_failed(rel, &err))?;
+                .map_err(|err| build_diag::dsl_script_read_failed(rel, &anyhow::Error::new(err)))?;
             Ok((text, Some(rel.to_string())))
         }
     }
@@ -430,9 +426,12 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> DiagnosticRe
         // unguarded escape hatch, exactly as in the historical proc-macro flow.
         #[allow(clippy::disallowed_types)]
         let final_external = UnguardedPath::external(final_cwd.as_path().to_path_buf());
-        let meta = resolver
-            .metadata_unguarded(&final_external)
-            .map_err(|e| build_diag::final_workdir_missing(&final_cwd.display().to_string(), &e))?;
+        let meta = resolver.metadata_unguarded(&final_external).map_err(|e| {
+            build_diag::final_workdir_missing(
+                &final_cwd.display().to_string(),
+                &anyhow::Error::new(e),
+            )
+        })?;
         if !meta.is_dir() {
             return Err(build_diag::final_workdir_not_dir(
                 &final_cwd.display().to_string(),
@@ -460,10 +459,7 @@ pub fn clear_materialize_dir(
     resolver: &PathResolver,
     target: &GuardedPath,
 ) -> DiagnosticResult<()> {
-    for entry in resolver
-        .read_dir_entries(target)
-        .map_err(build_diag::from_anyhow)?
-    {
+    for entry in resolver.read_dir_entries(target)? {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name == ".oxdock_hash" {
             continue;
@@ -484,9 +480,7 @@ pub fn clear_materialize_dir(
 
 fn ensure_materialize_dir(resolver: &PathResolver, target: &GuardedPath) -> DiagnosticResult<()> {
     if target.as_path().exists() {
-        let kind = resolver
-            .entry_kind(target)
-            .map_err(build_diag::from_anyhow)?;
+        let kind = resolver.entry_kind(target)?;
         if kind != EntryKind::Dir {
             return Err(build_diag::out_dir_target_not_dir(
                 &target.display().to_string(),
@@ -494,9 +488,9 @@ fn ensure_materialize_dir(resolver: &PathResolver, target: &GuardedPath) -> Diag
         }
         return Ok(());
     }
-    resolver
-        .create_dir_all(target)
-        .map_err(|e| build_diag::out_dir_create_failed(&target.display().to_string(), &e))
+    resolver.create_dir_all(target).map_err(|e| {
+        build_diag::out_dir_create_failed(&target.display().to_string(), &anyhow::Error::new(e))
+    })
 }
 
 /// Typed placeholder used when IDE-skip predicates short-circuit the build:
@@ -581,19 +575,13 @@ fn hash_input_path(
             hasher.update(b"F\0");
             hasher.update(rel.as_bytes());
             hasher.update(b"\0");
-            hasher.update(
-                &resolver
-                    .read_file(&guarded)
-                    .map_err(build_diag::from_anyhow)?,
-            );
+            hasher.update(&resolver.read_file(&guarded)?);
         }
         Ok(EntryKind::Dir) => {
             hasher.update(b"D\0");
             hasher.update(rel.as_bytes());
             hasher.update(b"\0");
-            let mut entries = resolver
-                .read_dir_entries(&guarded)
-                .map_err(build_diag::from_anyhow)?;
+            let mut entries = resolver.read_dir_entries(&guarded)?;
             entries.sort_by_key(|e| e.file_name());
             for entry in entries {
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -632,13 +620,9 @@ pub fn stage_materialize(
         .join(".oxdock-staging")
         .map_err(build_diag::from_anyhow)?;
     if resolver.entry_kind(&stage).is_ok() {
-        resolver
-            .remove_dir_all(&stage)
-            .map_err(build_diag::from_anyhow)?;
+        resolver.remove_dir_all(&stage)?;
     }
-    resolver
-        .create_dir_all(&stage)
-        .map_err(build_diag::from_anyhow)?;
+    resolver.create_dir_all(&stage)?;
 
     resolver
         .copy_dir_from_unguarded(final_external, &stage)
@@ -646,9 +630,7 @@ pub fn stage_materialize(
     for marker in SANDBOX_MARKERS {
         let marker_path = stage.join(marker).map_err(build_diag::from_anyhow)?;
         if resolver.entry_kind(&marker_path).is_ok() {
-            resolver
-                .remove_file(&marker_path)
-                .map_err(build_diag::from_anyhow)?;
+            resolver.remove_file(&marker_path)?;
         }
     }
 
@@ -656,9 +638,7 @@ pub fn stage_materialize(
 
     // Staging cleanup must complete before the caller records the cache hash.
     if resolver.entry_kind(&stage).is_ok() {
-        resolver
-            .remove_dir_all(&stage)
-            .map_err(build_diag::from_anyhow)?;
+        resolver.remove_dir_all(&stage)?;
     }
     Ok(())
 }
@@ -673,13 +653,9 @@ pub fn sync_tree(
     src: &GuardedPath,
     dst: &GuardedPath,
 ) -> DiagnosticResult<()> {
-    resolver
-        .create_dir_all(dst)
-        .map_err(build_diag::from_anyhow)?;
+    resolver.create_dir_all(dst)?;
 
-    let src_entries = resolver
-        .read_dir_entries(src)
-        .map_err(build_diag::from_anyhow)?;
+    let src_entries = resolver.read_dir_entries(src)?;
     let mut src_names: std::collections::BTreeSet<String> = Default::default();
     for entry in &src_entries {
         src_names.insert(entry.file_name().to_string_lossy().into_owned());
@@ -694,9 +670,7 @@ pub fn sync_tree(
             .map_err(|e| build_diag::from_anyhow(e.into()))?
         {
             ft if ft.is_dir() => {
-                resolver
-                    .create_dir_all(&dst_child)
-                    .map_err(build_diag::from_anyhow)?;
+                resolver.create_dir_all(&dst_child)?;
                 sync_tree(resolver, &src_child, &dst_child)?;
             }
             _ => {
@@ -708,10 +682,7 @@ pub fn sync_tree(
     }
 
     // Remove destination extras the new output no longer contains.
-    for entry in resolver
-        .read_dir_entries(dst)
-        .map_err(build_diag::from_anyhow)?
-    {
+    for entry in resolver.read_dir_entries(dst)? {
         let name = entry.file_name().to_string_lossy().into_owned();
         if src_names.contains(&name) || name == ".oxdock_hash" {
             continue;

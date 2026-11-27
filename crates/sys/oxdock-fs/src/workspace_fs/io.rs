@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use oxdock_diagnostics::DiagnosticResult;
 #[cfg(not(miri))]
 use std::fs;
 
@@ -13,7 +13,7 @@ use crate::UnguardedPath;
 /// other `lstat` failure denies. Skipped under Miri, whose synthetic
 /// state holds no links.
 #[allow(clippy::disallowed_methods)]
-fn refuse_final_symlink(path: &GuardedPath) -> Result<()> {
+fn refuse_final_symlink(path: &GuardedPath) -> DiagnosticResult<()> {
     #[cfg(miri)]
     {
         let _ = path;
@@ -23,10 +23,9 @@ fn refuse_final_symlink(path: &GuardedPath) -> Result<()> {
     {
         match std::fs::symlink_metadata(path.as_path()) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("lstat denied for {}", path.display())),
-            Ok(meta) if meta.file_type().is_symlink() => {
-                Err(anyhow::Error::new(fs_diag::refuses_symlink_final(path)))
-            }
+            Err(e) => Err(fs_diag::from_anyhow(anyhow::Error::from(e))
+                .with_contexts(vec![format!("lstat denied for {}", path.display())])),
+            Ok(meta) if meta.file_type().is_symlink() => Err(fs_diag::refuses_symlink_final(path)),
             Ok(_) => Ok(()),
         }
     }
@@ -35,60 +34,99 @@ fn refuse_final_symlink(path: &GuardedPath) -> Result<()> {
 // Guarded filesystem IO helpers (read/write/metadata etc.).
 impl PathResolver {
     #[allow(clippy::disallowed_methods)]
-    pub fn create_dir_all(&self, path: &GuardedPath) -> Result<()> {
+    pub fn create_dir_all(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .with_context(|| format!("create_dir_all denied for {}", path.display()))?;
-        self.backend.create_dir_all(self.effective_root(), &guarded)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "create_dir_all denied for {}",
+                    path.display()
+                )])
+            })?;
+        self.backend
+            .create_dir_all(self.effective_root(), &guarded)
+            .map_err(fs_diag::from_anyhow)
     }
 
     #[allow(clippy::disallowed_methods)]
-    pub fn read_dir_entries(&self, path: &GuardedPath) -> Result<Vec<super::DirEntry>> {
+    pub fn read_dir_entries(&self, path: &GuardedPath) -> DiagnosticResult<Vec<super::DirEntry>> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Read)
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .with_context(|| format!("read_dir denied for {}", path.display()))?;
-        self.backend.read_dir_entries(&guarded)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("read_dir denied for {}", path.display())])
+            })?;
+        self.backend
+            .read_dir_entries(&guarded)
+            .map_err(fs_diag::from_anyhow)
     }
 
     #[allow(clippy::disallowed_methods)]
-    pub fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>> {
+    pub fn read_file(&self, path: &GuardedPath) -> DiagnosticResult<Vec<u8>> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Read)
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .with_context(|| format!("read denied for {}", path.display()))?;
-        self.backend.read_file(&guarded)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("read denied for {}", path.display())])
+            })?;
+        self.backend
+            .read_file(&guarded)
+            .map_err(fs_diag::from_anyhow)
     }
 
     #[allow(clippy::disallowed_methods)]
-    pub fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
+    pub fn open_read(&self, path: &GuardedPath) -> DiagnosticResult<Box<dyn std::io::Read + Send>> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Read)
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .with_context(|| format!("open_read denied for {}", path.display()))?;
-        self.backend.open_read(&guarded)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("open_read denied for {}", path.display())])
+            })?;
+        self.backend
+            .open_read(&guarded)
+            .map_err(fs_diag::from_anyhow)
     }
 
     #[allow(clippy::disallowed_methods)]
-    pub fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
+    pub fn open_write(
+        &self,
+        path: &GuardedPath,
+    ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .with_context(|| format!("open_write denied for {}", path.display()))?;
-        self.backend.open_write(&guarded)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("open_write denied for {}", path.display())])
+            })?;
+        self.backend
+            .open_write(&guarded)
+            .map_err(fs_diag::from_anyhow)
     }
 
     #[allow(clippy::disallowed_methods)]
-    pub fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
+    pub fn open_append(
+        &self,
+        path: &GuardedPath,
+    ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .with_context(|| format!("open_append denied for {}", path.display()))?;
-        self.backend.open_append(&guarded)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("open_append denied for {}", path.display())])
+            })?;
+        self.backend
+            .open_append(&guarded)
+            .map_err(fs_diag::from_anyhow)
     }
 
     /// Guard-checked link-refusing read open: containment of the
@@ -102,14 +140,19 @@ impl PathResolver {
         &self,
         path: &GuardedPath,
         expected_root: &GuardedPath,
-    ) -> Result<Box<dyn std::io::Read + Send>> {
+    ) -> DiagnosticResult<Box<dyn std::io::Read + Send>> {
         self.check_access(path.as_path(), AccessMode::Read)
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .with_context(|| format!("open_read denied for {}", path.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("open_read denied for {}", path.display())])
+            })?;
         refuse_final_symlink(path)?;
-        self.backend.open_read_nofollow(path, expected_root)
+        self.backend
+            .open_read_nofollow(path, expected_root)
+            .map_err(fs_diag::from_anyhow)
     }
 
     /// Guard-checked link-refusing write open (same construction, plus
@@ -119,11 +162,16 @@ impl PathResolver {
         &self,
         path: &GuardedPath,
         expected_root: &GuardedPath,
-    ) -> Result<Box<dyn std::io::Write + Send>> {
+    ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         self.check_access(path.as_path(), AccessMode::Write)
-            .with_context(|| format!("open_write denied for {}", path.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("open_write denied for {}", path.display())])
+            })?;
         refuse_final_symlink(path)?;
-        self.backend.open_write_nofollow(path, expected_root)
+        self.backend
+            .open_write_nofollow(path, expected_root)
+            .map_err(fs_diag::from_anyhow)
     }
 
     /// Refuse planted intermediate links under `base` along `rel`: a
@@ -136,7 +184,7 @@ impl PathResolver {
     /// `SYSTEM`, where guard containment is vacuous. Skipped under
     /// Miri: synthetic state holds no links.
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-    pub fn refuse_link_ancestors(base: &GuardedPath, rel: &str) -> Result<()> {
+    pub fn refuse_link_ancestors(base: &GuardedPath, rel: &str) -> DiagnosticResult<()> {
         #[cfg(miri)]
         {
             let _ = (base, rel);
@@ -152,17 +200,18 @@ impl PathResolver {
                     continue;
                 }
                 if part == ".." {
-                    return Err(anyhow::Error::new(fs_diag::refuses_parent_reference(base)));
+                    return Err(fs_diag::refuses_parent_reference(base));
                 }
                 current.push(part);
                 match std::fs::symlink_metadata(&current) {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => {
-                        return Err(e)
-                            .with_context(|| format!("lstat denied for {}", current.display()));
+                        return Err(fs_diag::from_anyhow(anyhow::Error::from(e)).with_contexts(
+                            vec![format!("lstat denied for {}", current.display())],
+                        ));
                     }
                     Ok(meta) if meta.file_type().is_symlink() => {
-                        return Err(anyhow::Error::new(fs_diag::refuses_link_ancestor(&current)));
+                        return Err(fs_diag::refuses_link_ancestor(&current));
                     }
                     Ok(_) => {}
                 }
@@ -173,96 +222,137 @@ impl PathResolver {
 
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_methods)]
-    pub fn read_to_string(&self, path: &GuardedPath) -> Result<String> {
+    pub fn read_to_string(&self, path: &GuardedPath) -> DiagnosticResult<String> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Read)
-            .with_context(|| format!("read denied for {}", path.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("read denied for {}", path.display())])
+            })?;
         let s = fs::read_to_string(guarded.as_path())
-            .with_context(|| format!("failed to read {}", guarded.display()))?;
+            .map_err(anyhow::Error::from)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("failed to read {}", guarded.display())])
+            })?;
         Ok(s)
     }
 
     #[cfg(miri)]
-    pub fn read_to_string(&self, path: &GuardedPath) -> Result<String> {
+    pub fn read_to_string(&self, path: &GuardedPath) -> DiagnosticResult<String> {
         let bytes = self.read_file(path)?;
-        let s = String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path))?;
+        let s = String::from_utf8(bytes)
+            .map_err(anyhow::Error::from)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| diag.with_contexts(vec![format!("{path} is not UTF-8")]))?;
         Ok(s)
     }
 
     #[allow(clippy::disallowed_methods)]
-    pub fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+    pub fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .with_context(|| format!("write denied for {}", path.display()))?;
-        self.backend.write_file(&guarded, contents)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("write denied for {}", path.display())])
+            })?;
+        self.backend
+            .write_file(&guarded, contents)
+            .map_err(fs_diag::from_anyhow)
     }
 
     #[allow(clippy::disallowed_methods)]
-    pub fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+    pub fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .with_context(|| format!("append denied for {}", path.display()))?;
-        self.backend.append_file(&guarded, contents)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("append denied for {}", path.display())])
+            })?;
+        self.backend
+            .append_file(&guarded, contents)
+            .map_err(fs_diag::from_anyhow)
     }
 
-    pub fn ensure_parent_dir(&self, path: &GuardedPath) -> Result<()> {
+    pub fn ensure_parent_dir(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         if let Some(parent) = path.as_path().parent() {
             let parent_guard = self
                 .check_access(parent, AccessMode::Write)
                 .or_else(|_| {
                     self.check_access_with_root(&self.build_context, parent, AccessMode::Write)
                 })
-                .with_context(|| format!("parent {} escapes root", parent.display()))?;
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!("parent {} escapes root", parent.display())])
+                })?;
             self.backend
-                .create_dir_all(self.effective_root(), &parent_guard)?;
+                .create_dir_all(self.effective_root(), &parent_guard)
+                .map_err(fs_diag::from_anyhow)?;
         }
         Ok(())
     }
 
     #[allow(clippy::disallowed_methods)]
-    pub fn canonicalize(&self, path: &GuardedPath) -> Result<GuardedPath> {
+    pub fn canonicalize(&self, path: &GuardedPath) -> DiagnosticResult<GuardedPath> {
         let cand = self
             .check_access(path.as_path(), AccessMode::Read)
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .with_context(|| format!("canonicalize denied for {}", path.display()))?;
-        self.backend.canonicalize(cand)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("canonicalize denied for {}", path.display())])
+            })?;
+        self.backend
+            .canonicalize(cand)
+            .map_err(fs_diag::from_anyhow)
     }
 
     #[allow(clippy::disallowed_methods)]
-    pub fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata> {
+    pub fn metadata(&self, path: &GuardedPath) -> DiagnosticResult<std::fs::Metadata> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Read)
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .with_context(|| format!("metadata denied for {}", path.display()))?;
-        self.backend.metadata(&guarded)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("metadata denied for {}", path.display())])
+            })?;
+        self.backend
+            .metadata(&guarded)
+            .map_err(fs_diag::from_anyhow)
     }
 
     /// Byte length plus real Unix mode bits for one archive member (see
     /// [`crate::WorkspaceFs::archive_member_stat`]). Guard checks mirror
     /// [`Self::metadata`]; the backend answers without a host `stat` where
     /// it cannot perform one.
-    pub fn archive_member_stat(&self, path: &GuardedPath) -> Result<(u64, Option<u32>)> {
+    pub fn archive_member_stat(&self, path: &GuardedPath) -> DiagnosticResult<(u64, Option<u32>)> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Read)
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .with_context(|| format!("metadata denied for {}", path.display()))?;
-        self.backend.archive_member_stat(&guarded)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("metadata denied for {}", path.display())])
+            })?;
+        self.backend
+            .archive_member_stat(&guarded)
+            .map_err(fs_diag::from_anyhow)
     }
 
-    pub fn entry_kind(&self, path: &GuardedPath) -> Result<super::EntryKind> {
-        self.backend.entry_kind(path)
+    pub fn entry_kind(&self, path: &GuardedPath) -> DiagnosticResult<super::EntryKind> {
+        self.backend.entry_kind(path).map_err(fs_diag::from_anyhow)
     }
 
     /// No-follow variant of [`Self::entry_kind`]: reports symlinks as
     /// [`super::EntryKind::Symlink`] instead of resolving through them.
-    pub fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<super::EntryKind> {
-        self.backend.entry_kind_no_follow(path)
+    pub fn entry_kind_no_follow(&self, path: &GuardedPath) -> DiagnosticResult<super::EntryKind> {
+        self.backend
+            .entry_kind_no_follow(path)
+            .map_err(fs_diag::from_anyhow)
     }
 
     /// Lightweight existence check that avoids host `stat` calls under Miri.
@@ -271,30 +361,50 @@ impl PathResolver {
     }
 
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-    pub fn metadata_unguarded(&self, path: &UnguardedPath) -> Result<std::fs::Metadata> {
+    pub fn metadata_unguarded(&self, path: &UnguardedPath) -> DiagnosticResult<std::fs::Metadata> {
         #[cfg(not(miri))]
         {
             let meta = std::fs::metadata(path.as_path())
-                .with_context(|| format!("failed to stat external {}", path.as_path().display()))?;
+                .map_err(anyhow::Error::from)
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
+                        "failed to stat external {}",
+                        path.as_path().display()
+                    )])
+                })?;
             Ok(meta)
         }
         #[cfg(miri)]
         {
             let _ = path;
-            Err(anyhow::Error::new(fs_diag::metadata_unguarded_miri()))
+            Err(fs_diag::metadata_unguarded_miri())
         }
     }
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_methods)]
-    pub fn set_permissions_mode_unix(&self, path: &GuardedPath, mode: u32) -> Result<()> {
+    pub fn set_permissions_mode_unix(&self, path: &GuardedPath, mode: u32) -> DiagnosticResult<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let guarded = self
                 .check_access(path.as_path(), AccessMode::Write)
-                .with_context(|| format!("set_permissions denied for {}", path.display()))?;
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
+                        "set_permissions denied for {}",
+                        path.display()
+                    )])
+                })?;
             fs::set_permissions(guarded.as_path(), fs::Permissions::from_mode(mode))
-                .with_context(|| format!("failed to set permissions on {}", guarded.display()))?;
+                .map_err(anyhow::Error::from)
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
+                        "failed to set permissions on {}",
+                        guarded.display()
+                    )])
+                })?;
         }
         #[cfg(not(unix))]
         {
@@ -304,61 +414,103 @@ impl PathResolver {
             // everywhere with the same context.
             let guarded = self
                 .check_access(path.as_path(), AccessMode::Write)
-                .with_context(|| format!("set_permissions denied for {}", path.display()))?;
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
+                        "set_permissions denied for {}",
+                        path.display()
+                    )])
+                })?;
             std::fs::metadata(guarded.as_path())
-                .with_context(|| format!("failed to set permissions on {}", guarded.display()))?;
+                .map_err(anyhow::Error::from)
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
+                        "failed to set permissions on {}",
+                        guarded.display()
+                    )])
+                })?;
             let _ = mode;
         }
         Ok(())
     }
 
     #[cfg(miri)]
-    pub fn set_permissions_mode_unix(&self, _path: &GuardedPath, _mode: u32) -> Result<()> {
+    pub fn set_permissions_mode_unix(
+        &self,
+        _path: &GuardedPath,
+        _mode: u32,
+    ) -> DiagnosticResult<()> {
         Ok(())
     }
 
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-    pub fn open_file_unguarded(&self, path: &UnguardedPath) -> Result<std::fs::File> {
+    pub fn open_file_unguarded(&self, path: &UnguardedPath) -> DiagnosticResult<std::fs::File> {
         #[cfg(not(miri))]
         {
             let f = fs::File::open(path.as_path())
-                .with_context(|| format!("failed to open {}", path.as_path().display()))?;
+                .map_err(anyhow::Error::from)
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!("failed to open {}", path.as_path().display())])
+                })?;
             Ok(f)
         }
         #[cfg(miri)]
         {
             let _ = path;
-            Err(anyhow::Error::new(fs_diag::open_file_unguarded_miri()))
+            Err(fs_diag::open_file_unguarded_miri())
         }
     }
 
     /// Remove a file after validating it is within allowed roots.
     #[allow(clippy::disallowed_methods)]
-    pub fn remove_file(&self, path: &GuardedPath) -> Result<()> {
+    pub fn remove_file(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .with_context(|| format!("remove_file denied for {}", path.display()))?;
-        self.backend.remove_file(&guarded)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("remove_file denied for {}", path.display())])
+            })?;
+        self.backend
+            .remove_file(&guarded)
+            .map_err(fs_diag::from_anyhow)
     }
 
     /// Remove a directory and its contents after validating it is within allowed roots.
     #[allow(clippy::disallowed_methods)]
-    pub fn remove_dir_all(&self, path: &GuardedPath) -> Result<()> {
+    pub fn remove_dir_all(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .with_context(|| format!("remove_dir_all denied for {}", path.display()))?;
-        self.backend.remove_dir_all(&guarded)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "remove_dir_all denied for {}",
+                    path.display()
+                )])
+            })?;
+        self.backend
+            .remove_dir_all(&guarded)
+            .map_err(fs_diag::from_anyhow)
     }
 
     /// Remove an empty directory after validating it is within allowed
     /// roots. Fails when the directory holds entries, so `REMOVE` without
     /// `--recursive` never deletes a tree.
     #[allow(clippy::disallowed_methods)]
-    pub fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()> {
+    pub fn remove_empty_dir(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .with_context(|| format!("remove_empty_dir denied for {}", path.display()))?;
-        self.backend.remove_empty_dir(&guarded)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "remove_empty_dir denied for {}",
+                    path.display()
+                )])
+            })?;
+        self.backend
+            .remove_empty_dir(&guarded)
+            .map_err(fs_diag::from_anyhow)
     }
 
     /// Remove the symlink at the lexical path when one stands there,
@@ -369,7 +521,7 @@ impl PathResolver {
     /// the link is re-verified with `symlink_metadata` immediately before
     /// removal. Host only; the synthetic backends hold no symlinks and
     /// report `false`.
-    pub fn remove_link_if_symlink(&self, cwd: &GuardedPath, rel: &str) -> Result<bool> {
+    pub fn remove_link_if_symlink(&self, cwd: &GuardedPath, rel: &str) -> DiagnosticResult<bool> {
         #[cfg(miri)]
         {
             let _ = (cwd, rel);
@@ -383,7 +535,7 @@ impl PathResolver {
 
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-    fn remove_link_if_symlink_host(&self, cwd: &GuardedPath, rel: &str) -> Result<bool> {
+    fn remove_link_if_symlink_host(&self, cwd: &GuardedPath, rel: &str) -> DiagnosticResult<bool> {
         use super::to_forward_slashes;
         use std::path::Path;
         let normalized = to_forward_slashes(rel);
@@ -392,28 +544,31 @@ impl PathResolver {
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
         else {
-            return Err(anyhow::Error::new(fs_diag::remove_link_no_file_name(rel)));
+            return Err(fs_diag::remove_link_no_file_name(rel));
         };
         if name == "." || name == ".." {
-            return Err(anyhow::Error::new(fs_diag::remove_link_no_file_name(rel)));
+            return Err(fs_diag::remove_link_no_file_name(rel));
         }
         let parent_str = rel_path
             .parent()
             .map(|p| p.to_string_lossy().into_owned())
             .filter(|p| !p.is_empty());
         let parent_guard = match parent_str {
-            Some(parent) => self.resolve_write(cwd, &parent)?,
-            None => self.resolve_write(cwd, ".")?,
+            Some(parent) => self
+                .resolve_write(cwd, &parent)
+                .map_err(fs_diag::from_anyhow)?,
+            None => self.resolve_write(cwd, ".").map_err(fs_diag::from_anyhow)?,
         };
         let link_path = parent_guard.as_path().join(&name);
         if !link_path.starts_with(parent_guard.as_path()) {
-            return Err(anyhow::Error::new(fs_diag::remove_link_escapes_root(rel)));
+            return Err(fs_diag::remove_link_escapes_root(rel));
         }
         let meta = match std::fs::symlink_metadata(&link_path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => {
-                return Err(e).with_context(|| format!("failed to stat {rel}"));
+                return Err(fs_diag::from_anyhow(anyhow::Error::from(e))
+                    .with_contexts(vec![format!("failed to stat {rel}")]));
             }
         };
         if !meta.file_type().is_symlink() {
@@ -426,11 +581,18 @@ impl PathResolver {
                 .unwrap_or(false);
             if is_dir_link {
                 std::fs::remove_dir(&link_path)
-                    .with_context(|| format!("failed to remove link {rel}"))?;
+                    .map_err(anyhow::Error::from)
+                    .map_err(fs_diag::from_anyhow)
+                    .map_err(|diag| {
+                        diag.with_contexts(vec![format!("failed to remove link {rel}")])
+                    })?;
                 return Ok(true);
             }
         }
-        std::fs::remove_file(&link_path).with_context(|| format!("failed to remove link {rel}"))?;
+        std::fs::remove_file(&link_path)
+            .map_err(anyhow::Error::from)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| diag.with_contexts(vec![format!("failed to remove link {rel}")]))?;
         Ok(true)
     }
 
@@ -439,67 +601,105 @@ impl PathResolver {
     /// Host only; Miri callers stay memory-only and never call this.
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-    pub fn create_spill_file(&self, path: &GuardedPath) -> Result<SpillFile> {
+    pub fn create_spill_file(&self, path: &GuardedPath) -> DiagnosticResult<SpillFile> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .with_context(|| format!("spill create denied for {}", path.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("spill create denied for {}", path.display())])
+            })?;
         if let Some(parent) = guarded.as_path().parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating dir {}", parent.display()))?;
+                .map_err(anyhow::Error::from)
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!("creating dir {}", parent.display())])
+                })?;
         }
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .open(guarded.as_path())
-            .with_context(|| format!("failed to create spill {}", guarded.display()))?;
+            .map_err(anyhow::Error::from)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "failed to create spill {}",
+                    guarded.display()
+                )])
+            })?;
         Ok(SpillFile { file })
     }
 
     /// Open an existing spill file with read/write access.
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-    pub fn open_spill_file(&self, path: &GuardedPath) -> Result<SpillFile> {
+    pub fn open_spill_file(&self, path: &GuardedPath) -> DiagnosticResult<SpillFile> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .with_context(|| format!("spill open denied for {}", path.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("spill open denied for {}", path.display())])
+            })?;
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(guarded.as_path())
-            .with_context(|| format!("failed to open spill {}", guarded.display()))?;
+            .map_err(anyhow::Error::from)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("failed to open spill {}", guarded.display())])
+            })?;
         Ok(SpillFile { file })
     }
 
     /// Truncate a spill file to `len` bytes.
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-    pub fn truncate_spill_file(&self, path: &GuardedPath, len: u64) -> Result<()> {
+    pub fn truncate_spill_file(&self, path: &GuardedPath, len: u64) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .with_context(|| format!("spill truncate denied for {}", path.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "spill truncate denied for {}",
+                    path.display()
+                )])
+            })?;
         let file = std::fs::OpenOptions::new()
             .write(true)
             .open(guarded.as_path())
-            .with_context(|| format!("failed to open spill {}", guarded.display()))?;
+            .map_err(anyhow::Error::from)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("failed to open spill {}", guarded.display())])
+            })?;
         file.set_len(len)
-            .with_context(|| format!("failed to truncate spill {}", guarded.display()))?;
+            .map_err(anyhow::Error::from)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "failed to truncate spill {}",
+                    guarded.display()
+                )])
+            })?;
         Ok(())
     }
 
     #[cfg(miri)]
-    pub fn create_spill_file(&self, _path: &GuardedPath) -> Result<SpillFile> {
-        Err(anyhow::Error::new(fs_diag::spill_files_miri()))
+    pub fn create_spill_file(&self, _path: &GuardedPath) -> DiagnosticResult<SpillFile> {
+        Err(fs_diag::spill_files_miri())
     }
 
     #[cfg(miri)]
-    pub fn open_spill_file(&self, _path: &GuardedPath) -> Result<SpillFile> {
-        Err(anyhow::Error::new(fs_diag::spill_files_miri()))
+    pub fn open_spill_file(&self, _path: &GuardedPath) -> DiagnosticResult<SpillFile> {
+        Err(fs_diag::spill_files_miri())
     }
 
     #[cfg(miri)]
-    pub fn truncate_spill_file(&self, _path: &GuardedPath, _len: u64) -> Result<()> {
-        Err(anyhow::Error::new(fs_diag::spill_files_miri()))
+    pub fn truncate_spill_file(&self, _path: &GuardedPath, _len: u64) -> DiagnosticResult<()> {
+        Err(fs_diag::spill_files_miri())
     }
 
     /// Write a secret file with `0600` enforced at open time (never
@@ -509,13 +709,20 @@ impl PathResolver {
     /// the existing file. Host only; Miri callers bail.
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-    pub fn write_private_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+    pub fn write_private_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .with_context(|| format!("private write denied for {}", path.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("private write denied for {}", path.display())])
+            })?;
         if let Some(parent) = guarded.as_path().parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating dir {}", parent.display()))?;
+                .map_err(anyhow::Error::from)
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!("creating dir {}", parent.display())])
+                })?;
         }
         #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
@@ -525,15 +732,33 @@ impl PathResolver {
         options.mode(0o600);
         let mut file = options
             .open(guarded.as_path())
-            .with_context(|| format!("failed to create private {}", guarded.display()))?;
+            .map_err(anyhow::Error::from)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "failed to create private {}",
+                    guarded.display()
+                )])
+            })?;
         std::io::Write::write_all(&mut file, contents)
-            .with_context(|| format!("failed to write private {}", guarded.display()))?;
+            .map_err(anyhow::Error::from)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "failed to write private {}",
+                    guarded.display()
+                )])
+            })?;
         Ok(())
     }
 
     #[cfg(miri)]
-    pub fn write_private_file(&self, _path: &GuardedPath, _contents: &[u8]) -> Result<()> {
-        Err(anyhow::Error::new(fs_diag::private_files_miri()))
+    pub fn write_private_file(
+        &self,
+        _path: &GuardedPath,
+        _contents: &[u8],
+    ) -> DiagnosticResult<()> {
+        Err(fs_diag::private_files_miri())
     }
 }
 
@@ -550,10 +775,14 @@ pub struct SpillFile {
 #[cfg(not(miri))]
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 impl SpillFile {
-    pub fn set_len(&self, len: u64) -> Result<()> {
+    pub fn set_len(&self, len: u64) -> DiagnosticResult<()> {
         self.file
             .set_len(len)
-            .with_context(|| "failed to truncate spill file")?;
+            .map_err(anyhow::Error::from)
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec!["failed to truncate spill file".to_string()])
+            })?;
         Ok(())
     }
 }
@@ -594,43 +823,57 @@ pub struct SpillFile {
 impl PathResolver {
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_methods)]
-    pub fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
+    pub fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<()> {
         let guarded_src = self
             .recheck_resolved_source(src)
-            .with_context(|| format!("symlink source denied for {}", src.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("symlink source denied for {}", src.display())])
+            })?;
         let guarded_dst = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .with_context(|| format!("symlink destination denied for {}", dst.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "symlink destination denied for {}",
+                    dst.display()
+                )])
+            })?;
 
         if guarded_dst.as_path().exists() {
-            return Err(anyhow::Error::new(fs_diag::symlink_dest_exists(
-                &guarded_dst,
-            )));
+            return Err(fs_diag::symlink_dest_exists(&guarded_dst));
         }
         if guarded_src.as_path() == guarded_dst.as_path() {
-            return Err(anyhow::Error::new(fs_diag::symlink_self_link(&guarded_src)));
+            return Err(fs_diag::symlink_self_link(&guarded_src));
         }
 
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(guarded_src.as_path(), guarded_dst.as_path()).with_context(
-                || {
-                    format!(
+            std::os::unix::fs::symlink(guarded_src.as_path(), guarded_dst.as_path())
+                .map_err(anyhow::Error::from)
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
                         "failed to symlink {} -> {}",
                         guarded_src.display(),
                         guarded_dst.display()
-                    )
-                },
-            )?;
+                    )])
+                })?;
             Ok(())
         }
 
         #[cfg(all(windows, not(unix)))]
         {
             use std::os::windows::fs::{symlink_dir, symlink_file};
-            let meta = fs::metadata(guarded_src.as_path()).with_context(|| {
-                format!("failed to stat symlink source {}", guarded_src.display())
-            })?;
+            let meta = fs::metadata(guarded_src.as_path())
+                .map_err(anyhow::Error::from)
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
+                        "failed to stat symlink source {}",
+                        guarded_src.display()
+                    )])
+                })?;
 
             let try_link = if meta.is_dir() {
                 symlink_dir(guarded_src.as_path(), guarded_dst.as_path())
@@ -638,45 +881,55 @@ impl PathResolver {
                 symlink_file(guarded_src.as_path(), guarded_dst.as_path())
             };
 
-            try_link.with_context(|| {
-                format!(
-                    "failed to symlink {} -> {}",
-                    guarded_src.display(),
-                    guarded_dst.display()
-                )
-            })?;
+            try_link
+                .map_err(anyhow::Error::from)
+                .map_err(fs_diag::from_anyhow)
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
+                        "failed to symlink {} -> {}",
+                        guarded_src.display(),
+                        guarded_dst.display()
+                    )])
+                })?;
             Ok(())
         }
 
         #[cfg(not(any(unix, windows)))]
         {
-            return Err(anyhow::Error::new(fs_diag::symlink_unsupported_platform(
+            return Err(fs_diag::symlink_unsupported_platform(
                 &guarded_src,
                 &guarded_dst,
-            )));
+            ));
         }
     }
 
     #[cfg(miri)]
-    pub fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
+    pub fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<()> {
         let guarded_src = self
             .recheck_resolved_source(src)
-            .with_context(|| format!("symlink source denied for {}", src.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!("symlink source denied for {}", src.display())])
+            })?;
         let guarded_dst = self
             .check_access_with_root(self.effective_root(), dst.as_path(), AccessMode::Write)
-            .with_context(|| format!("symlink destination denied for {}", dst.display()))?;
+            .map_err(fs_diag::from_anyhow)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "symlink destination denied for {}",
+                    dst.display()
+                )])
+            })?;
 
         if self.entry_kind(&guarded_dst).is_ok() {
-            return Err(anyhow::Error::new(fs_diag::symlink_dest_exists(
-                &guarded_dst,
-            )));
+            return Err(fs_diag::symlink_dest_exists(&guarded_dst));
         }
 
         let _ = self.entry_kind(&guarded_src)?;
-        Err(anyhow::Error::new(fs_diag::symlink_unsupported_miri(
+        Err(fs_diag::symlink_unsupported_miri(
             &guarded_src,
             &guarded_dst,
-        )))
+        ))
     }
 }
 

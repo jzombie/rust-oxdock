@@ -355,7 +355,7 @@ fn read_guarded(path: &GuardedPath) -> DiagnosticResult<String> {
         .map_err(|err| mcp_diag::session_guard_script_root(&err))?;
     resolver
         .read_to_string(path)
-        .map_err(|err| mcp_diag::session_script_read_failed(&err))
+        .map_err(|err| mcp_diag::session_script_read_failed(&anyhow::Error::new(err)))
 }
 
 impl ServerHandler for OxDockHandler {

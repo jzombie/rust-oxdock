@@ -21,7 +21,7 @@ impl PathResolver {
         dst: &GuardedPath,
         mode: u32,
     ) -> DiagnosticResult<()> {
-        self.ensure_parent_dir(dst).map_err(fs_diag::from_anyhow)?;
+        self.ensure_parent_dir(dst)?;
         let guarded_dst = self
             .check_access(dst.as_path(), AccessMode::Write)
             .map_err(fs_diag::from_anyhow)

@@ -852,9 +852,9 @@ fn read_script(source: &ScriptSource) -> Result<String> {
     match source {
         ScriptSource::Path(path) => {
             let resolver = PathResolver::new(path.root(), path.root())?;
-            resolver
-                .read_to_string(path)
-                .map_err(|e| errors::read_script_at(&path.display().to_string(), &e))
+            resolver.read_to_string(path).map_err(|e| {
+                errors::read_script_at(&path.display().to_string(), &anyhow::Error::new(e))
+            })
         }
         ScriptSource::Stdin => {
             let mut buf = String::new();

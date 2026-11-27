@@ -20,7 +20,7 @@ fn load_badge_script() -> Result<String> {
     let script_path = resolver
         .root()
         .join(".github/scripts/gha-miri-badge.oxfile")?;
-    resolver.read_to_string(&script_path)
+    Ok(resolver.read_to_string(&script_path)?)
 }
 
 /// The badge script must always parse: a breaking language change that

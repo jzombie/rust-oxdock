@@ -26,7 +26,7 @@ fn load_install_script() -> Result<String> {
     let root = GuardedPath::new_root_from_str(&repo_root)?;
     let resolver = PathResolver::new_guarded(root.clone(), root)?;
     let script_path = resolver.root().join("install.oxfile")?;
-    resolver.read_to_string(&script_path)
+    Ok(resolver.read_to_string(&script_path)?)
 }
 
 fn parse_install_script(text: &str) -> Result<Vec<oxdock_parser::Step>> {
