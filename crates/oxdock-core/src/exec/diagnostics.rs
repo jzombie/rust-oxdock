@@ -12,9 +12,9 @@ use oxdock_parser::{
     ANY_TYPE_NAME, BOOL_TYPE_NAME, Expr, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
     KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC,
     KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY,
-    KEYWORD_COPY_GIT, KEYWORD_ENV, KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC,
-    KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET,
-    KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ,
+    KEYWORD_COPY_GIT, KEYWORD_ENV, KEYWORD_EXIT, KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FOR,
+    KEYWORD_FUNC, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV, KEYWORD_INSTALL, KEYWORD_ISOLATED,
+    KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ,
     KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN,
     KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TIMEOUT,
     KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WRITE,
@@ -50,6 +50,11 @@ const FIELD_TARGET: &str = "target";
 const FIELD_TASK: &str = "task";
 const FIELD_VAR: &str = "var";
 const FIELD_YIELD: &str = "yield";
+
+/// Stable key for the pipeline `EXIT` request diagnostic. Single
+/// spelling: the ctor and the code predicate reference this, never
+/// literals, so a key rename is one edit.
+pub(super) const KEY_EVAL_EXIT_REQUESTED: &str = "dsl.eval.exit_requested";
 
 /// Duplicate field name inside one MAP spelling.
 pub fn map_duplicate_field(field: &str) -> Diagnostic {
@@ -1774,6 +1779,36 @@ pub fn eval_async_thread_panicked(detail: &str) -> Diagnostic {
         detail.to_string(),
         Diagnostic::make_fields(&[(FIELD_DETAIL, detail)]),
     )
+}
+
+/// Pipeline `EXIT` request. Takes the numeric code; the message matches
+/// the historic carrier text byte-identically and the code rides as the
+/// `code` field. No `ExitRequest` source rides along: the key plus field
+/// carry the code (recognized by both exit-code walkers), so `{err:#}`
+/// renders the message once instead of duplicating it behind an
+/// identical source node. Shared by `handlers::exit` (H4) and the
+/// `ThreadJoinHandle` bare-exit relay.
+pub fn eval_exit_requested(code: i64) -> Diagnostic {
+    let code_text = code.to_string();
+    Diagnostic::new(
+        KEY_EVAL_EXIT_REQUESTED,
+        format!("{KEYWORD_EXIT} requested with code {code}"),
+        Diagnostic::make_fields(&[(FIELD_CODE, &code_text)]),
+    )
+}
+
+/// Code carried by the keyed exit-requested diagnostic, if this node
+/// is one. Single owner for the key-plus-field predicate:
+/// serialization (`eval_exit_requested`) and parsing live together,
+/// so both exit-code walkers delegate here instead of restating
+/// the strings. Reads the `code` field so the bare-exit relay needs
+/// no identical `ExitRequest` source node (which would duplicate
+/// `{err:#}`).
+pub(super) fn eval_exit_requested_code(diag: &Diagnostic) -> Option<i64> {
+    if diag.key() != KEY_EVAL_EXIT_REQUESTED {
+        return None;
+    }
+    diag.fields().get(FIELD_CODE)?.parse::<i64>().ok()
 }
 
 /// Outer snapshot context for a failed run. Takes the rendered snapshot

@@ -91,11 +91,11 @@ impl ThreadJoinHandle {
     /// pair: a diagnostic clones directly (key, message, span, hint,
     /// and fields survive, with an `EXIT` code chained through the
     /// request itself only when the stored chain lacks one); a bare
-    /// exit relays as the typed request alone until a dedicated
-    /// exit diagnostic exists; neither stored means the thread
-    /// vanished without an error. Captured plain-text contexts
-    /// replay outside the carrier, innermost first, preserving
-    /// individual frames.
+    /// exit relays as the keyed exit-requested diagnostic (code in
+    /// the field, no identical source, so `{err:#}` renders once);
+    /// neither stored means the thread vanished without an error.
+    /// Captured plain-text contexts replay outside the carrier,
+    /// innermost first, preserving individual frames.
     fn reemit_error(&self) -> anyhow::Error {
         let mut carrier = match (self.thread_error.clone(), self.thread_exit_code) {
             (Some(mut diag), maybe_code) => {
@@ -110,7 +110,7 @@ impl ThreadJoinHandle {
                 }
                 anyhow::Error::new(diag)
             }
-            (None, Some(code)) => anyhow::Error::new(super::exit::ExitRequest::new(code)),
+            (None, Some(code)) => anyhow::Error::new(step_diag::eval_exit_requested(code)),
             (None, None) => anyhow::Error::new(step_diag::eval_async_thread_panicked(
                 "background thread failed without an error",
             )),
@@ -1852,18 +1852,19 @@ mod thread_handle_tests {
     }
 
     #[test]
-    fn bare_exit_request_relays_without_dispatch_failed_diagnostic() {
+    fn bare_exit_request_relays_as_keyed_diagnostic() {
         let join = std::thread::spawn(|| -> Result<()> {
             Err(anyhow::Error::new(super::super::exit::ExitRequest::new(7)).context("step 2"))
         });
         let mut handle = bare_handle(Some(join));
         let err = handle.wait().expect_err("exit request must surface");
         assert_eq!(exit_code_of(&err), Some(7));
-        assert!(
-            err.chain()
-                .all(|cause| cause.downcast_ref::<Diagnostic>().is_none()),
-            "bare exit relays without fabricating a diagnostic: {err:#}"
-        );
+        let diag = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+            .expect("bare exit relays as a keyed diagnostic");
+        assert_eq!(diag.key(), "dsl.eval.exit_requested");
+        assert_eq!(diag.fields().get("code"), Some(&"7".to_string()));
         assert_eq!(format!("{err:#}"), "step 2: EXIT requested with code 7");
     }
 }

@@ -315,3 +315,34 @@ All sites already use keyed ctors; flip signatures to
   no-`Diagnostic` assert on the bare path. Gates: core
   422 + 629 + 12 + 2, diagnostics 8, cli `process_exit_code`,
   net-plugin 38, clippy clean, rustfmt clean.
+
+- B1f (2026-11-27): keyed exit diagnostic (H4 share). Added
+  `eval_exit_requested(code)` (`dsl.eval.exit_requested`,
+  message byte-identical to the historic carrier, `code` field,
+  no source so `{err:#}` renders once). Both exit-code walkers
+  recognize it (field read) alongside `ExitRequest`, so
+  `handlers::exit` and the `ThreadJoinHandle` bare-exit arm now
+  relay the keyed diagnostic instead of the bare request.
+  Bare-exit test now asserts the key + `code` field + single
+  `{err:#}`; new walker test pins sourceless carry and context
+  passthrough. `BackgroundHandle` trait flip sequenced after
+  `step_error` span sync within B1: outer `thread_context`
+  frames have no Diagnostic-native slot until the span sync
+  lands (folding them into the message would reintroduce
+  flattening). Gates: core
+  423 + 629 + 12 + 2, diagnostics 8, cli `process_exit_code`,
+  net-plugin 38, clippy clean, rustfmt clean.
+
+- B1g (2026-11-27): review hardening of the B1f carrier
+  change. Single-owned the exit-requested predicate:
+  `KEY_EVAL_EXIT_REQUESTED` sits beside `FIELD_CODE` in
+  `diagnostics.rs`, and `eval_exit_requested_code` owns the
+  key-plus-field read; both walkers in `exit.rs` delegate, so
+  no literals remain in production code. CLI regression test
+  now covers the keyed carrier (`eval_exit_requested(3)` bare
+  and under context), proving `process_exit_code` without
+  manual `ExitRequest` construction. Full gates: core
+  423 + 629 + 12 + 2, diagnostics 8, cli 50 + integration 12,
+  mcp 11 + 26 + 13, net-plugin 38, logic-tests all green
+  (5 + 2 + 8 + 17 + 15 + 19 + 1 + 4 + 4 + 31 + 6 + 12 + 2 +
+  19 + 11), clippy clean, rustfmt clean.

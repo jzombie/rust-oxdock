@@ -2251,6 +2251,12 @@ mod tests {
         let relayed =
             anyhow::Error::new(ExitRequest::new(3)).context("REMOTE 'prod' exited with code 3");
         assert_eq!(process_exit_code(&relayed), 3);
+        let keyed = anyhow::Error::new(oxdock_core::exec::diagnostics::eval_exit_requested(3));
+        assert_eq!(process_exit_code(&keyed), 3);
+        let keyed_wrapped =
+            anyhow::Error::new(oxdock_core::exec::diagnostics::eval_exit_requested(3))
+                .context("step 1");
+        assert_eq!(process_exit_code(&keyed_wrapped), 3);
         assert_eq!(process_exit_code(&anyhow::anyhow!("boom")), 1);
         assert_eq!(
             process_exit_code(&anyhow::Error::new(ExitRequest::new(300))),

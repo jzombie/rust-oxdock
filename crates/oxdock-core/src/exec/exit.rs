@@ -70,23 +70,38 @@ impl std::error::Error for ExitRequest {
 
 /// Outermost `EXIT` code in the chain, if any. Relays preserve the code
 /// unchanged, so first-found and last-found agree; outermost wins because
-/// it is the most recent relay decision.
+/// it is the most recent relay decision. Matches both the typed
+/// `ExitRequest` carrier and the keyed `dsl.eval.exit_requested`
+/// diagnostic (code field, no source so `{err:#}` renders once).
 pub fn exit_code_of(err: &anyhow::Error) -> Option<i64> {
-    err.chain()
-        .find_map(|cause| cause.downcast_ref::<ExitRequest>().map(|exit| exit.code()))
+    err.chain().find_map(|cause| {
+        if let Some(exit) = cause.downcast_ref::<ExitRequest>() {
+            return Some(exit.code());
+        }
+        if let Some(diag) = cause.downcast_ref::<Diagnostic>() {
+            return super::diagnostics::eval_exit_requested_code(diag);
+        }
+        None
+    })
 }
 
 /// Outermost `EXIT` code in a `Diagnostic` source chain, if any.
 /// Mirrors [`exit_code_of`] for the Diagnostic-native path: walks
-/// `std::error::Error::source` links looking for `ExitRequest`.
-/// Snapshot and step wrappers attach the request via `with_source`,
-/// so the code survives without flattening the message chain.
+/// `std::error::Error::source` links looking for `ExitRequest` or the
+/// keyed exit-requested diagnostic. Snapshot and step wrappers attach
+/// the request via `with_source`, so the code survives without
+/// flattening the message chain.
 pub fn exit_code_of_diag(err: &Diagnostic) -> Option<i64> {
     let mut current: Option<&(dyn std::error::Error + 'static)> =
         Some(err as &(dyn std::error::Error + 'static));
     while let Some(node) = current {
         if let Some(exit) = node.downcast_ref::<ExitRequest>() {
             return Some(exit.code());
+        }
+        if let Some(diag) = node.downcast_ref::<Diagnostic>()
+            && let Some(code) = super::diagnostics::eval_exit_requested_code(diag)
+        {
+            return Some(code);
         }
         current = node.source();
     }
@@ -192,6 +207,22 @@ mod tests {
             Diagnostic::make_fields(&[]),
         );
         assert_eq!(exit_code_of_diag(&diag), None);
+    }
+
+    #[test]
+    fn keyed_exit_requested_carries_code_without_source() {
+        use std::error::Error as _;
+        let diag = crate::exec::diagnostics::eval_exit_requested(7);
+        assert_eq!(diag.key(), "dsl.eval.exit_requested");
+        assert_eq!(diag.message(), "EXIT requested with code 7");
+        assert_eq!(diag.fields().get("code"), Some(&"7".to_string()));
+        assert!(
+            diag.source().is_none(),
+            "no identical source to duplicate rendering"
+        );
+        assert_eq!(exit_code_of_diag(&diag), Some(7));
+        let carried = exit_code_of(&anyhow::Error::new(diag).context("step 2"));
+        assert_eq!(carried, Some(7));
     }
 
     #[test]
