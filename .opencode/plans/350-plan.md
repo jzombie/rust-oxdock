@@ -73,7 +73,7 @@ All sites already use keyed ctors; flip signatures to
       `enrich_lazy_error` Diagnostic-outer), then mechanical.
 
 ### A5. `oxdock-build` fn flips (dep stays; see below)
-- [ ] Flip remaining fns to `DiagnosticResult`, dropping the
+- [x] Flip remaining fns to `DiagnosticResult`, dropping the
       `anyhow::Error::new(ctor(...))` construction sites
       (`assets.rs` 18 sites already use foreign-error ctors;
       `lib.rs` already anyhow-free)
@@ -1039,3 +1039,54 @@ All sites already use keyed ctors; flip signatures to
   suites, `cargo clippy --workspace --all-targets` clean (zero
   warnings), `rustfmt --edition 2024 --check` clean on all 23
   touched files.
+
+- A5 (2026-11-27): build fn flips. All 15 fns (`assets.rs`:
+  `embed_assets`, `try_embed_assets`, `prepare_assets`,
+  `try_prepare_assets`, `out_dir_root`, `module_guarded_path`,
+  `script_text`, `run_spec`, `build_and_materialize`,
+  `clear_materialize_dir`, `ensure_materialize_dir`,
+  `asset_input_fingerprint`, `hash_input_path`,
+  `stage_materialize`, `sync_tree`) return `DiagnosticResult`;
+  18 outer `anyhow::Error::new(ctor(...))` wrappers dropped
+  (ctors keep `&anyhow::Error` params as conversion owners,
+  byte-identical). One new keyed ctor for the single bare path:
+  `operation_failed` (`build.operation.failed`, verbatim reason
+  like `proc.run.synthetic_failed`), plus the single owner
+  `from_anyhow` (lossless: first keyed `Diagnostic` in the chain
+  reclaimed, outer `.context(...)` frames replayed via native
+  `with_contexts`, mirroring `lift_dispatch_error`; unkeyed
+  fallout wraps verbatim). All direct fs `?`s
+  (`PathResolver::from_manifest_env`, `GuardedPath::join`,
+  `read_dir_entries`, `read_file`, `entry_kind`,
+  `create_dir_all`, `remove_*`, `copy_file`,
+  `copy_dir_from_unguarded`, `DirEntry::file_type`) map via
+  `from_anyhow`, preserving keyed `fs.*` payloads with frames.
+  `gather_assets`/`emit_embed_module`/`write_file` map the same
+  way (`syn::Error` via `anyhow::Error::new` then `from_anyhow`,
+  verbatim). `script_execution_failed` keeps the A4 bridge
+  (`Diagnostic` via `anyhow::Error::from` into the
+  `&anyhow::Error` ctor, permanent). Test fns widen to
+  `anyhow::Result` (hold flipped callees via `From`,
+  `Diagnostic` into `anyhow`). Pin tests extended (distinct key
+  + verbatim message + reclaim + frame preservation). anyhow
+  parents hold via `From` with no caller changes
+  (`oxdock-macros` `compute_fingerprint`/`clear`/`stage`
+  `{e:#}` identical: `Display` ignores alternate). anyhow dep
+  stays (ctor `&anyhow::Error` params permanent while
+  `oxdock-embed` stays anyhow). Gates: `cargo test -p
+  oxdock-build` green (27 + 4 + 0), `cargo test -p oxdock-macros`
+  green (19 + 1), `cargo check --workspace --all-targets` clean,
+  `cargo clippy -p oxdock-build --all-targets` clean,
+  `rustfmt --edition 2024 --check` clean on both touched files.
+  AMEND follow-up: frame-preservation pin added
+  (`from_anyhow(anyhow::Error::new(framed).context("outer
+  frame"))` asserts key + `contexts() == ["outer frame"]`,
+  mirroring `lift_dispatch_error_preserves_frames_and_exit_codes`).
+  Deferred gates executed post-AMEND: full
+  `cargo test --workspace` green with zero failures across all
+  suites (the two
+  `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
+  expected fixture stderr, not failures),
+  `cargo clippy --workspace --all-targets` clean (zero warnings),
+  `rustfmt --edition 2024 --check` clean on all 3 touched files
+  (`assets.rs`, `diagnostics.rs`, `350-plan.md`).

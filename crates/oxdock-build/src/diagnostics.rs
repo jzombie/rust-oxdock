@@ -248,6 +248,47 @@ pub fn stage_copy_failed(reason: &anyhow::Error) -> Diagnostic {
     )
 }
 
+/// Generic build-operation failure. Takes the underlying failure;
+/// `{reason:#}` formatting lives here so call sites stay
+/// `format!`-free. Already-keyed payloads are reclaimed by
+/// [`from_anyhow`], so this only names genuinely unkeyed fallout.
+/// Message is the reason verbatim (like `proc.run.synthetic_failed`)
+/// so reclaimed chains render byte-identical.
+pub fn operation_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "build.operation.failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[(FIELD_REASON, &reason_text)]),
+    )
+}
+
+/// Reclaim an already-keyed diagnostic from an `anyhow` failure,
+/// wrapping anything else as a generic build-operation failure. Single
+/// owner for the build-surface mapping so filesystem plumbing (whose
+/// `anyhow` carriers already hold keyed `fs.*` diagnostics) preserves
+/// keys instead of restating the downcast. Outer `.context(...)`
+/// frames above the keyed payload replay natively via
+/// `with_contexts` (mirroring `lift_dispatch_error`), so no chain
+/// text is lost at the flip boundary.
+pub fn from_anyhow(err: anyhow::Error) -> Diagnostic {
+    if let Some(found) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+        .cloned()
+    {
+        let mut outer_frames: Vec<String> = Vec::new();
+        for cause in err.chain() {
+            if cause.downcast_ref::<Diagnostic>().is_some() {
+                break;
+            }
+            outer_frames.push(cause.to_string());
+        }
+        return found.with_contexts(outer_frames);
+    }
+    operation_failed(&err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +318,7 @@ mod tests {
             dsl_script_read_failed("a.oxdock", &err).key(),
             workspace_root_discover_failed(&err).key(),
             stage_copy_failed(&err).key(),
+            operation_failed(&err).key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -352,6 +394,18 @@ mod tests {
             stage_copy_failed(&err).message(),
             "failed to copy build output into staging: boom"
         );
+        assert_eq!(operation_failed(&err).message(), "boom");
+        assert_eq!(from_anyhow(anyhow::anyhow!("boom")).message(), "boom");
+        let keyed = script_parse_failed(&anyhow::anyhow!("boom"));
+        let keyed_key = keyed.key();
+        let reclaimed = from_anyhow(anyhow::Error::new(keyed));
+        assert_eq!(reclaimed.key(), keyed_key);
+        let framed = script_parse_failed(&anyhow::anyhow!("boom"));
+        let framed_key = framed.key();
+        let wrapped = anyhow::Error::new(framed).context("outer frame");
+        let reclaimed_framed = from_anyhow(wrapped);
+        assert_eq!(reclaimed_framed.key(), framed_key);
+        assert_eq!(reclaimed_framed.contexts(), &["outer frame".to_string()]);
     }
 
     #[test]
