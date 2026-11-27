@@ -63,9 +63,15 @@ All sites already use keyed ctors; flip signatures to
       break/continue/return-outside
 
 ### A4. `core/exec/mod.rs` public runner API
-- [ ] `run_steps_with_context*` family + BREAK/CONTINUE/
-      RETURN-outside returns. Needs B1 decision (public API
-      affects CLI/mcp/doc-tests callers), then mechanical.
+- [x] BREAK/CONTINUE/RETURN-outside returns (`finish_run`
+      flips to `DiagnosticResult`; 3 outer
+      `anyhow::Error::new(...)` wrappers dropped).
+- [ ] `run_steps_with_context*` family. Needs B1 decision
+      (public API affects CLI/mcp/doc-tests callers; `finish_run`
+      flip holds via `From` with no caller changes, but the
+      public family itself plus `error_with_snapshot`/
+      `enrich_lazy_error` Diagnostic-outer shape stays open),
+      then mechanical.
 
 ### A5. `oxdock-build` fn flips (dep stays; see below)
 - [ ] Flip remaining fns to `DiagnosticResult`, dropping the
@@ -826,3 +832,26 @@ All sites already use keyed ctors; flip signatures to
   `cargo test --workspace` green with zero failures across all
   suites, `cargo clippy --workspace --all-targets` clean,
   `rustfmt --edition 2024 --check` clean on `mcp.rs`.
+
+- A4a (2026-11-27): runner flow boundary. `finish_run`
+  (`core/exec/mod.rs`) returns `DiagnosticResult`; 3 outer
+  `anyhow::Error::new(...)` wrappers dropped
+  (`check_flow_outside_loop` BREAK/CONTINUE,
+  `check_return_outside`). `execute_steps` interior (still
+  anyhow, B1 keystone) lifts via the single owner
+  `args::lift_dispatch_error` (same as A2 `ensure_module_init`,
+  A3 `McpSession::init`). Already-native callees pass through
+  untouched (`new_state`, `check_pre_run`,
+  `validate_closure_for_run`). Anyhow parent holds via `From`:
+  `run_steps_with_manager_with_modules_and_entry` (still anyhow,
+  public API decision open) bridges via `Ok(finish_run(...)?)`;
+  no caller changes needed. The public `run_steps_*` family
+  plus `error_with_snapshot`/`enrich_lazy_error` Diagnostic-outer
+  shape stays open pending the B1 decision. No test changes.
+  Gates (post-PASS):
+  `cargo test -p oxdock-core` green (433 + 629 + 12 + 2; the two
+  `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
+  expected fixture stderr, not failures), full
+  `cargo test --workspace` green with zero failures across all
+  suites, `cargo clippy --workspace --all-targets` clean,
+  `rustfmt --edition 2024 --check` clean on `mod.rs`.

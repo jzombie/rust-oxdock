@@ -448,7 +448,7 @@ pub fn run_steps_with_manager_with_modules_and_entry<P: ProcessManager>(
     for descriptor in types {
         state.register_type(descriptor);
     }
-    finish_run(state, process, steps)
+    Ok(finish_run(state, process, steps)?)
 }
 
 pub(crate) fn new_state<P: ProcessManager>(
@@ -634,7 +634,7 @@ fn finish_run<P: ProcessManager>(
     mut state: ExecState<P>,
     process: P,
     steps: &[Step],
-) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+) -> DiagnosticResult<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
     validate_closure_for_run(&mut state, steps)?;
     let assert_windows = Arc::clone(&state.assert_windows);
     let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);
@@ -666,7 +666,8 @@ fn finish_run<P: ProcessManager>(
         None,
         None,
         true,
-    )?;
+    )
+    .map_err(args::lift_dispatch_error)?;
     match flow {
         // Concretize on the way out so a bare pending anchor never escapes as
         // the reported final directory (shell entry / OUT_DIR sync need real
@@ -689,19 +690,19 @@ fn finish_run<P: ProcessManager>(
                 .unwrap_or_default();
             Ok((state.fs.concretize_cwd(&state.cwd), state.fs, bindings))
         }
-        self::steps::Flow::Break { idx } => Err(anyhow::Error::new(
-            self::diagnostics::check_flow_outside_loop(idx + 1, KEYWORD_BREAK),
+        self::steps::Flow::Break { idx } => Err(self::diagnostics::check_flow_outside_loop(
+            idx + 1,
+            KEYWORD_BREAK,
         )),
-        self::steps::Flow::Continue { idx } => Err(anyhow::Error::new(
-            self::diagnostics::check_flow_outside_loop(idx + 1, KEYWORD_CONTINUE),
+        self::steps::Flow::Continue { idx } => Err(self::diagnostics::check_flow_outside_loop(
+            idx + 1,
+            KEYWORD_CONTINUE,
         )),
         self::steps::Flow::Return { idx, .. } => {
             // Values only cross a boundary: a function call, an ASYNC
             // task, or an inline LET block. With none enclosing, the
             // pipeline top rejects it like any other escaped flow.
-            Err(anyhow::Error::new(self::diagnostics::check_return_outside(
-                idx + 1,
-            )))
+            Err(self::diagnostics::check_return_outside(idx + 1))
         }
     }
 }
