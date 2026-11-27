@@ -55,7 +55,8 @@ All sites already use keyed ctors; flip signatures to
       host-module probe, `nested_cause`
 - [ ] `pop_scope` `anyhow::Error::from` shim (standard interop;
       drops when B1 flips)
-- [ ] `import_const_forward_failed` (needs B5, not B1)
+- [x] `import_const_forward_failed` (needs B5, not B1;
+      done in B5: `resolve_const_ref` propagates natively)
 
 ### A3. `core/exec/mcp.rs` (4 sites)
 - [ ] Flip with B1: `mcp_export_type_unknown`,
@@ -152,7 +153,7 @@ All sites already use keyed ctors; flip signatures to
       literals and stays anyhow (affirms #345). No
       keyword-constant move; the ~200 sites stay out of
       scope.
-- [ ] B5 `ForwardError` redesign (small, self-contained, no
+- [x] B5 `ForwardError` redesign (small, self-contained, no
       input needed): `chase_const_forward` ->
       `DiagnosticResult`; unblocks `import_const_forward_failed`
       + `check_ctx_wrap` sites (`import.rs`, `static_check.rs`
@@ -458,6 +459,30 @@ All sites already use keyed ctors; flip signatures to
   execution): `cargo test --workspace` green (core
   432 + 629 + 12 + 2, diagnostics 12, process 121, cli
   50 + 12, mcp 11 + 26 + 13, net-plugin 38 + 38, logic-tests
+  5 + 2 + 8 + 17 + 15 + 19 + 1 + 4 + 4 + 31 + 6 + 12 + 2 +
+  19 + 11 + 4 + 1 + 5 + 3 + 15), `cargo clippy --workspace
+  --all-targets` clean, `rustfmt --edition 2024 --check` clean
+  on touched files.
+
+- B5 (2026-11-27): `ForwardError` redesign.
+  `chase_const_forward`/`chase_from` (`core/exec/native.rs`)
+  return `DiagnosticResult`; all 9 failure sites build the
+  `dsl.import.const_forward_failed` diagnostic through the
+  single `forward_failed` conversion owner, with `ForwardError`
+  `Display` kept as the sole wording owner (byte-identical
+  messages by construction). The `impl std::error::Error`
+  (which existed only to feed `anyhow::Error::new` at callers)
+  is removed. `import_const_forward_failed` takes `&str`
+  (pre-rendered text) and `check_ctx_wrap` takes `&Diagnostic`
+  (joins via `{reason:#}`, same flattening as before), so all
+  3 call sites (`import.rs` `resolve_const_ref`, two
+  `static_check.rs` sites, all already `DiagnosticResult`)
+  propagate with no `anyhow` wrap: three
+  `anyhow::Error::new` sites eliminated. 4 pin tests updated
+  to the new signatures; keys/messages unchanged. Gates:
+  `cargo test --workspace` green (core 432 + 629 + 12 + 2,
+  diagnostics 12, process 121, cli 50 + 12, mcp
+  11 + 26 + 13, net-plugin 38 + 38, logic-tests
   5 + 2 + 8 + 17 + 15 + 19 + 1 + 4 + 4 + 31 + 6 + 12 + 2 +
   19 + 11 + 4 + 1 + 5 + 3 + 15), `cargo clippy --workspace
   --all-targets` clean, `rustfmt --edition 2024 --check` clean

@@ -2039,8 +2039,7 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
     // included (the clone below shares the frozen buffer). Runtime
     // targets carry no guards, so disjoint branches cannot co-exist
     // here: several terminals fail loud like several holders.
-    let mut terminals = chase_const_forward(state, &file, name, &qualified)
-        .map_err(|err| import_diag::import_const_forward_failed(&anyhow::Error::new(err)))?;
+    let mut terminals = chase_const_forward(state, &file, name, &qualified)?;
     if terminals.len() > 1 {
         let files: std::collections::HashSet<String> = terminals.drain(..).collect();
         return Err(import_diag::import_const_ambiguous(alias, name, &files));

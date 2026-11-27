@@ -1018,9 +1018,8 @@ pub fn validate_script_closure<P: ProcessManager>(
             for file in files {
                 for entry in &file.exports.consts {
                     if let Some((_, base)) = split_qualified(entry) {
-                        super::native::chase_const_forward(&view, &file.key, base, entry).map_err(
-                            |err| check_diag::check_ctx_wrap(&file.key, &anyhow::Error::new(err)),
-                        )?;
+                        super::native::chase_const_forward(&view, &file.key, base, entry)
+                            .map_err(|diag| check_diag::check_ctx_wrap(&file.key, &diag))?;
                     }
                 }
             }
@@ -5163,7 +5162,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let mut tags: Vec<TypeTag> = Vec::new();
         for file in &files {
             let terminals = chase_const_forward(&view, file, name, &qualified)
-                .map_err(|err| check_diag::check_ctx_wrap(&at(), &anyhow::Error::new(err)))?;
+                .map_err(|diag| check_diag::check_ctx_wrap(&at(), &diag))?;
             for terminal in &terminals {
                 let Some(binding) = self
                     .module_lets

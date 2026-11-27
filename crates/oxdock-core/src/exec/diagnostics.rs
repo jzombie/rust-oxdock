@@ -716,16 +716,17 @@ pub fn import_const_is_let(qualified: &str) -> Diagnostic {
     )
 }
 
-/// `CONST` forward-chain failure. Takes the chain error verbatim: the
-/// `ForwardError` `Display` in `native` owns the wording
-/// (unknown/broken/split/cycle/ambiguous hops), so no wrapper is
-/// added and no source is attached.
-pub fn import_const_forward_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+/// `CONST` forward-chain failure. Takes the pre-rendered chain
+/// text verbatim: the `ForwardError` `Display` in `native` owns
+/// the wording (unknown/broken/split/cycle/ambiguous hops), so
+/// no wrapper is added and no source is attached. Callers pass
+/// the `ForwardError` rendering directly; no `anyhow` carrier
+/// sits between the walk and this key.
+pub fn import_const_forward_failed(reason: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.import.const_forward_failed",
-        reason_text.clone(),
-        Diagnostic::make_fields(&[("reason", &reason_text)]),
+        reason.to_string(),
+        Diagnostic::make_fields(&[(FIELD_REASON, reason)]),
     )
 }
 
@@ -5163,8 +5164,11 @@ pub fn check_step_wrap(step: usize, reason: Diagnostic) -> Diagnostic {
 
 /// Static context-attributed passthrough. Takes the context prefix
 /// (a file key, `at()`, `step N, line L, col C`) and the underlying
-/// failure; joining lives here.
-pub fn check_ctx_wrap(ctx: &str, reason: &anyhow::Error) -> Diagnostic {
+/// keyed diagnostic; joining lives here. The inner diagnostic
+/// renders through `{:#}` (message text for a fresh diagnostic),
+/// so the joined message stays byte-identical to the old
+/// anyhow-chain flattening with no `anyhow` carrier.
+pub fn check_ctx_wrap(ctx: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{ctx}: {reason_text}");
     Diagnostic::new(
@@ -6517,13 +6521,13 @@ mod tests {
             import_const_unknown("q").key(),
             import_const_uninitialized("q").key(),
             import_const_is_let("q").key(),
-            import_const_forward_failed(&anyhow::anyhow!("x")).key(),
+            import_const_forward_failed("x").key(),
             import_not_in_closure("f").key(),
             import_export_type_mismatch("f", "T").key(),
             check_var_tag("v", typing_max_depth(8, "X")).key(),
             check_func_tag("f", typing_max_depth(8, "X")).key(),
             check_step_wrap(3, typing_max_depth(8, "X")).key(),
-            check_ctx_wrap("ctx", &anyhow::anyhow!("x")).key(),
+            check_ctx_wrap("ctx", &import_const_forward_failed("x")).key(),
             check_exact_mismatch("ctx", &TypeTag::Int, &TypeTag::String).key(),
             check_cannot_unify("ctx", &TypeTag::Int, &TypeTag::String).key(),
             check_undefined_var("step 1: ", "x").key(),
@@ -8336,7 +8340,7 @@ mod tests {
             "step 3: type spelling exceeds maximum generic depth of 8: `X`"
         );
         assert_eq!(
-            check_ctx_wrap("ctx", &anyhow::anyhow!("boom")).message(),
+            check_ctx_wrap("ctx", &import_const_forward_failed("boom")).message(),
             "ctx: boom"
         );
         assert_eq!(
@@ -8593,7 +8597,7 @@ mod tests {
         );
         assert!(import_const_is_let("q").message().contains("LET binding"));
         assert_eq!(
-            import_const_forward_failed(&anyhow::anyhow!("unknown CONST `U::N`")).message(),
+            import_const_forward_failed("unknown CONST `U::N`").message(),
             "unknown CONST `U::N`"
         );
         assert_eq!(
