@@ -108,6 +108,16 @@ All sites already use keyed ctors; flip signatures to
       run/spawn surface stays anyhow until B2. `ExitStatus` ctors
       migrate to numeric code fields via one `describe_exit_status`
       helper, never hardcoded `Display`.
+       (B1i amendment: the `BackgroundHandle` flip additionally
+       requires Diagnostic-native storage for the multi-frame
+       `step N` call path. `step_error` still chains outer frames
+       as anyhow `.context` layers and
+       `ThreadJoinHandle::reemit_error` replays `thread_context`
+       the same way, which cannot cross a `DiagnosticResult`
+       boundary. The flip bulk must add frame storage on
+       `Diagnostic` itself and route `thread_context` plus the
+       step wraps through it; the "waiting only on the span sync"
+       premise in B1f/B1g is corrected accordingly.)
 - [ ] B2 `ProcessManager` trait (`contract.rs`,
       `shell_manager.rs`, `mock.rs`, `synthetic.rs`,
       `child.rs`). Flip trait to `DiagnosticResult` OR declare
@@ -354,3 +364,28 @@ All sites already use keyed ctors; flip signatures to
   expected fixture stderr (`run_failure_reporting`
   buildtime-macro fixture plus `oxdock-core` commands
   `run_failure_reporting_*` tests), not failures.
+
+- B1i (2026-11-27): `step_error` span sync. The position wrap
+  now attaches `Span` natively via `with_span` on the reclaimed
+  diagnostic (innermost wins: span-less only, `line_col` when
+  `col > 0`, else `line_only`), while the `step N[,
+  line L[, col C]]` text prefix stays byte-identical. Two paths:
+  in-place `downcast_mut` fast path when the diagnostic is the
+  outermost head, plus a wrapped-chain reclamation slow path
+  (chain walk, outer non-request frames replayed as text, exit
+  code re-attached typed, sources surviving the clone) for
+  synthetic-inner/parsed-outer nesting, AWAIT re-emit frames,
+  and helper-added contexts. Outer dispatch levels keep
+  text-only chaining. Stale "until flips" comments updated;
+  B1 Decision block amended (B1i amendment: the
+  `BackgroundHandle` flip additionally requires
+  Diagnostic-native frame storage; the "waiting only on the
+  span sync" premise is corrected). New `step_error_tests`
+  (6 tests) pin native attach, innermost-wins nesting, the bare
+  prefix at zero coordinates, prespanned-head preservation,
+  synthetic-inner/parsed-outer reclaim, and line-only spans.
+  Gates on the actual diff: core 429 + 629 + 12 + 2,
+  `clippy --workspace --all-targets` clean,
+  `rustfmt --edition 2024 --check` clean. (Dependent crates
+  cli/mcp/net-plugin/diagnostics/logic-tests gates from the
+  pre-reclaim tree; re-gated after review sign-off.)

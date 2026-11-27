@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::Result;
-use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult, Span};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::{
     Arg, AssertTarget, Command, KEYWORD_BREAK, KEYWORD_CONTINUE, KEYWORD_RETURN, Step, StepKind,
@@ -55,8 +55,9 @@ pub(super) struct ThreadJoinHandle {
     thread_error: Option<Diagnostic>,
     /// Plain-text contexts captured above the reclaimed diagnostic
     /// (outer `step N` positions, call frames), outermost first.
-    /// They replay as individual anyhow layers on re-emit so location
-    /// reporting survives until `step_error` flips to `with_span`.
+    /// They replay as individual anyhow layers on re-emit; the
+    /// diagnostic itself already carries its innermost position
+    /// natively via `step_error`'s `with_span` sync.
     /// `ExitRequest` nodes are never captured here; the code rides in
     /// `thread_exit_code` instead.
     thread_context: Vec<String>,
@@ -148,8 +149,9 @@ impl ThreadJoinHandle {
                 // parents attach `.context(...)` during migration, so
                 // the `Diagnostic` is rarely outermost. Layers above
                 // it are plain-text contexts (step positions, call
-                // frames); keep each frame so location reporting
-                // survives until `step_error` flips to `with_span`.
+                // frames); keep each frame so the full call path still
+                // renders. The diagnostic itself already carries its
+                // innermost position natively (`step_error` sync).
                 // `ExitRequest` nodes are never captured as text: the
                 // code already rides in `thread_exit_code`. Cloning
                 // keeps key, span, hint, and fields. Genuinely unkeyed
@@ -1167,13 +1169,70 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
 /// `line L` / `col C` when the step carries coordinates (parsed
 /// scripts do; hand-built steps keep the historical bare rendering).
 /// Applied once per dispatch level, so nested bodies chain outer and
-/// inner positions like a call path.
+/// inner positions like a call path. The text prefix stays
+/// byte-identical; when the step carries coordinates the position
+/// also attaches natively via `with_span` on the reclaimed
+/// diagnostic (innermost wins: span-less only, so outer dispatch
+/// levels never clobber the inner span).
 fn step_error(step: &Step, idx: usize, err: anyhow::Error) -> anyhow::Error {
     let mut loc = format!("step {}", idx + 1);
     if step.line > 0 {
         loc.push_str(&format!(", line {}", step.line));
         if step.col > 0 {
             loc.push_str(&format!(", col {}", step.col));
+        }
+    }
+    let mut err = err;
+    if step.line > 0 {
+        let span = if step.col > 0 {
+            Span::line_col(step.line, step.col)
+        } else {
+            Span::line_only(step.line)
+        };
+        if let Some(diag) = err.downcast_mut::<Diagnostic>() {
+            // Fast path: the diagnostic is the outermost head, so it
+            // mutates in place with no rebuild.
+            if diag.span().is_none() {
+                let owned = diag.clone().with_span(span);
+                *diag = owned;
+            }
+        } else if let Some(found) = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+            .cloned()
+        {
+            // Slow path: context layers bury the diagnostic (synthetic
+            // inner step with no coordinates, AWAIT re-emit frames,
+            // helper-added context). Reclaim it the same lossless way
+            // `reap` does: outer non-request frames replay as text,
+            // the exit code rides typed, sources survive the clone.
+            if found.span().is_none() {
+                let code = super::exit::exit_code_of(&err);
+                let mut outer: Vec<String> = Vec::new();
+                for cause in err.chain() {
+                    if cause.downcast_ref::<Diagnostic>().is_some() {
+                        break;
+                    }
+                    if cause.downcast_ref::<super::exit::ExitRequest>().is_none() {
+                        outer.push(cause.to_string());
+                    }
+                }
+                let mut reclaimed = found.with_span(span);
+                if let Some(code) = code
+                    && super::exit::exit_code_of_diag(&reclaimed).is_none()
+                {
+                    let exit = match reclaimed.shared_source() {
+                        Some(prior) => super::exit::ExitRequest::with_source(code, prior),
+                        None => super::exit::ExitRequest::new(code),
+                    };
+                    reclaimed = reclaimed.with_source(Arc::new(exit));
+                }
+                let mut carrier = anyhow::Error::new(reclaimed);
+                for ctx in outer.iter().rev() {
+                    carrier = carrier.context(ctx.clone());
+                }
+                err = carrier;
+            }
         }
     }
     err.context(loc)
@@ -1866,5 +1925,122 @@ mod thread_handle_tests {
         assert_eq!(diag.key(), "dsl.eval.exit_requested");
         assert_eq!(diag.fields().get("code"), Some(&"7".to_string()));
         assert_eq!(format!("{err:#}"), "step 2: EXIT requested with code 7");
+    }
+}
+
+#[cfg(test)]
+mod step_error_tests {
+    use super::*;
+    use oxdock_parser::StepKind;
+
+    fn step_at(line: usize, col: usize) -> Step {
+        Step {
+            guard: None,
+            kind: StepKind::Break,
+            scope_enter: 0,
+            scope_exit: 0,
+            line,
+            col,
+        }
+    }
+
+    #[test]
+    fn coordinates_attach_span_and_keep_text_prefix() {
+        let leaf = step_diag::eval_async_cancelled();
+        assert!(leaf.span().is_none());
+        let err = step_error(&step_at(5, 3), 0, anyhow::Error::new(leaf));
+        let diag = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+            .expect("diagnostic survives the position wrap");
+        let span = diag.span().expect("coordinates attach natively");
+        assert_eq!(span.line, 5);
+        assert_eq!(span.col_start, Some(3));
+        assert!(
+            format!("{err:#}").starts_with("step 1, line 5, col 3: "),
+            "text prefix stays byte-identical: {err:#}"
+        );
+    }
+
+    #[test]
+    fn innermost_span_wins_on_nested_dispatch() {
+        let leaf = step_diag::eval_async_cancelled();
+        let inner = step_error(&step_at(5, 3), 1, anyhow::Error::new(leaf));
+        let outer = step_error(&step_at(9, 1), 0, inner);
+        let diag = outer
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+            .expect("diagnostic survives nested wraps");
+        let span = diag.span().expect("span survives");
+        assert_eq!((span.line, span.col_start), (5, Some(3)));
+        assert!(
+            format!("{outer:#}").starts_with("step 1, line 9, col 1: step 2, line 5, col 3: "),
+            "both text frames chain like a call path: {outer:#}"
+        );
+    }
+
+    #[test]
+    fn unknown_position_keeps_bare_prefix_without_span() {
+        let leaf = step_diag::eval_async_cancelled();
+        let err = step_error(&step_at(0, 0), 0, anyhow::Error::new(leaf));
+        let diag = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+            .expect("diagnostic survives");
+        assert!(diag.span().is_none());
+        assert_eq!(format!("{err:#}"), "step 1: ASYNC task cancelled");
+    }
+
+    #[test]
+    fn prespanned_outermost_diagnostic_keeps_its_span() {
+        // Fast path with the guard genuinely exercised: the head IS a
+        // `Diagnostic`, so `downcast_mut` succeeds and the `is_none`
+        // check decides. Deleting the guard would clobber (2, 4).
+        let leaf = step_diag::eval_async_cancelled().with_span(Span::line_col(2, 4));
+        let err = step_error(&step_at(9, 1), 0, anyhow::Error::new(leaf));
+        let diag = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+            .expect("diagnostic survives");
+        let span = diag.span().expect("span survives");
+        assert_eq!((span.line, span.col_start), (2, Some(4)));
+    }
+
+    #[test]
+    fn synthetic_inner_yields_to_parsed_outer_coordinates() {
+        // Slow path: the inner step carries no coordinates, so its
+        // wrap buries the span-less diagnostic under a context layer
+        // and `downcast_mut` misses at the outer level. The outer
+        // parsed step must still attach natively via reclaim.
+        let leaf = step_diag::eval_async_cancelled();
+        let inner = step_error(&step_at(0, 0), 1, anyhow::Error::new(leaf));
+        let outer = step_error(&step_at(9, 1), 0, inner);
+        let diag = outer
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+            .expect("diagnostic survives nested wraps");
+        let span = diag.span().expect("outer coordinates attach");
+        assert_eq!((span.line, span.col_start), (9, Some(1)));
+        assert!(
+            format!("{outer:#}").starts_with("step 1, line 9, col 1: step 2: "),
+            "inner text frame replays under the outer prefix: {outer:#}"
+        );
+    }
+
+    #[test]
+    fn line_without_column_attaches_line_only_span() {
+        let leaf = step_diag::eval_async_cancelled();
+        let err = step_error(&step_at(7, 0), 0, anyhow::Error::new(leaf));
+        let diag = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+            .expect("diagnostic survives");
+        let span = diag.span().expect("line-only span attaches");
+        assert_eq!(span.line, 7);
+        assert_eq!(span.col_start, None);
+        assert!(
+            format!("{err:#}").starts_with("step 1, line 7: "),
+            "prefix names the line with no column: {err:#}"
+        );
     }
 }
