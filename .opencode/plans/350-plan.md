@@ -652,7 +652,11 @@ All sites already use keyed ctors; flip signatures to
   still-anyhow `call_func_value`). `call_func_value` itself stays
   anyhow and holds the flipped `execute_call_entry` via `From`.
   New test `lift_dispatch_error_preserves_frames_and_exit_codes`
-  pins frame and exit-code preservation. Gates: pending execution
-  upon PASS (`cargo test --workspace`,
-  `cargo clippy --workspace --all-targets`,
-  `rustfmt --edition 2024 --check` on touched files).
+  pins frame and exit-code preservation. Gates (post-PASS):
+  `cargo test -p oxdock-core` green (433 + 629 + 12 + 2; the two
+  `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
+  expected fixture stderr, not failures), full
+  `cargo test --workspace` green with zero failures across all
+  suites, `cargo clippy --workspace --all-targets` clean,
+  `rustfmt --edition 2024 --check` clean on `handlers.rs`,
+  `steps.rs`, `args.rs`.
