@@ -758,7 +758,11 @@ All sites already use keyed ctors; flip signatures to
   boundaries via `Ok(f(...)?)`: 2 in `handlers.rs`
   (`dispatch_prompt`, `dispatch_expand`), 2 in
   `execute_single_step_with_generation` (`Prompt`, `Expand` arms).
-  No test changes. Gates: pending execution upon PASS
-  (`cargo test --workspace`,
-  `cargo clippy --workspace --all-targets`,
-  `rustfmt --edition 2024 --check` on touched files).
+  No test changes. Gates: `cargo test -p oxdock-core` green
+  (433 + 629 + 12 + 2; the two
+  `error: unexpected argument '--invalid-oxdock-flag-xyz'` lines are
+  expected fixture stderr, not failures), full
+  `cargo test --workspace` green with zero failures across all
+  suites, `cargo clippy --workspace --all-targets` clean,
+  `rustfmt --edition 2024 --check` clean on `handlers.rs`,
+  `steps.rs`.
