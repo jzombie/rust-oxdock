@@ -385,7 +385,9 @@ All sites already use keyed ctors; flip signatures to
   prefix at zero coordinates, prespanned-head preservation,
   synthetic-inner/parsed-outer reclaim, and line-only spans.
   Gates on the actual diff: core 429 + 629 + 12 + 2,
+  diagnostics 8, cli 50 + integration 12, mcp 11 + 26 + 13,
+  net-plugin 38 + 38, logic-tests all green
+  (5 + 2 + 8 + 17 + 15 + 19 + 1 + 4 + 4 + 31 + 6 + 12 + 2 +
+  19 + 11 + 4 + 1 + 5 + 3 + 15),
   `clippy --workspace --all-targets` clean,
-  `rustfmt --edition 2024 --check` clean. (Dependent crates
-  cli/mcp/net-plugin/diagnostics/logic-tests gates from the
-  pre-reclaim tree; re-gated after review sign-off.)
+  `rustfmt --edition 2024 --check` clean.
