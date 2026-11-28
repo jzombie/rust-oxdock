@@ -5,7 +5,7 @@
 //! wording: changing MCP text happens here, never at the call sites.
 //! Call sites pass structured data only, never `format!` strings.
 
-use oxdock_diagnostics::Diagnostic;
+use oxdock_diagnostics::{Diagnostic, flatten_chain};
 use oxdock_parser::KEYWORD_EXPORT;
 
 /// Structured field keys. Single spelling for the whole module:
@@ -147,8 +147,8 @@ pub fn session_lock_poisoned_reload() -> Diagnostic {
 
 /// Session filesystem guard root rejected. Takes the underlying
 /// failure and renders its chain inline.
-pub fn session_guard_workspace_root(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn session_guard_workspace_root(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("guard workspace root: {reason_text}");
     Diagnostic::new(
         "mcp.session.guard_workspace_root",
@@ -159,8 +159,8 @@ pub fn session_guard_workspace_root(reason: &anyhow::Error) -> Diagnostic {
 
 /// Script-read guard root rejected. Takes the underlying failure and
 /// renders its chain inline.
-pub fn session_guard_script_root(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn session_guard_script_root(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("guard script root: {reason_text}");
     Diagnostic::new(
         "mcp.session.guard_script_root",
@@ -171,8 +171,8 @@ pub fn session_guard_script_root(reason: &anyhow::Error) -> Diagnostic {
 
 /// Script text failed to parse during MCP load. Takes the underlying
 /// failure and renders its chain inline.
-pub fn session_script_parse_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn session_script_parse_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("MCP script parse failed: {reason_text}");
     Diagnostic::new(
         "mcp.session.script_parse_failed",
@@ -183,8 +183,8 @@ pub fn session_script_parse_failed(reason: &anyhow::Error) -> Diagnostic {
 
 /// Script file failed to read during MCP load. Takes the underlying
 /// failure and renders its chain inline.
-pub fn session_script_read_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn session_script_read_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("MCP script read failed: {reason_text}");
     Diagnostic::new(
         "mcp.session.script_read_failed",
@@ -206,8 +206,8 @@ pub fn session_lock_poisoned_call(name: &str) -> Diagnostic {
 
 /// Stdio transport failed to serve. Takes the underlying failure and
 /// renders its chain inline.
-pub fn stdio_serve_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn stdio_serve_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("MCP stdio serve failed: {reason_text}");
     Diagnostic::new(
         "mcp.serve.stdio_serve_failed",
@@ -218,8 +218,8 @@ pub fn stdio_serve_failed(reason: &anyhow::Error) -> Diagnostic {
 
 /// Served stdio session ended in failure. Takes the underlying
 /// failure and renders its chain inline.
-pub fn stdio_service_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn stdio_service_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("MCP stdio service failed: {reason_text}");
     Diagnostic::new(
         "mcp.serve.stdio_service_failed",
@@ -230,13 +230,77 @@ pub fn stdio_service_failed(reason: &anyhow::Error) -> Diagnostic {
 
 /// Tokio runtime for stdio serving failed to build. Takes the
 /// underlying failure and renders its chain inline.
-pub fn serve_runtime_build_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn serve_runtime_build_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("build MCP tokio runtime: {reason_text}");
     Diagnostic::new(
         "mcp.serve.runtime_build_failed",
         message,
         Diagnostic::make_fields(&[(FIELD_REASON, &reason_text)]),
+    )
+}
+
+/// Generic MCP-operation failure. Takes the underlying failure; the
+/// flattened chain lives here so call sites stay `format!`-free.
+/// Already-keyed payloads are reclaimed by [`from_anyhow`], so this
+/// only names genuinely unkeyed fallout. Message is the reason
+/// verbatim so reclaimed chains render byte-identical.
+pub fn operation_failed(reason: &Diagnostic) -> Diagnostic {
+    operation_failed_fallback(&flatten_chain(reason))
+}
+
+/// Unkeyed MCP-operation fallback. Takes the pre-rendered anyhow
+/// chain text verbatim; rendering lives here. Single owner for the
+/// `from_anyhow` fallback so the anyhow-to-Diagnostic direction
+/// keeps one keyed home.
+pub fn operation_failed_fallback(reason_text: &str) -> Diagnostic {
+    Diagnostic::new(
+        "mcp.operation.failed",
+        reason_text.to_string(),
+        Diagnostic::make_fields(&[(FIELD_REASON, reason_text)]),
+    )
+}
+
+/// Reclaim an already-keyed diagnostic from an `anyhow` failure,
+/// wrapping anything else as a generic MCP-operation failure.
+/// Single owner for the MCP-surface mapping so parser diagnostics
+/// (whose `anyhow` carriers already hold keyed `dsl.*` payloads)
+/// and third-party transport errors preserve keys instead of
+/// restating the downcast. Outer `.context(...)` frames above the
+/// keyed payload replay natively via `with_contexts`, so no chain
+/// text is lost at the flip boundary. Call sites lift-then-wrap
+/// (`from_anyhow` plus the specific `*_failed` ctor) so the
+/// prefixed outer keeps its distinct key while staying
+/// `format!`-free.
+pub fn from_anyhow(err: anyhow::Error) -> Diagnostic {
+    if let Some(found) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+        .cloned()
+    {
+        let mut outer_frames: Vec<String> = Vec::new();
+        for cause in err.chain() {
+            if cause.downcast_ref::<Diagnostic>().is_some() {
+                break;
+            }
+            // Transport echoes (`anyhow::Error::from(diag)`)
+            // restate the reclaimed message verbatim; keeping
+            // them would print every cause twice.
+            if cause.to_string() != found.message() {
+                outer_frames.push(cause.to_string());
+            }
+        }
+        return found.with_contexts(outer_frames);
+    }
+    operation_failed_fallback(&format!("{err:#}"))
+}
+
+#[cfg(test)]
+pub(crate) fn reason_sample(msg: &str) -> Diagnostic {
+    Diagnostic::new(
+        "test.reason.sample",
+        msg.to_string(),
+        Diagnostic::make_fields(&[]),
     )
 }
 
@@ -246,7 +310,7 @@ mod tests {
 
     #[test]
     fn each_failure_has_a_distinct_key() {
-        let err = anyhow::anyhow!("boom");
+        let reason = reason_sample("boom");
         let keys = [
             tool_duplicate_name("FOO").key(),
             tool_opaque_return("FOO").key(),
@@ -260,13 +324,14 @@ mod tests {
             export_no_entries().key(),
             session_lock_poisoned_reload().key(),
             session_lock_poisoned_call("FOO").key(),
-            session_guard_workspace_root(&err).key(),
-            session_guard_script_root(&err).key(),
-            session_script_parse_failed(&err).key(),
-            session_script_read_failed(&err).key(),
-            stdio_serve_failed(&err).key(),
-            stdio_service_failed(&err).key(),
-            serve_runtime_build_failed(&err).key(),
+            session_guard_workspace_root(&reason).key(),
+            session_guard_script_root(&reason).key(),
+            session_script_parse_failed(&reason).key(),
+            session_script_read_failed(&reason).key(),
+            stdio_serve_failed(&reason).key(),
+            stdio_service_failed(&reason).key(),
+            serve_runtime_build_failed(&reason).key(),
+            operation_failed(&reason).key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -276,7 +341,7 @@ mod tests {
 
     #[test]
     fn messages_match_canonical_wording() {
-        let err = anyhow::anyhow!("boom");
+        let reason = reason_sample("boom");
         assert_eq!(
             tool_duplicate_name("FOO").message(),
             "duplicate MCP tool name `FOO`"
@@ -323,29 +388,49 @@ mod tests {
             "MCP session lock poisoned during `FOO`"
         );
         assert_eq!(
-            session_guard_workspace_root(&err).message(),
+            session_guard_workspace_root(&reason).message(),
             "guard workspace root: boom"
         );
         assert_eq!(
-            session_guard_script_root(&err).message(),
+            session_guard_script_root(&reason).message(),
             "guard script root: boom"
         );
         assert_eq!(
-            session_script_parse_failed(&err).message(),
+            session_script_parse_failed(&reason).message(),
             "MCP script parse failed: boom"
         );
         assert_eq!(
-            session_script_read_failed(&err).message(),
+            session_script_read_failed(&reason).message(),
             "MCP script read failed: boom"
         );
-        let err = anyhow::anyhow!("gone");
         assert_eq!(
-            stdio_serve_failed(&err).message(),
-            "MCP stdio serve failed: gone"
+            stdio_serve_failed(&reason).message(),
+            "MCP stdio serve failed: boom"
         );
         assert_eq!(
-            stdio_service_failed(&err).message(),
-            "MCP stdio service failed: gone"
+            stdio_service_failed(&reason).message(),
+            "MCP stdio service failed: boom"
         );
+        assert_eq!(
+            serve_runtime_build_failed(&reason).message(),
+            "build MCP tokio runtime: boom"
+        );
+        assert_eq!(operation_failed(&reason).message(), "boom");
+        assert_eq!(operation_failed_fallback("boom").message(), "boom");
+        assert_eq!(from_anyhow(anyhow::anyhow!("boom")).message(), "boom");
+        assert_eq!(
+            from_anyhow(anyhow::anyhow!("boom")).key(),
+            "mcp.operation.failed"
+        );
+        let keyed = export_no_entries();
+        let keyed_key = keyed.key();
+        let reclaimed = from_anyhow(anyhow::Error::new(keyed));
+        assert_eq!(reclaimed.key(), keyed_key);
+        let framed = export_no_entries();
+        let framed_key = framed.key();
+        let wrapped = anyhow::Error::new(framed).context("outer frame");
+        let reclaimed_framed = from_anyhow(wrapped);
+        assert_eq!(reclaimed_framed.key(), framed_key);
+        assert_eq!(reclaimed_framed.contexts(), &["outer frame".to_string()]);
     }
 }

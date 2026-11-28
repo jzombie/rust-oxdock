@@ -1899,3 +1899,34 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   zero failures), `cargo clippy --workspace --all-targets`
   clean (zero warnings), `rustfmt --edition 2024 --check`
   clean on both touched files.
+
+- C4c (2026-11-28): mcp ctor flip (third C4 bulk). All 7
+  `oxdock-mcp/src/diagnostics.rs` ctors
+  (`session_guard_workspace_root`,
+  `session_guard_script_root`, `session_script_parse_failed`,
+  `session_script_read_failed`, `stdio_serve_failed`,
+  `stdio_service_failed`, `serve_runtime_build_failed`)
+  `reason: &anyhow::Error` to `&Diagnostic` via leaf
+  `flatten_chain` (mcp already depends on
+  `oxdock-diagnostics`, no new dep); all 7 inlining wrappers
+  stay sourceless with `flatten_chain` text (byte-identical
+  to the old `{reason:#}` flattening). New verbatim
+  `operation_failed_fallback` owner
+  (`mcp.operation.failed`) plus `from_anyhow` reclaim lift
+  with transport-echo skip (same shape as C3/C4a/C4b);
+  `operation_failed(&Diagnostic)` delegates via
+  `flatten_chain`. `server.rs`: 3 fs sites to native `&err`
+  unwraps (double-transport `anyhow::Error::from`/`new`
+  around already-keyed `Diagnostic`s removed); 1 parser site
+  (`anyhow::Result` carrier, likely keyed `dsl.*` inside) to
+  lift-then-wrap. `lib.rs`: 3 third-party sites (rmcp
+  `ServerInitializeError`/`JoinError`, tokio `io::Error`) to
+  lift-then-wrap via `from_anyhow(err.into())`. Zero banned
+  constructs in mcp prod (no `Error::new`, no `bail!`, no
+  `.context`/`.with_context`, no `&anyhow::Error` params;
+  remaining hits inside `mod tests`). Gates: `cargo test -p
+  oxdock-mcp` green (11 + 26 + 13 passed), full `cargo test
+  --workspace` green (93 targets, all `test result: ok`,
+  zero failures), `cargo clippy --workspace --all-targets`
+  clean (zero warnings), `rustfmt --edition 2024 --check`
+  clean on all 3 touched files.

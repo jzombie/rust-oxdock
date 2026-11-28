@@ -339,7 +339,7 @@ pub fn session_fs(
     root: &GuardedPath,
 ) -> DiagnosticResult<(Box<dyn WorkspaceFs>, Arc<LazyGuardedTempDir>)> {
     let mut resolver = PathResolver::new_lazy(root.clone())
-        .map_err(|err| mcp_diag::session_guard_workspace_root(&anyhow::Error::from(err)))?;
+        .map_err(|err| mcp_diag::session_guard_workspace_root(&err))?;
     resolver.set_workspace_root(root.clone());
     let hold = resolver.snapshot_handle();
     Ok((Box::new(resolver), hold))
@@ -352,10 +352,10 @@ pub fn session_fs(
 fn read_guarded(path: &GuardedPath) -> DiagnosticResult<String> {
     let anchor = path.root();
     let resolver = PathResolver::new(anchor, anchor)
-        .map_err(|err| mcp_diag::session_guard_script_root(&anyhow::Error::from(err)))?;
+        .map_err(|err| mcp_diag::session_guard_script_root(&err))?;
     resolver
         .read_to_string(path)
-        .map_err(|err| mcp_diag::session_script_read_failed(&anyhow::Error::new(err)))
+        .map_err(|err| mcp_diag::session_script_read_failed(&err))
 }
 
 impl ServerHandler for OxDockHandler {
@@ -845,7 +845,10 @@ impl OxDockHandler {
         }
         let parsed =
             oxdock_core::parse_script_with_modules_and_exports(script_text, engine.module_table())
-                .map_err(|err| mcp_diag::session_script_parse_failed(&err))?;
+                .map_err(|err| {
+                    let inner = mcp_diag::from_anyhow(err);
+                    mcp_diag::session_script_parse_failed(&inner)
+                })?;
         if parsed.exports.funcs.is_empty() {
             return Err(mcp_diag::export_no_entries());
         }
