@@ -112,6 +112,27 @@ impl Span {
 /// `From`) while the rest of the workspace migrates leaf to root.
 pub type DiagnosticResult<T> = Result<T, Diagnostic>;
 
+/// `{anyhow:#}`-equivalent flattening: joins one-layer node texts
+/// with `": "`, exactly what the alternate renderer prints for the
+/// same chain, so boundary messages that inline the cause keep the
+/// pre-flip byte-identical wording after an `&anyhow::Error` to
+/// `&Diagnostic` flip. Wrappers that inline stay sourceless (the
+/// chain text is the message); wrappers that chain stay bare (the
+/// join renders the depth). Mixing both prints every cause twice.
+/// Single owner for the whole workspace: leaf crates (`utils`,
+/// `pty`, `process`, plugins) and `exec`/`build` all reuse this,
+/// never restate the walk.
+pub fn flatten_chain(reason: &Diagnostic) -> String {
+    let mut parts = vec![reason.to_string()];
+    let mut current =
+        std::error::Error::source(reason).map(|node| node as &(dyn std::error::Error + 'static));
+    while let Some(node) = current {
+        parts.push(node.to_string());
+        current = node.source();
+    }
+    parts.join(": ")
+}
+
 /// One user-facing error: stable key, rendered message, structured
 /// fields, optional span, hint, and chained source. Construct through
 /// [`Diagnostic::new`] from the owning domain module, one constructor

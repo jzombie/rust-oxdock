@@ -1841,3 +1841,33 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   stderr), `cargo clippy --workspace --all-targets` clean
   (zero warnings), `rustfmt --edition 2024 --check` clean on
   both touched files.
+
+- C4a (2026-11-28): utils ctor flip + `flatten_chain` move
+  (first C4 bulk). `flatten_chain` moved to the
+  `oxdock-diagnostics` leaf as the single owner (utils cannot
+  depend on core without a cycle: core depends on utils);
+  `exec::diagnostics` keeps a `pub use` re-export so all ~40
+  in-module call sites work unchanged, build keeps importing
+  via exec with no logic restated. Both `oxdock-utils`
+  ctors `reason: &anyhow::Error` to `&Diagnostic` via
+  `flatten_chain` (leaf import, no new dep); new verbatim
+  `pack_failed_fallback`/`unpack_failed_fallback` owners
+  (`pack_failed`/`unpack_failed` delegate, same shape as C2
+  `eval_dispatch_failed`/`fallback` and C3
+  `operation_failed`/`fallback`); new `pack_from_anyhow`
+  pack-direction lift sibling to the existing `from_anyhow`
+  (unpack direction) so pack io (`tar.pack.failed`) and
+  unpack io (`tar.unpack.failed`) never cross keys; both
+  lifts gain the transport-echo skip. `tar.rs`: 4 pack io
+  sites to `pack_from_anyhow(e.into())`, 5 unpack io sites
+  to `from_anyhow(e.into())`, each a single layer (pack/unpack
+  io IS the failure, no outer wrap unlike C3 collect_assets);
+  3 `apply` callback sites unchanged (lossless lift,
+  sanctioned boundary). Zero banned constructs in utils prod
+  (no `Error::new`, no `bail!`, no `.context`/`.with_context`,
+  no `&anyhow::Error` params). Gates: `cargo test -p
+  oxdock-utils` 9 passed, `-p oxdock-diagnostics` 12 passed,
+  full `cargo test --workspace` green (93 targets, all
+  `test result: ok`, zero failures), `cargo clippy
+  --workspace --all-targets` clean, `rustfmt --edition 2024
+  --check` clean on all 4 touched files.

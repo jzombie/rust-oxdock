@@ -57,24 +57,11 @@ const FIELD_YIELD: &str = "yield";
 pub(super) const KEY_EVAL_EXIT_REQUESTED: &str = "dsl.eval.exit_requested";
 
 /// Full-chain text for inlining wrappers. Single owner for the
-/// `{anyhow:#}`-equivalent flattening: joins one-layer node texts
-/// with `": "`, exactly what the alternate renderer prints for the
-/// same chain, so boundary messages that inline the cause (notably
-/// `mcp_call_failed`) keep the pre-flip byte-identical wording after
-/// the `&anyhow::Error` to `&Diagnostic` flip. Wrappers that inline
-/// stay sourceless (the chain text is the message); wrappers that
-/// chain stay bare (the join renders the depth). Mixing both prints
-/// every cause twice.
-pub fn flatten_chain(reason: &Diagnostic) -> String {
-    let mut parts = vec![reason.to_string()];
-    let mut current =
-        std::error::Error::source(reason).map(|node| node as &(dyn std::error::Error + 'static));
-    while let Some(node) = current {
-        parts.push(node.to_string());
-        current = node.source();
-    }
-    parts.join(": ")
-}
+/// `{anyhow:#}`-equivalent flattening, single-owned in
+/// `oxdock-diagnostics` (see `flatten_chain` there). Re-exported here
+/// so the ~40 in-module call sites keep working without restating
+/// the walk.
+pub use oxdock_diagnostics::flatten_chain;
 
 /// Duplicate field name inside one MAP spelling.
 pub fn map_duplicate_field(field: &str) -> Diagnostic {

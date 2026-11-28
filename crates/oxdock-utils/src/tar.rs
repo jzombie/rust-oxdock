@@ -140,7 +140,7 @@ pub fn pack_to<W: Write>(
         header.set_cksum();
         builder
             .append_data(&mut header, &rel, std::io::empty())
-            .map_err(|e| tar_diag::pack_failed(&anyhow::Error::new(e)))?;
+            .map_err(|e| tar_diag::pack_from_anyhow(e.into()))?;
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
     for (rel, len, reader) in files.iter_mut() {
@@ -152,13 +152,13 @@ pub fn pack_to<W: Write>(
         header.set_cksum();
         builder
             .append_data(&mut header, &sanitized, reader.as_mut())
-            .map_err(|e| tar_diag::pack_failed(&anyhow::Error::new(e)))?;
+            .map_err(|e| tar_diag::pack_from_anyhow(e.into()))?;
     }
     builder
         .into_inner()
-        .map_err(|e| tar_diag::pack_failed(&anyhow::Error::new(e)))?
+        .map_err(|e| tar_diag::pack_from_anyhow(e.into()))?
         .try_finish()
-        .map_err(|e| tar_diag::pack_failed(&anyhow::Error::new(e)))?;
+        .map_err(|e| tar_diag::pack_from_anyhow(e.into()))?;
     Ok((files.len() + sorted_dirs.len()) as u64)
 }
 
@@ -211,7 +211,7 @@ pub fn unpack_auto_from<R: Read>(
         match src.read(&mut head[filled..]) {
             Ok(0) => break,
             Ok(n) => filled += n,
-            Err(e) => return Err(tar_diag::unpack_failed(&anyhow::Error::new(e))),
+            Err(e) => return Err(tar_diag::from_anyhow(e.into())),
         }
     }
     if filled == 0 {
@@ -237,7 +237,7 @@ fn unpack_raw_checked<R: Read>(
         match src.read(&mut first[filled..]) {
             Ok(0) => break,
             Ok(n) => filled += n,
-            Err(e) => return Err(tar_diag::unpack_failed(&anyhow::Error::new(e))),
+            Err(e) => return Err(tar_diag::from_anyhow(e.into())),
         }
     }
     if filled < first.len() {
@@ -256,12 +256,12 @@ fn drain_entries<R: Read>(
 ) -> DiagnosticResult<()> {
     for entry in archive
         .entries()
-        .map_err(|e| tar_diag::unpack_failed(&anyhow::Error::new(e)))?
+        .map_err(|e| tar_diag::from_anyhow(e.into()))?
     {
-        let mut entry = entry.map_err(|e| tar_diag::unpack_failed(&anyhow::Error::new(e)))?;
+        let mut entry = entry.map_err(|e| tar_diag::from_anyhow(e.into()))?;
         let raw = entry
             .path()
-            .map_err(|e| tar_diag::unpack_failed(&anyhow::Error::new(e)))?
+            .map_err(|e| tar_diag::from_anyhow(e.into()))?
             .to_string_lossy()
             .to_string();
         let rel = sanitize_rel(&raw)?;
@@ -273,7 +273,7 @@ fn drain_entries<R: Read>(
             t if t.is_symlink() || t.is_hard_link() => {
                 let target = entry
                     .link_name()
-                    .map_err(|e| tar_diag::unpack_failed(&anyhow::Error::new(e)))?
+                    .map_err(|e| tar_diag::from_anyhow(e.into()))?
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
                 apply(StreamedEntry::Symlink { path: rel, target })
