@@ -381,12 +381,9 @@ fn fmt_raw_arg(arg: &Arg) -> String {
 
 fn fmt_io(b: &IoBinding) -> String {
     let s = match b.stream {
-        IoStream::Stdin => "stdin".to_string(),
-        IoStream::Stdout => "stdout".to_string(),
-        IoStream::Stderr => "stderr".to_string(),
-        IoStream::Tty => "tty".to_string(),
-        IoStream::Rows(rows) => format!("rows={rows}"),
-        IoStream::Cols(cols) => format!("cols={cols}"),
+        IoStream::Rows(rows) => format!("{}={rows}", b.stream.name()),
+        IoStream::Cols(cols) => format!("{}={cols}", b.stream.name()),
+        ref stream => stream.name().to_string(),
     };
     match &b.pipe {
         Some(PipeTarget::Var { name }) => format!("{}=${}", s, name),

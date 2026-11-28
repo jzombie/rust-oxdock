@@ -78,15 +78,15 @@ pub async fn serve_stdio(handler: OxDockHandler) -> DiagnosticResult<()> {
     use rmcp::ServiceExt;
     let transport = rmcp::transport::io::stdio();
     let reloader = handler.clone();
-    let service = handler
-        .serve(transport)
-        .await
-        .map_err(|err| mcp_diag::stdio_serve_failed(&anyhow::Error::new(err)))?;
+    let service = handler.serve(transport).await.map_err(|err| {
+        let inner = mcp_diag::from_anyhow(err.into());
+        mcp_diag::stdio_serve_failed(&inner)
+    })?;
     reloader.spawn_reloader(Some(service.peer().clone()));
-    service
-        .waiting()
-        .await
-        .map_err(|err| mcp_diag::stdio_service_failed(&anyhow::Error::new(err)))?;
+    service.waiting().await.map_err(|err| {
+        let inner = mcp_diag::from_anyhow(err.into());
+        mcp_diag::stdio_service_failed(&inner)
+    })?;
     Ok(())
 }
 
@@ -96,6 +96,9 @@ pub fn serve_stdio_blocking(handler: OxDockHandler) -> DiagnosticResult<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|err| mcp_diag::serve_runtime_build_failed(&anyhow::Error::new(err)))?;
+        .map_err(|err| {
+            let inner = mcp_diag::from_anyhow(err.into());
+            mcp_diag::serve_runtime_build_failed(&inner)
+        })?;
     runtime.block_on(serve_stdio(handler))
 }

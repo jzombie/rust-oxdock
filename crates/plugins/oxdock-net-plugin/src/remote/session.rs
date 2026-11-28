@@ -429,7 +429,7 @@ impl MuxioSession {
             let len = fs.metadata(host_path).map(|m| m.len()).map_err(|err| {
                 anyhow::Error::new(net_diag::remote_fetch_source_unreadable(
                     &host_path.display(),
-                    &err,
+                    &anyhow::Error::from(err),
                 ))
             })?;
             entries.push((
@@ -624,7 +624,7 @@ impl MuxioSession {
             // re-raises it as its own EXIT (see `run_remote_block`); every
             // other guest failure keeps the plain message.
             if let Some(code) = result.exit_code {
-                return Err(oxdock_core::ExitRequest(code))
+                return Err(oxdock_core::ExitRequest::new(code))
                     .context(net_diag::remote_target_exit_status(&request.target, code));
             }
             return Err(anyhow::Error::new(net_diag::remote_target_failed(
@@ -710,6 +710,7 @@ impl MuxioSession {
                 oxdock_core::apply_push_symlink(fs, &root, &host_rel, &target)
             }
         })
+        .map_err(anyhow::Error::from)
     }
 }
 
@@ -726,7 +727,9 @@ struct TransferScratch {
 impl TransferScratch {
     fn new() -> Result<Self> {
         let tempdir = GuardedPath::tempdir().map_err(|err| {
-            anyhow::Error::new(net_diag::remote_transfer_scratch_tempdir_failed(&err))
+            anyhow::Error::new(net_diag::remote_transfer_scratch_tempdir_failed(
+                &anyhow::Error::from(err),
+            ))
         })?;
         let root = tempdir.as_guarded_path().clone();
         let resolver = PathResolver::new(root.root(), root.root())?;

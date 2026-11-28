@@ -12,7 +12,7 @@
 // purely lexically and anchors each result at its own filesystem anchor
 // (`/` on Unix, `C:\` or `\\server\share\` on Windows).
 
-use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 
 use super::GuardedPath;
 #[cfg(not(miri))]
@@ -166,13 +166,13 @@ pub(crate) fn cache_guard_for_local(anchor: &GuardedPath) -> GuardedPath {
 // `cache-manager` APIs. Never applies an eviction policy, so cached
 // artifacts are never reclaimed by default. No-op under Miri.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-pub(crate) fn ensure_cache_dir(cache_dir: &std::path::Path) -> Result<()> {
+pub(crate) fn ensure_cache_dir(cache_dir: &std::path::Path) -> DiagnosticResult<()> {
     #[cfg(not(miri))]
     {
         cache_manager::CacheRoot::from_root(cache_dir.to_path_buf())
             .ensure_group(CACHE_GROUP)
             .map(|_| ())
-            .map_err(|e| anyhow::Error::new(fs_diag::cache_ensure_failed(cache_dir, &e)))
+            .map_err(|e| fs_diag::cache_ensure_failed(cache_dir, &e))
     }
     #[cfg(miri)]
     {

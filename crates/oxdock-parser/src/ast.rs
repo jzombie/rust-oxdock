@@ -577,6 +577,23 @@ pub enum IoStream {
     Cols(u16),
 }
 
+impl IoStream {
+    /// Bare stream word (`stdin`, `stdout`, `stderr`, `tty`, `rows`,
+    /// `cols`): the single owner of the `WITH_IO` binding vocabulary.
+    /// Geometry carries no value here; render `rows=N` at the call
+    /// site. Parse direction (`&str` to variant) stays in the parser.
+    pub fn name(&self) -> &'static str {
+        match self {
+            IoStream::Stdin => "stdin",
+            IoStream::Stdout => "stdout",
+            IoStream::Stderr => "stderr",
+            IoStream::Tty => "tty",
+            IoStream::Rows(_) => "rows",
+            IoStream::Cols(_) => "cols",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct IoBinding {
     pub stream: IoStream,

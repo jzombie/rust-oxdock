@@ -692,6 +692,7 @@ impl TaskEntry {
                     error: String::new(),
                 },
                 Err(err) => {
+                    let err = anyhow::Error::new(err);
                     let completion = TaskCompletion {
                         ok: false,
                         exit_code: exit_code_of(&err).unwrap_or(1),
@@ -1317,7 +1318,9 @@ impl<P: ProcessManager> ExecState<P> {
                         &item,
                         &format!("{}[{}]", sigil_var(key), list.len()),
                     )
-                    .map_err(|err| state_diag::eval_list_element_failed(&err))?;
+                    .map_err(|err| {
+                        state_diag::eval_list_element_failed(&super::args::lift_dispatch_error(err))
+                    })?;
                 }
                 list.push(item);
                 return Ok(());
@@ -1339,7 +1342,9 @@ impl<P: ProcessManager> ExecState<P> {
                     &item,
                     &format!("{}[{}]", sigil_var(key), list.len()),
                 )
-                .map_err(|err| state_diag::eval_list_element_failed(&err))?;
+                .map_err(|err| {
+                    state_diag::eval_list_element_failed(&super::args::lift_dispatch_error(err))
+                })?;
             }
             list.push(item);
             return Ok(());

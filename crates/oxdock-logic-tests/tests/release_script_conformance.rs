@@ -25,7 +25,7 @@ fn load_release_script() -> Result<String> {
     let script_path = resolver
         .root()
         .join(".github/scripts/gha-rust-release.oxfile")?;
-    resolver.read_to_string(&script_path)
+    Ok(resolver.read_to_string(&script_path)?)
 }
 
 /// Shared helpers backing the release scripts above: read from the
@@ -38,7 +38,7 @@ fn load_helpers_module() -> Result<String> {
     let helper_path = resolver
         .root()
         .join(".github/scripts/helpers/ci-helpers.oxfile")?;
-    resolver.read_to_string(&helper_path)
+    Ok(resolver.read_to_string(&helper_path)?)
 }
 
 /// The release script imports MARKDOWN, so it parses against a module
@@ -122,7 +122,9 @@ fn run_validate(manifest: &str, changelog: &str, confirm: &str) -> Result<()> {
     let mut io = ExecIo::new();
     io.insert_inherit_env("RELEASE_CONFIRM", confirm);
     io.insert_inherit_env("GITHUB_WORKSPACE", fixture.as_path().display().to_string());
-    run_steps_with_context_result_with_io(&fixture, &fixture, &steps, io).map(|_| ())
+    run_steps_with_context_result_with_io(&fixture, &fixture, &steps, io)
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
 }
 
 /// The version fallback executes for real: the actual
@@ -421,7 +423,7 @@ impl ReleaseRun {
 
     fn notes(&self) -> Result<String> {
         let reader = PathResolver::new_guarded(self.root.clone(), self.root.clone())?;
-        reader.read_to_string(&self.root.join("target/release-notes.md")?)
+        Ok(reader.read_to_string(&self.root.join("target/release-notes.md")?)?)
     }
 }
 
@@ -815,6 +817,7 @@ fn missing_section_fails_naming_the_needle() -> Result<()> {
         Vec::new(),
     )
     .map(|_| ())
+    .map_err(anyhow::Error::from)
     .expect_err("missing section must fail");
     let rendered = format!("{err:#}");
     assert!(

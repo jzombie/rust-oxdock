@@ -1,8 +1,6 @@
 use crate::diagnostics as fs_diag;
 use crate::workspace_fs::GuardedPath;
-#[cfg(not(miri))]
-use anyhow::Context;
-use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 
 #[derive(Debug, Clone)]
 pub struct GitIdentity {
@@ -11,8 +9,8 @@ pub struct GitIdentity {
 }
 
 #[cfg(miri)]
-pub fn ensure_git_identity(_repo: &GuardedPath) -> Result<GitIdentity> {
-    Err(anyhow::Error::new(fs_diag::git_identity_miri()))
+pub fn ensure_git_identity(_repo: &GuardedPath) -> DiagnosticResult<GitIdentity> {
+    Err(fs_diag::git_identity_miri())
 }
 
 #[cfg(not(miri))]
@@ -20,7 +18,7 @@ pub fn ensure_git_identity(_repo: &GuardedPath) -> Result<GitIdentity> {
 /// Existing repo/local/global/system settings win; we fall back to common
 /// environment variables and, as a last resort, deterministic defaults so CI
 /// or fixture repositories can commit without bespoke setup.
-pub fn ensure_git_identity(repo: &GuardedPath) -> Result<GitIdentity> {
+pub fn ensure_git_identity(repo: &GuardedPath) -> DiagnosticResult<GitIdentity> {
     let mut name = read_config(repo, "user.name")?;
     let mut email = read_config(repo, "user.email")?;
     let needs_name_config = name.is_none();
@@ -47,7 +45,7 @@ pub fn ensure_git_identity(repo: &GuardedPath) -> Result<GitIdentity> {
 }
 
 #[cfg(not(miri))]
-fn read_config(repo: &GuardedPath, key: &str) -> Result<Option<String>> {
+fn read_config(repo: &GuardedPath, key: &str) -> DiagnosticResult<Option<String>> {
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -56,7 +54,7 @@ fn read_config(repo: &GuardedPath, key: &str) -> Result<Option<String>> {
         .arg("--get")
         .arg(key)
         .output()
-        .with_context(|| format!("failed to query git config for {key}"))?;
+        .map_err(|err| fs_diag::git_config_query_failed(key, &err))?;
 
     if output.status.success() {
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -68,15 +66,12 @@ fn read_config(repo: &GuardedPath, key: &str) -> Result<Option<String>> {
 
     match output.status.code() {
         Some(1) => Ok(None),
-        _ => Err(anyhow::Error::new(fs_diag::git_config_get_failed(
-            key,
-            output.status,
-        ))),
+        _ => Err(fs_diag::git_config_get_failed(key, output.status)),
     }
 }
 
 #[cfg(not(miri))]
-fn write_config(repo: &GuardedPath, key: &str, value: &str) -> Result<()> {
+fn write_config(repo: &GuardedPath, key: &str, value: &str) -> DiagnosticResult<()> {
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     let status = std::process::Command::new("git")
         .arg("-C")
@@ -86,11 +81,9 @@ fn write_config(repo: &GuardedPath, key: &str, value: &str) -> Result<()> {
         .arg(key)
         .arg(value)
         .status()
-        .with_context(|| format!("failed to set git config {key}"))?;
+        .map_err(|err| fs_diag::git_config_write_failed(key, &err))?;
     if !status.success() {
-        return Err(anyhow::Error::new(fs_diag::git_config_set_failed(
-            key, status,
-        )));
+        return Err(fs_diag::git_config_set_failed(key, status));
     }
     Ok(())
 }

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -42,18 +42,12 @@ use oxdock_pipe::{KeeperGuard, PipeHandle, PipeInner, SharedOutput};
 /// Map a Flow reaching a context-free boundary (pipeline top, thread join)
 /// into status. Only Done passes; anything else is a step-numbered error
 /// naming the originating step in its own body.
-fn top_level_flow(flow: Flow) -> Result<()> {
+fn top_level_flow(flow: Flow) -> oxdock_diagnostics::DiagnosticResult<()> {
     match flow {
         Flow::Done => Ok(()),
-        Flow::Break { idx } => Err(anyhow::Error::new(diag::check_flow_outside_loop(
-            idx + 1,
-            KEYWORD_BREAK,
-        ))),
-        Flow::Continue { idx } => Err(anyhow::Error::new(diag::check_flow_outside_loop(
-            idx + 1,
-            KEYWORD_CONTINUE,
-        ))),
-        Flow::Return { idx, .. } => Err(anyhow::Error::new(diag::check_return_outside(idx + 1))),
+        Flow::Break { idx } => Err(diag::check_flow_outside_loop(idx + 1, KEYWORD_BREAK)),
+        Flow::Continue { idx } => Err(diag::check_flow_outside_loop(idx + 1, KEYWORD_CONTINUE)),
+        Flow::Return { idx, .. } => Err(diag::check_return_outside(idx + 1)),
     }
 }
 
@@ -129,12 +123,15 @@ pub(super) fn inherit_env<P: ProcessManager>(
     Ok(())
 }
 
-pub(super) fn workdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> Result<()> {
+pub(super) fn workdir<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    path: &str,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     cx.state.cwd = cx
         .state
         .fs
         .resolve_workdir(&cx.state.cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_workdir_failed(path, &e)))?;
+        .map_err(|e| diag::eval_workdir_failed(path, &e))?;
     Ok(())
 }
 
@@ -194,7 +191,10 @@ pub(super) fn env<P: ProcessManager>(
     Ok(())
 }
 
-pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Result<()> {
+pub(super) fn run<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    cmd: &str,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     // Terminal steps spawn through the shared pty pump instead of the
     // process manager; everything else below stays hermetic pipes.
     if let Some(tty) = cx.tty {
@@ -256,7 +256,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
     {
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            return Err(anyhow::Error::new(diag::eval_run_cancelled(cmd)));
+            return Err(diag::eval_run_cancelled(cmd));
         }
     }
 
@@ -264,12 +264,12 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
     let mut handle = match cx
         .process
         .spawn_command(&ctx, cmd, options)
-        .map_err(|e| anyhow::Error::new(diag::eval_run_spawn_failed(cmd, &e)))?
+        .map_err(|e| diag::eval_run_spawn_failed(cmd, &e))?
     {
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),
         CommandResult::Captured(_) => {
-            return Err(anyhow::Error::new(diag::eval_run_unexpected_capture(cmd)));
+            return Err(diag::eval_run_unexpected_capture(cmd));
         }
     };
 
@@ -291,7 +291,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
             let _ = handle.kill();
-            return Err(anyhow::Error::new(diag::eval_run_cancelled(cmd)));
+            return Err(diag::eval_run_cancelled(cmd));
         }
     }
 
@@ -311,7 +311,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
 
     let status = status?;
     if !status.success() {
-        return Err(anyhow::Error::new(diag::eval_run_exit_status(cmd, &status)));
+        return Err(diag::eval_run_exit_status(cmd, &status));
     }
     Ok(())
 }
@@ -321,7 +321,10 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Resu
 /// `CommandOptions` (cwd/env, `WITH_IO` pipes, `ASYNC`/cancellable
 /// backgrounding, [`INHERIT_STDOUT_ENV_VAR`]) are built exactly like [`run`];
 /// only the spawn call differs (`spawn_argv`, no `shell_cmd`).
-pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[String]) -> Result<()> {
+pub(super) fn run_argv<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    argv: &[String],
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     // Terminal steps spawn through the shared pty pump instead of the
     // process manager; everything else below stays hermetic pipes.
     if let Some(tty) = cx.tty {
@@ -382,7 +385,7 @@ pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[Strin
     {
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            return Err(anyhow::Error::new(diag::eval_run_argv_cancelled(argv)));
+            return Err(diag::eval_run_argv_cancelled(argv));
         }
     }
 
@@ -390,14 +393,12 @@ pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[Strin
     let mut handle = match cx
         .process
         .spawn_argv(&ctx, argv, options)
-        .map_err(|e| anyhow::Error::new(diag::eval_run_argv_spawn_failed(argv, &e)))?
+        .map_err(|e| diag::eval_run_argv_spawn_failed(argv, &e))?
     {
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),
         CommandResult::Captured(_) => {
-            return Err(anyhow::Error::new(diag::eval_run_argv_unexpected_capture(
-                argv,
-            )));
+            return Err(diag::eval_run_argv_unexpected_capture(argv));
         }
     };
 
@@ -416,7 +417,7 @@ pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[Strin
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
             let _ = handle.kill();
-            return Err(anyhow::Error::new(diag::eval_run_argv_cancelled(argv)));
+            return Err(diag::eval_run_argv_cancelled(argv));
         }
     }
 
@@ -436,9 +437,7 @@ pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[Strin
 
     let status = status?;
     if !status.success() {
-        return Err(anyhow::Error::new(diag::eval_run_argv_exit_status(
-            argv, &status,
-        )));
+        return Err(diag::eval_run_argv_exit_status(argv, &status));
     }
     Ok(())
 }
@@ -467,14 +466,14 @@ fn run_pty<P: ProcessManager>(
     tty: TtyRequest,
     what: &str,
     shell: bool,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     use std::sync::atomic::Ordering;
     if argv.is_empty() {
-        return Err(anyhow::Error::new(diag::eval_run_needs_program(what)));
+        return Err(diag::eval_run_needs_program(what));
     }
     // Same pre-spawn cancellation refusal as [`run`].
     if cx.state.cancel_token.load(Ordering::SeqCst) {
-        return Err(anyhow::Error::new(diag::eval_run_cancelled(what)));
+        return Err(diag::eval_run_cancelled(what));
     }
     if std::env::var(PROCESS_DEBUG_ENV_VAR).is_ok() {
         eprintln!("DEBUG: step RUN {what} under tty {tty:?}");
@@ -518,9 +517,7 @@ fn run_pty<P: ProcessManager>(
         },
         #[cfg(not(miri))]
         CommandStdin::OsPipe(_) => {
-            return Err(anyhow::Error::new(diag::eval_with_io_tty_live_pipe(
-                "stdin",
-            )));
+            return Err(diag::eval_with_io_tty_live_pipe(IoStream::Stdin.name()));
         }
     };
     // Master output lands exclusively in the step stdout sink. `None`
@@ -532,9 +529,7 @@ fn run_pty<P: ProcessManager>(
         None => Arc::new(Mutex::new(std::io::stdout())),
         #[cfg(not(miri))]
         Some(StreamHandle::Os(_)) => {
-            return Err(anyhow::Error::new(diag::eval_with_io_tty_live_pipe(
-                "stdout",
-            )));
+            return Err(diag::eval_with_io_tty_live_pipe(IoStream::Stdout.name()));
         }
     };
     let hub = cx.cancel_hub();
@@ -558,20 +553,18 @@ fn run_pty<P: ProcessManager>(
         on_output_drained: None,
         func: KEYWORD_RUN,
     })
-    .map_err(|e| anyhow::Error::new(diag::eval_run_spawn_failed(what, &anyhow::Error::new(e))))?;
+    .map_err(|e| diag::eval_run_spawn_failed(what, &e))?;
     // Pipe EOF rides the writer drops like any `RUN`: the supervisor
     // returns only after the output worker finished, so every byte is
     // already in the sink before the code below runs.
     match outcome {
         PtyOutcome::Completed(code) => {
             if code != 0 {
-                return Err(anyhow::Error::new(diag::eval_run_pty_exit_status(
-                    what, code,
-                )));
+                return Err(diag::eval_run_pty_exit_status(what, code));
             }
             Ok(())
         }
-        PtyOutcome::Cancelled => Err(anyhow::Error::new(diag::eval_run_cancelled(what))),
+        PtyOutcome::Cancelled => Err(diag::eval_run_cancelled(what)),
     }
 }
 
@@ -598,7 +591,7 @@ fn tty_shell_argv(cmd: &str) -> Vec<String> {
 pub(super) fn resolve_run_exec_argv<P: ProcessManager>(
     argv: &[Arg],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Vec<String>> {
+) -> oxdock_diagnostics::DiagnosticResult<Vec<String>> {
     let mut out = Vec::new();
     for arg in argv {
         match arg {
@@ -616,12 +609,15 @@ pub(super) fn resolve_run_exec_argv<P: ProcessManager>(
         }
     }
     if out.is_empty() {
-        return Err(anyhow::Error::new(diag::eval_run_exec_requires_arg()));
+        return Err(diag::eval_run_exec_requires_arg());
     }
     Ok(out)
 }
 
-fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
+fn flatten_exec_value(
+    val: &Value,
+    out: &mut Vec<String>,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     if let Some(s) = val.as_str() {
         out.push(s.to_string());
         return Ok(());
@@ -641,13 +637,13 @@ fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
     if val.as_pipe_handle().is_some() {
         // A pipe in argv position is always a bug: a child process
         // cannot receive a handle as an argument string.
-        return Err(anyhow::Error::new(diag::eval_run_exec_pipe_arg()));
+        return Err(diag::eval_run_exec_pipe_arg());
     }
     if val.as_semaphore().is_some() {
-        return Err(anyhow::Error::new(diag::eval_run_exec_semaphore_arg()));
+        return Err(diag::eval_run_exec_semaphore_arg());
     }
     if val.as_permit().is_some() {
-        return Err(anyhow::Error::new(diag::eval_run_exec_permit_arg()));
+        return Err(diag::eval_run_exec_permit_arg());
     }
     if let Some(d) = val.as_duration() {
         out.push(oxdock_parser::command::format_duration(&d));
@@ -664,14 +660,17 @@ fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
         return Ok(());
     }
     if val.as_map().is_some() {
-        return Err(anyhow::Error::new(
-            diag::eval_run_exec_element_needs_string("map"),
+        // Runtime kind word derives from the value's own descriptor
+        // name (`MAP` renders `map`), matching the `KEYWORD_*`
+        // lowercase-rendering convention elsewhere; never restated.
+        return Err(diag::eval_run_exec_element_needs_string(
+            &val.type_name().to_lowercase(),
         ));
     }
     if let Some(id) = val.as_handle() {
-        return Err(anyhow::Error::new(
-            diag::eval_run_exec_element_needs_string(&format!("task handle task#{id}")),
-        ));
+        return Err(diag::eval_run_exec_element_needs_string(&format!(
+            "task handle task#{id}"
+        )));
     }
     // Every other type stringifies through its descriptor rendering
     // (host values through their `Display`).
@@ -688,7 +687,9 @@ pub(super) fn echo<P: ProcessManager>(cx: &mut StepCtx<'_, P>, msg: &str) -> Res
     // atomic line.
     let line = format!("{msg}\n");
     write_stdout(cx.out.clone(), |writer| {
-        writer.write_all(line.as_bytes())?;
+        writer
+            .write_all(line.as_bytes())
+            .map_err(|e| diag::eval_stream_write_failed(&e))?;
         Ok(())
     })?;
     Ok(())
@@ -703,7 +704,7 @@ pub(crate) fn dispatch_sleep_step<P: ProcessManager>(
         unreachable!()
     };
     let duration = super::args::resolve_arg_as_duration(duration, cx)?;
-    sleep(cx, &duration)
+    Ok(sleep(cx, &duration)?)
 }
 
 /// Dispatch `SLEEP <duration>` : park the step without spawning a shell.
@@ -714,14 +715,14 @@ pub(crate) fn dispatch_sleep_step<P: ProcessManager>(
 pub(crate) fn sleep<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     duration: &std::time::Duration,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
     let start = Instant::now();
     loop {
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            return Err(anyhow::Error::new(diag::eval_sleep_cancelled()));
+            return Err(diag::eval_sleep_cancelled());
         }
         let elapsed = start.elapsed();
         if elapsed >= *duration {
@@ -750,27 +751,27 @@ pub(super) fn copy<P: ProcessManager>(
     from_workspace: Option<WorkspaceTarget>,
     from: &str,
     to: &str,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let from_abs = if let Some(target) = from_workspace {
         cx.state
             .fs
             .resolve_copy_source_from_target(copy_source_root(target), from)
-            .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?
+            .map_err(|e| diag::eval_copy_failed(from, to, &e))?
     } else {
         cx.state
             .fs
             .resolve_copy_source(from)
-            .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?
+            .map_err(|e| diag::eval_copy_failed(from, to, &e))?
     };
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_copy_failed(from, to, &e))?;
     let to_abs = place_file_in_dir(cx.state.fs.as_ref(), &from_abs, to, &to_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_copy_failed(from, to, &e))?;
     copy_entry(cx.state.fs.as_ref(), &from_abs, &to_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_copy_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_copy_failed(from, to, &super::args::lift_dispatch_error(e)))?;
     Ok(())
 }
 
@@ -785,7 +786,7 @@ fn place_file_in_dir(
     from_abs: &GuardedPath,
     to: &str,
     to_abs: &GuardedPath,
-) -> Result<GuardedPath> {
+) -> oxdock_diagnostics::DiagnosticResult<GuardedPath> {
     if !matches!(fs.entry_kind(from_abs), Ok(EntryKind::File)) {
         return Ok(to_abs.clone());
     }
@@ -799,11 +800,11 @@ fn place_file_in_dir(
         .as_path()
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
-        .ok_or_else(|| anyhow::Error::new(diag::eval_copy_no_file_name(&display)))?;
+        .ok_or_else(|| diag::eval_copy_no_file_name(&display))?;
     let to_display = to_abs.display().to_string();
     to_abs
         .join(&base)
-        .map_err(|e| anyhow::Error::new(diag::eval_copy_destination_escapes(&to_display, &e)))
+        .map_err(|e| diag::eval_copy_destination_escapes(&to_display, &e))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -813,16 +814,16 @@ pub(super) fn copy_git<P: ProcessManager>(
     from: &str,
     to: &str,
     include_dirty: bool,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .map_err(|e| anyhow::Error::new(diag::eval_copy_git_failed(rev, from, to, &e)))?;
+        .map_err(|e| diag::eval_copy_git_failed(rev, from, to, &e))?;
     cx.state
         .fs
         .copy_from_git(rev, from, &to_abs, include_dirty)
-        .map_err(|e| anyhow::Error::new(diag::eval_copy_git_failed(rev, from, to, &e)))?;
+        .map_err(|e| diag::eval_copy_git_failed(rev, from, to, &e))?;
     Ok(())
 }
 
@@ -837,7 +838,7 @@ fn resolve_archive_src<P: ProcessManager>(
     cx: &StepCtx<'_, P>,
     src: &str,
     dst: &str,
-) -> Result<GuardedPath> {
+) -> oxdock_diagnostics::DiagnosticResult<GuardedPath> {
     let trimmed = to_forward_slashes(src).trim_end_matches('/').to_string();
     // A leading slash roots the parent at `/` itself: without the
     // index-zero arm `/foo` would split into parent `""` and resolve
@@ -854,7 +855,7 @@ fn resolve_archive_src<P: ProcessManager>(
             .state
             .fs
             .resolve_read(&cx.state.cwd, src)
-            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)));
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e));
     }
     let parent_abs = if parent.is_empty() {
         cx.state.cwd.clone()
@@ -862,14 +863,14 @@ fn resolve_archive_src<P: ProcessManager>(
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, &parent)
-            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e))?
     };
     let mut matched = false;
     for entry in cx
         .state
         .fs
         .read_dir_entries(&parent_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?
     {
         if entry
             .file_name()
@@ -882,9 +883,7 @@ fn resolve_archive_src<P: ProcessManager>(
                 .map(|kind| kind.is_symlink())
                 .unwrap_or(true);
             if is_link {
-                return Err(anyhow::Error::new(
-                    diag::eval_archive_refuses_symlink_source(src, dst),
-                ));
+                return Err(diag::eval_archive_refuses_symlink_source(src, dst));
             }
         }
     }
@@ -894,11 +893,11 @@ fn resolve_archive_src<P: ProcessManager>(
             .state
             .fs
             .resolve_read(&cx.state.cwd, src)
-            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)));
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e));
     }
     parent_abs
         .join(&name)
-        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))
 }
 
 /// Collected packable tree: `(rel, guard)` files plus `(rel, guard)`
@@ -915,10 +914,10 @@ fn collect_archive_tree(
     src_abs: &GuardedPath,
     src: &str,
     dst: &str,
-) -> Result<ArchiveTree> {
+) -> oxdock_diagnostics::DiagnosticResult<ArchiveTree> {
     match fs
         .entry_kind(src_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?
     {
         EntryKind::File => {
             let base = src_abs
@@ -926,19 +925,10 @@ fn collect_archive_tree(
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .ok_or_else(|| {
-                    anyhow::Error::new(diag::eval_archive_no_file_name(
-                        src,
-                        dst,
-                        &src_abs.display().to_string(),
-                    ))
+                    diag::eval_archive_no_file_name(src, dst, &src_abs.display().to_string())
                 })?;
-            let rel = sanitize_rel(&to_forward_slashes(&base)).map_err(|err| {
-                anyhow::Error::new(diag::eval_archive_failed(
-                    src,
-                    dst,
-                    &anyhow::Error::new(err),
-                ))
-            })?;
+            let rel = sanitize_rel(&to_forward_slashes(&base))
+                .map_err(|err| diag::eval_archive_failed(src, dst, &err))?;
             Ok((vec![(rel, src_abs.clone())], Vec::new()))
         }
         EntryKind::Dir => {
@@ -950,10 +940,10 @@ fn collect_archive_tree(
                 // subtree walk: the rel prefixes must be real
                 // directories before listing.
                 PathResolver::refuse_link_ancestors(src_abs, &dir_rel)
-                    .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+                    .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
                 let mut entries = fs
                     .read_dir_entries(&dir_abs)
-                    .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+                    .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
                 entries.sort_by_key(|entry| entry.file_name());
                 for entry in entries {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -968,16 +958,14 @@ fn collect_archive_tree(
                         .map(|kind| kind.is_symlink())
                         .unwrap_or(true);
                     if is_link {
-                        return Err(anyhow::Error::new(diag::eval_archive_refuses_symlink(
-                            src, dst, &child_rel,
-                        )));
+                        return Err(diag::eval_archive_refuses_symlink(src, dst, &child_rel));
                     }
                     let child = dir_abs
                         .join(&name)
-                        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+                        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
                     match fs
                         .entry_kind(&child)
-                        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?
+                        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?
                     {
                         EntryKind::Dir => {
                             dirs.push((child_rel.clone(), child.clone()));
@@ -1009,19 +997,13 @@ fn append_archive_tree<W: std::io::Write>(
     src_abs: &GuardedPath,
     src: &str,
     dst: &str,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     for (rel, guard) in dirs {
-        let rel = sanitize_rel(rel).map_err(|err| {
-            anyhow::Error::new(diag::eval_archive_failed(
-                src,
-                dst,
-                &anyhow::Error::new(err),
-            ))
-        })?;
+        let rel = sanitize_rel(rel).map_err(|err| diag::eval_archive_failed(src, dst, &err))?;
         let mode = fs
             .archive_member_stat(guard)
             .map(|(_, mode)| mode.unwrap_or(0o755))
-            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
         let mut header = tar::Header::new_gnu();
         header.set_mode(mode);
         header.set_entry_type(tar::EntryType::Directory);
@@ -1030,26 +1012,20 @@ fn append_archive_tree<W: std::io::Write>(
         builder
             .append_data(&mut header, &rel, std::io::empty())
             .map_err(|e| {
-                anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
+                diag::eval_archive_failed(src, dst, &super::args::lift_dispatch_error(e.into()))
             })?;
     }
     for (rel, guard) in files {
-        let rel = sanitize_rel(rel).map_err(|err| {
-            anyhow::Error::new(diag::eval_archive_failed(
-                src,
-                dst,
-                &anyhow::Error::new(err),
-            ))
-        })?;
+        let rel = sanitize_rel(rel).map_err(|err| diag::eval_archive_failed(src, dst, &err))?;
         let (len, mode) = fs
             .archive_member_stat(guard)
-            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
         // Link-refusing open: a symlink planted after the listing
         // probe fails here instead of packing its target's bytes, and
         // the descriptor must stay under the packed tree.
         let mut reader = fs
             .open_read_nofollow(guard, src_abs)
-            .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
         let mut header = tar::Header::new_gnu();
         header.set_mode(mode.unwrap_or(0o644));
         header.set_size(len);
@@ -1057,7 +1033,7 @@ fn append_archive_tree<W: std::io::Write>(
         builder
             .append_data(&mut header, &rel, &mut reader)
             .map_err(|e| {
-                anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
+                diag::eval_archive_failed(src, dst, &super::args::lift_dispatch_error(e.into()))
             })?;
     }
     Ok(())
@@ -1068,13 +1044,13 @@ pub(super) fn archive<P: ProcessManager>(
     src: &str,
     dst: &str,
     raw: bool,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let src_abs = resolve_archive_src(cx, src, dst)?;
     let dst_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, dst)
-        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
     // Opening the destination truncates it: an archive landing on its
     // own source would destroy inputs before their bytes stream, so
     // equal paths fail closed. A pre-existing destination inside the
@@ -1083,25 +1059,21 @@ pub(super) fn archive<P: ProcessManager>(
     // cannot be a member) which keeps whole-tree archives like
     // `ARCHIVE project project.tar.gz` working.
     if dst_abs == src_abs {
-        return Err(anyhow::Error::new(
-            diag::eval_archive_destination_is_source(src, dst),
-        ));
+        return Err(diag::eval_archive_destination_is_source(src, dst));
     }
     if dst_abs.as_path().starts_with(src_abs.as_path()) && dst_abs.exists() {
-        return Err(anyhow::Error::new(
-            diag::eval_archive_destination_inside_tree(src, dst),
-        ));
+        return Err(diag::eval_archive_destination_inside_tree(src, dst));
     }
     let (files, dirs) = collect_archive_tree(cx.state.fs.as_ref(), &src_abs, src, dst)?;
     cx.state
         .fs
         .ensure_parent_dir(&dst_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
     let out = cx
         .state
         .fs
         .open_write(&dst_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_archive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
     if raw {
         let mut builder = tar::Builder::new(out);
         append_archive_tree(
@@ -1114,10 +1086,10 @@ pub(super) fn archive<P: ProcessManager>(
             dst,
         )?;
         let mut out = builder.into_inner().map_err(|e| {
-            anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
+            diag::eval_archive_failed(src, dst, &super::args::lift_dispatch_error(e.into()))
         })?;
         std::io::Write::flush(&mut out).map_err(|e| {
-            anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
+            diag::eval_archive_failed(src, dst, &super::args::lift_dispatch_error(e.into()))
         })?;
     } else {
         let encoder = GzEncoder::new(out, Compression::default());
@@ -1134,11 +1106,11 @@ pub(super) fn archive<P: ProcessManager>(
         builder
             .into_inner()
             .map_err(|e| {
-                anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
+                diag::eval_archive_failed(src, dst, &super::args::lift_dispatch_error(e.into()))
             })?
             .try_finish()
             .map_err(|e| {
-                anyhow::Error::new(diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))
+                diag::eval_archive_failed(src, dst, &super::args::lift_dispatch_error(e.into()))
             })?;
     }
     Ok(())
@@ -1149,32 +1121,31 @@ pub(super) fn unarchive<P: ProcessManager>(
     src: &str,
     dst: &str,
     max_bytes: Option<&str>,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let cap = match max_bytes {
-        Some(raw) => oxdock_parser::command::parse_byte_count(raw).map_err(|e| {
-            anyhow::Error::new(diag::eval_unarchive_bad_max_bytes(src, dst, raw, e))
-        })?,
+        Some(raw) => oxdock_parser::command::parse_byte_count(raw)
+            .map_err(|e| diag::eval_unarchive_bad_max_bytes(src, dst, raw, e))?,
         None => DEFAULT_UNARCHIVE_MAX_BYTES,
     };
     let src_abs = cx
         .state
         .fs
         .resolve_read(&cx.state.cwd, src)
-        .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     let dst_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, dst)
-        .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     cx.state
         .fs
         .create_dir_all(&dst_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     let reader = cx
         .state
         .fs
         .open_read(&src_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
+        .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     let fs = cx.state.fs.as_ref();
     // Directory modes apply after every member lands: a read-only
     // header (e.g. 0555) would otherwise lock its own children out
@@ -1194,11 +1165,7 @@ pub(super) fn unarchive<P: ProcessManager>(
                 // planted links stay the filesystem layers' job, and
                 // those run next, on every member, in every mode.
                 let rel = sanitize_rel(&path).map_err(|err| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(
-                        src,
-                        dst,
-                        &anyhow::Error::new(err),
-                    ))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &err))
                 })?;
                 PathResolver::refuse_link_ancestors(&dst_abs, &rel).map_err(|e| {
                     anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
@@ -1213,11 +1180,7 @@ pub(super) fn unarchive<P: ProcessManager>(
             }
             StreamedEntry::File { path, mode, reader } => {
                 let rel = sanitize_rel(&path).map_err(|err| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(
-                        src,
-                        dst,
-                        &anyhow::Error::new(err),
-                    ))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &err))
                 })?;
                 PathResolver::refuse_link_ancestors(&dst_abs, &rel).map_err(|e| {
                     anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
@@ -1248,7 +1211,7 @@ pub(super) fn unarchive<P: ProcessManager>(
                         anyhow::Error::new(diag::eval_unarchive_member_failed(
                             src,
                             dst,
-                            &anyhow::Error::new(e),
+                            &super::args::lift_dispatch_error(e.into()),
                         ))
                     }
                 })?;
@@ -1257,11 +1220,15 @@ pub(super) fn unarchive<P: ProcessManager>(
                     anyhow::Error::new(diag::eval_unarchive_member_failed(
                         src,
                         dst,
-                        &anyhow::Error::new(e),
+                        &super::args::lift_dispatch_error(e.into()),
                     ))
                 })?;
                 restore_archive_mode(fs, &file, mode).map_err(|e| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(
+                        src,
+                        dst,
+                        &super::args::lift_dispatch_error(e),
+                    ))
                 })?;
             }
             StreamedEntry::Symlink { path, target } => {
@@ -1272,10 +1239,10 @@ pub(super) fn unarchive<P: ProcessManager>(
         }
         Ok(())
     })
-    .map_err(|e| anyhow::Error::new(diag::eval_unarchive_failed(src, dst, &e)))?;
+    .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     for (dir, mode) in deferred_dir_modes.into_iter().rev() {
         restore_archive_mode(fs, &dir, mode).map_err(|e| {
-            anyhow::Error::new(diag::eval_unarchive_restore_mode_failed(src, dst, &e))
+            diag::eval_unarchive_restore_mode_failed(src, dst, &super::args::lift_dispatch_error(e))
         })?;
     }
     Ok(())
@@ -1339,22 +1306,22 @@ pub(super) fn symlink<P: ProcessManager>(
     from_workspace: Option<WorkspaceTarget>,
     from: &str,
     to: &str,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_symlink_failed(from, to, &e))?;
     let from_abs = if let Some(target) = from_workspace {
         cx.state
             .fs
             .resolve_copy_source_from_target(copy_source_root(target), from)
-            .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
     } else {
         cx.state
             .fs
             .resolve_copy_source(from)
-            .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
     };
     // `ln -s` destination semantics: a directory destination (existing,
     // or named with a trailing slash) receives the link under the
@@ -1363,66 +1330,76 @@ pub(super) fn symlink<P: ProcessManager>(
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
     } else if matches!(cx.state.fs.entry_kind(&to_abs), Ok(EntryKind::Dir)) {
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
     } else {
         to_abs
     };
     cx.state
         .fs
         .symlink(&from_abs, &to_abs)
-        .map_err(|e| anyhow::Error::new(diag::eval_symlink_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_symlink_failed(from, to, &e))?;
     Ok(())
 }
 
 /// Basename of a link source for directory-destination placement. Lexical:
 /// dangling sources have no entry kind to inspect.
-fn link_base_name(from_abs: &GuardedPath, from: &str) -> Result<String> {
+fn link_base_name(
+    from_abs: &GuardedPath,
+    from: &str,
+) -> oxdock_diagnostics::DiagnosticResult<String> {
     from_abs
         .as_path()
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
-        .ok_or_else(|| anyhow::Error::new(diag::eval_symlink_no_file_name(from)))
+        .ok_or_else(|| diag::eval_symlink_no_file_name(from))
 }
 
-pub(super) fn mkdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> Result<()> {
+pub(super) fn mkdir<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    path: &str,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_mkdir_resolve_failed(path, &e)))?;
-    cx.state.fs.create_dir_all(&target).map_err(|e| {
-        anyhow::Error::new(diag::eval_mkdir_create_failed(
-            &target.display().to_string(),
-            &e,
-        ))
-    })?;
+        .map_err(|e| diag::eval_mkdir_resolve_failed(path, &e))?;
+    cx.state
+        .fs
+        .create_dir_all(&target)
+        .map_err(|e| diag::eval_mkdir_create_failed(&target.display().to_string(), &e))?;
     Ok(())
 }
 
-pub(super) fn set_executable<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> Result<()> {
+pub(super) fn set_executable<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    path: &str,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_set_executable_failed(path, &e)))?;
+        .map_err(|e| diag::eval_set_executable_failed(path, &e))?;
     cx.state
         .fs
         .set_executable(&target)
-        .map_err(|e| anyhow::Error::new(diag::eval_set_executable_failed(path, &e)))?;
+        .map_err(|e| diag::eval_set_executable_failed(path, &e))?;
     Ok(())
 }
 
-pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String>) -> Result<()> {
+pub(super) fn ls<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    arg: &Option<String>,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target_dir = if let Some(p) = arg {
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, p)
-            .map_err(|e| anyhow::Error::new(diag::eval_ls_resolve_failed(Some(p), &e)))?
+            .map_err(|e| diag::eval_ls_resolve_failed(Some(p), &e))?
     } else {
         // Bare `LS` lists the current directory: ride the choke point so a
         // pending snapshot materializes (a snapshot read), matching the
@@ -1430,19 +1407,20 @@ pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, ".")
-            .map_err(|e| anyhow::Error::new(diag::eval_ls_resolve_failed(None, &e)))?
+            .map_err(|e| diag::eval_ls_resolve_failed(None, &e))?
     };
-    let mut entries = cx.state.fs.read_dir_entries(&target_dir).map_err(|e| {
-        anyhow::Error::new(diag::eval_ls_read_failed(
-            &target_dir.display().to_string(),
-            &e,
-        ))
-    })?;
+    let mut entries = cx
+        .state
+        .fs
+        .read_dir_entries(&target_dir)
+        .map_err(|e| diag::eval_ls_read_failed(&target_dir.display().to_string(), &e))?;
     entries.sort_by_key(|e| e.file_name());
     write_stdout(cx.out.clone(), |writer| {
-        writeln!(writer, "{}:", target_dir.display())?;
+        writeln!(writer, "{}:", target_dir.display())
+            .map_err(|e| diag::eval_stream_write_failed(&e))?;
         for entry in &entries {
-            writeln!(writer, "{}", entry.file_name().to_string_lossy())?;
+            writeln!(writer, "{}", entry.file_name().to_string_lossy())
+                .map_err(|e| diag::eval_stream_write_failed(&e))?;
         }
         Ok(())
     })?;
@@ -1452,47 +1430,46 @@ pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String
 pub(super) fn read<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path_opt: &Option<String>,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     if let Some(path) = path_opt {
         let target = cx
             .state
             .fs
             .resolve_read(&cx.state.cwd, path)
-            .map_err(|e| anyhow::Error::new(diag::eval_read_resolve_failed(path, &e)))?;
-        let mut reader = cx.state.fs.open_read(&target).map_err(|e| {
-            anyhow::Error::new(diag::eval_read_open_failed(
-                &target.display().to_string(),
-                &e,
-            ))
-        })?;
+            .map_err(|e| diag::eval_read_resolve_failed(path, &e))?;
+        let mut reader = cx
+            .state
+            .fs
+            .open_read(&target)
+            .map_err(|e| diag::eval_read_open_failed(&target.display().to_string(), &e))?;
         write_stdout(cx.out.clone(), |writer| {
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
                 let n = reader
                     .read(&mut buf)
-                    .map_err(|e| anyhow::Error::new(diag::eval_read_file_failed(&e)))?;
+                    .map_err(|e| diag::eval_read_file_failed(&e))?;
                 if n == 0 {
                     break;
                 }
                 writer
                     .write_all(&buf[..n])
-                    .map_err(|e| anyhow::Error::new(diag::eval_read_write_failed(&e)))?;
+                    .map_err(|e| diag::eval_read_write_failed(&e))?;
             }
             Ok(())
         })?;
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-            return Err(anyhow::Error::new(diag::eval_read_needs_stdin()));
+            return Err(diag::eval_read_needs_stdin());
         };
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
             let n = {
                 let mut guard = input_stream
                     .lock()
-                    .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_READ)))?;
+                    .map_err(|_| diag::eval_stdin_lock_failed(KEYWORD_READ))?;
                 guard
                     .read(&mut buf)
-                    .map_err(|e| anyhow::Error::new(diag::eval_stdin_read_failed(None, &e)))?
+                    .map_err(|e| diag::eval_stdin_read_failed(None, &e))?
             };
             if n == 0 {
                 break;
@@ -1500,16 +1477,19 @@ pub(super) fn read<P: ProcessManager>(
             write_stdout(cx.out.clone(), |writer| {
                 writer
                     .write_all(&buf[..n])
-                    .map_err(|e| anyhow::Error::new(diag::eval_read_write_failed(&e)))
+                    .map_err(|e| diag::eval_read_write_failed(&e))
             })?;
         }
     }
     Ok(())
 }
 
-pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -> Result<()> {
+pub(super) fn read_line<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    var: &str,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-        return Err(anyhow::Error::new(diag::eval_read_line_needs_stdin()));
+        return Err(diag::eval_read_line_needs_stdin());
     };
     let clean_var = var.trim_start_matches('$').to_string();
     let mut buf = Vec::new();
@@ -1518,10 +1498,10 @@ pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -
         let n = {
             let mut guard = input_stream
                 .lock()
-                .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_READ_LINE)))?;
+                .map_err(|_| diag::eval_stdin_lock_failed(KEYWORD_READ_LINE))?;
             guard
                 .read(&mut byte)
-                .map_err(|e| anyhow::Error::new(diag::eval_stdin_read_failed(None, &e)))?
+                .map_err(|e| diag::eval_stdin_read_failed(None, &e))?
         };
         if n == 0 {
             break;
@@ -1531,8 +1511,7 @@ pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -
             break;
         }
     }
-    let line = String::from_utf8(buf)
-        .map_err(|e| anyhow::Error::new(diag::eval_read_line_not_utf8(&e)))?;
+    let line = String::from_utf8(buf).map_err(|e| diag::eval_read_line_not_utf8(&e))?;
     let line = line
         .strip_suffix("\r\n")
         .or_else(|| line.strip_suffix('\n'))
@@ -1625,56 +1604,53 @@ pub(super) fn write<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
     contents: Option<&str>,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_write_resolve_failed(path, &e)))?;
-    cx.state.fs.ensure_parent_dir(&target).map_err(|e| {
-        anyhow::Error::new(diag::eval_ensure_parent_failed(
-            &target.display().to_string(),
-            &e,
-        ))
-    })?;
+        .map_err(|e| diag::eval_write_resolve_failed(path, &e))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .map_err(|e| diag::eval_ensure_parent_failed(&target.display().to_string(), &e))?;
     if let Some(body) = contents {
         cx.state
             .fs
             .write_file(&target, body.as_bytes())
-            .map_err(|e| {
-                anyhow::Error::new(diag::eval_write_file_failed(
-                    &target.display().to_string(),
-                    &e,
-                ))
-            })?;
+            .map_err(|e| diag::eval_write_file_failed(&target.display().to_string(), &e))?;
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-            return Err(anyhow::Error::new(diag::eval_write_needs_stdin(path)));
+            return Err(diag::eval_write_needs_stdin(path));
         };
         let mut guard = input_stream
             .lock()
-            .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_WRITE)))?;
-        let mut writer = cx.state.fs.open_write(&target).map_err(|e| {
-            anyhow::Error::new(diag::eval_write_open_failed(
-                &target.display().to_string(),
-                &e,
-            ))
-        })?;
+            .map_err(|_| diag::eval_stdin_lock_failed(KEYWORD_WRITE))?;
+        let mut writer = cx
+            .state
+            .fs
+            .open_write(&target)
+            .map_err(|e| diag::eval_write_open_failed(&target.display().to_string(), &e))?;
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
-            let n = guard.read(&mut buf).map_err(|e| {
-                anyhow::Error::new(diag::eval_stdin_read_failed(Some(KEYWORD_WRITE), &e))
-            })?;
+            let n = guard
+                .read(&mut buf)
+                .map_err(|e| diag::eval_stdin_read_failed(Some(KEYWORD_WRITE), &e))?;
             if n == 0 {
                 break;
             }
             writer.write_all(&buf[..n]).map_err(|e| {
-                anyhow::Error::new(diag::eval_write_stream_failed(
+                diag::eval_write_stream_failed(
                     &target.display().to_string(),
-                    &anyhow::Error::new(e),
-                ))
+                    &super::args::lift_dispatch_error(e.into()),
+                )
             })?;
-            writer.flush()?;
+            writer.flush().map_err(|e| {
+                diag::eval_write_stream_failed(
+                    &target.display().to_string(),
+                    &super::args::lift_dispatch_error(e.into()),
+                )
+            })?;
         }
     }
     Ok(())
@@ -1684,53 +1660,53 @@ pub(super) fn append<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
     contents: Option<&str>,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_append_resolve_failed(path, &e)))?;
-    cx.state.fs.ensure_parent_dir(&target).map_err(|e| {
-        anyhow::Error::new(diag::eval_ensure_parent_failed(
-            &target.display().to_string(),
-            &e,
-        ))
-    })?;
+        .map_err(|e| diag::eval_append_resolve_failed(path, &e))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .map_err(|e| diag::eval_ensure_parent_failed(&target.display().to_string(), &e))?;
     if let Some(body) = contents {
         cx.state
             .fs
             .append_file(&target, body.as_bytes())
-            .map_err(|e| {
-                anyhow::Error::new(diag::eval_append_failed(&target.display().to_string(), &e))
-            })?;
+            .map_err(|e| diag::eval_append_failed(&target.display().to_string(), &e))?;
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-            return Err(anyhow::Error::new(diag::eval_append_needs_stdin(path)));
+            return Err(diag::eval_append_needs_stdin(path));
         };
         let mut guard = input_stream
             .lock()
-            .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_APPEND)))?;
-        let mut writer = cx.state.fs.open_append(&target).map_err(|e| {
-            anyhow::Error::new(diag::eval_append_open_failed(
-                &target.display().to_string(),
-                &e,
-            ))
-        })?;
+            .map_err(|_| diag::eval_stdin_lock_failed(KEYWORD_APPEND))?;
+        let mut writer = cx
+            .state
+            .fs
+            .open_append(&target)
+            .map_err(|e| diag::eval_append_open_failed(&target.display().to_string(), &e))?;
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
-            let n = guard.read(&mut buf).map_err(|e| {
-                anyhow::Error::new(diag::eval_stdin_read_failed(Some(KEYWORD_APPEND), &e))
-            })?;
+            let n = guard
+                .read(&mut buf)
+                .map_err(|e| diag::eval_stdin_read_failed(Some(KEYWORD_APPEND), &e))?;
             if n == 0 {
                 break;
             }
             writer.write_all(&buf[..n]).map_err(|e| {
-                anyhow::Error::new(diag::eval_append_failed(
+                diag::eval_append_failed(
                     &target.display().to_string(),
-                    &anyhow::Error::new(e),
-                ))
+                    &super::args::lift_dispatch_error(e.into()),
+                )
             })?;
-            writer.flush()?;
+            writer.flush().map_err(|e| {
+                diag::eval_append_failed(
+                    &target.display().to_string(),
+                    &super::args::lift_dispatch_error(e.into()),
+                )
+            })?;
         }
     }
     Ok(())
@@ -1740,7 +1716,7 @@ pub(super) fn replace<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path_opt: &Option<String>,
     overrides: &[(String, String)],
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let ctx = cx.state.command_ctx()?;
     let vars = cx.state.all_vars();
     // Dispatch `{{ MODULE::FUNC(args) }}` through the shared pure table.
@@ -1774,47 +1750,46 @@ pub(super) fn replace<P: ProcessManager>(
                 .state
                 .fs
                 .resolve_read(&cx.state.cwd, path)
-                .map_err(|e| anyhow::Error::new(diag::eval_expand_resolve_failed(path, &e)))?;
-            let mut reader = cx.state.fs.open_read(&target).map_err(|e| {
-                anyhow::Error::new(diag::eval_read_open_failed(
-                    &target.display().to_string(),
-                    &e,
-                ))
-            })?;
+                .map_err(|e| diag::eval_expand_resolve_failed(path, &e))?;
+            let mut reader = cx
+                .state
+                .fs
+                .open_read(&target)
+                .map_err(|e| diag::eval_read_open_failed(&target.display().to_string(), &e))?;
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
                 let n = reader.read(&mut buf).map_err(|e| {
-                    anyhow::Error::new(diag::eval_expand_read_failed(
+                    diag::eval_expand_read_failed(
                         &target.display().to_string(),
-                        &anyhow::Error::new(e),
-                    ))
+                        &super::args::lift_dispatch_error(e.into()),
+                    )
                 })?;
                 if n == 0 {
                     break;
                 }
                 expander.process_bytes(&buf[..n], &mut out_buf)?;
                 w.write_all(&out_buf)
-                    .map_err(|e| anyhow::Error::new(diag::eval_expand_write_failed(&e)))?;
+                    .map_err(|e| diag::eval_expand_write_failed(&e))?;
                 out_buf.clear();
             }
         } else {
             let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-                return Err(anyhow::Error::new(diag::eval_expand_needs_stdin()));
+                return Err(diag::eval_expand_needs_stdin());
             };
             let mut guard = input_stream
                 .lock()
-                .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(KEYWORD_EXPAND)))?;
+                .map_err(|_| diag::eval_stdin_lock_failed(KEYWORD_EXPAND))?;
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
                 let n = guard
                     .read(&mut buf)
-                    .map_err(|e| anyhow::Error::new(diag::eval_stdin_read_failed(None, &e)))?;
+                    .map_err(|e| diag::eval_stdin_read_failed(None, &e))?;
                 if n == 0 {
                     break;
                 }
                 expander.process_bytes(&buf[..n], &mut out_buf)?;
                 w.write_all(&out_buf)
-                    .map_err(|e| anyhow::Error::new(diag::eval_expand_write_failed(&e)))?;
+                    .map_err(|e| diag::eval_expand_write_failed(&e))?;
                 out_buf.clear();
             }
         }
@@ -1822,7 +1797,7 @@ pub(super) fn replace<P: ProcessManager>(
         expander.flush(&mut out_buf)?;
         if !out_buf.is_empty() {
             w.write_all(&out_buf)
-                .map_err(|e| anyhow::Error::new(diag::eval_expand_write_failed(&e)))?;
+                .map_err(|e| diag::eval_expand_write_failed(&e))?;
             out_buf.clear();
         }
 
@@ -1851,7 +1826,7 @@ pub(super) fn assert_equality<P: ProcessManager>(
     hash: &Option<String>,
     actual: &super::steps::ResolvedAssertTarget,
     expected: Option<&Value>,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     use super::steps::ResolvedAssertTarget;
     // Mode 1: exact stdout with piped stdin consumes the stream, mirroring
     // the legacy substring behavior, but compares exact bytes.
@@ -1860,7 +1835,8 @@ pub(super) fn assert_equality<P: ProcessManager>(
     {
         let drained = drain_stdin_bounded(input_stream, verb)?;
         super::io::write_stdout(cx.out.clone(), |w| {
-            w.write_all(&drained)?;
+            w.write_all(&drained)
+                .map_err(|e| diag::eval_stream_write_failed(&e))?;
             Ok(())
         })?;
         if let Some(sha) = hash {
@@ -1870,34 +1846,30 @@ pub(super) fn assert_equality<P: ProcessManager>(
             let is_equal = computed.eq_ignore_ascii_case(sha);
             if is_equal != expect_equal {
                 if expect_equal {
-                    return Err(anyhow::Error::new(diag::eval_assert_hash_mismatch(
-                        verb, sha, &computed,
-                    )));
+                    return Err(diag::eval_assert_hash_mismatch(verb, sha, &computed));
                 } else {
-                    return Err(anyhow::Error::new(diag::eval_assert_hash_match(verb, sha)));
+                    return Err(diag::eval_assert_hash_match(verb, sha));
                 }
             }
             return Ok(());
         }
         let Some(want) = expected.and_then(|v| v.as_str()) else {
-            return Err(anyhow::Error::new(diag::eval_assert_stream_mismatch(
+            return Err(diag::eval_assert_stream_mismatch(
                 verb,
                 expected,
                 &String::from_utf8_lossy(&drained),
-            )));
+            ));
         };
         let is_equal = drained == want.as_bytes();
         if is_equal != expect_equal {
             if expect_equal {
-                return Err(anyhow::Error::new(diag::eval_assert_stream_mismatch_text(
+                return Err(diag::eval_assert_stream_mismatch_text(
                     verb,
                     want,
                     &String::from_utf8_lossy(&drained),
-                )));
-            } else {
-                return Err(anyhow::Error::new(
-                    diag::eval_assert_stream_unexpected_equal(verb, want),
                 ));
+            } else {
+                return Err(diag::eval_assert_stream_unexpected_equal(verb, want));
             }
         }
         return Ok(());
@@ -1907,28 +1879,22 @@ pub(super) fn assert_equality<P: ProcessManager>(
             ResolvedAssertTarget::Value(v) => match v.as_str() {
                 Some(s) => s.as_bytes().to_vec(),
                 None => {
-                    return Err(anyhow::Error::new(diag::eval_assert_hash_needs_string(
-                        verb, v,
-                    )));
+                    return Err(diag::eval_assert_hash_needs_string(verb, v));
                 }
             },
             ResolvedAssertTarget::Pipe(bytes) => bytes.clone(),
             ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, generation, verb)?,
             ResolvedAssertTarget::Stderr => {
-                return Err(anyhow::Error::new(diag::eval_assert_stderr_unsupported(
-                    verb,
-                )));
+                return Err(diag::eval_assert_stderr_unsupported(verb));
             }
         };
         let computed = sha256_hex(&actual_bytes);
         let is_equal = computed.eq_ignore_ascii_case(sha);
         if is_equal != expect_equal {
             if expect_equal {
-                return Err(anyhow::Error::new(diag::eval_assert_hash_mismatch(
-                    verb, sha, &computed,
-                )));
+                return Err(diag::eval_assert_hash_mismatch(verb, sha, &computed));
             } else {
-                return Err(anyhow::Error::new(diag::eval_assert_hash_match(verb, sha)));
+                return Err(diag::eval_assert_hash_match(verb, sha));
             }
         }
         return Ok(());
@@ -1936,20 +1902,14 @@ pub(super) fn assert_equality<P: ProcessManager>(
     match actual {
         ResolvedAssertTarget::Value(got) => {
             let Some(want) = expected else {
-                return Err(anyhow::Error::new(diag::eval_assert_requires_expected(
-                    verb,
-                )));
+                return Err(diag::eval_assert_requires_expected(verb));
             };
             let is_equal = got == want;
             if is_equal != expect_equal {
                 if expect_equal {
-                    return Err(anyhow::Error::new(diag::eval_assert_value_mismatch(
-                        verb, want, got,
-                    )));
+                    return Err(diag::eval_assert_value_mismatch(verb, want, got));
                 } else {
-                    return Err(anyhow::Error::new(
-                        diag::eval_assert_value_unexpected_equal(verb, want, got),
-                    ));
+                    return Err(diag::eval_assert_value_unexpected_equal(verb, want, got));
                 }
             }
             Ok(())
@@ -1957,53 +1917,43 @@ pub(super) fn assert_equality<P: ProcessManager>(
         ResolvedAssertTarget::Stdout => {
             let bytes = exact_stdout_bytes(cx, generation, verb)?;
             let Some(want) = expected.and_then(|v| v.as_str()) else {
-                return Err(anyhow::Error::new(diag::eval_assert_stream_mismatch(
+                return Err(diag::eval_assert_stream_mismatch(
                     verb,
                     expected,
                     &String::from_utf8_lossy(&bytes),
-                )));
+                ));
             };
             let is_equal = bytes == want.as_bytes();
             if is_equal != expect_equal {
                 if expect_equal {
-                    return Err(anyhow::Error::new(diag::eval_assert_stream_mismatch_text(
+                    return Err(diag::eval_assert_stream_mismatch_text(
                         verb,
                         want,
                         &String::from_utf8_lossy(&bytes),
-                    )));
-                } else {
-                    return Err(anyhow::Error::new(
-                        diag::eval_assert_stream_unexpected_equal(verb, want),
                     ));
+                } else {
+                    return Err(diag::eval_assert_stream_unexpected_equal(verb, want));
                 }
             }
             Ok(())
         }
-        ResolvedAssertTarget::Stderr => Err(anyhow::Error::new(
-            diag::eval_assert_stderr_unsupported(verb),
-        )),
+        ResolvedAssertTarget::Stderr => Err(diag::eval_assert_stderr_unsupported(verb)),
         ResolvedAssertTarget::Pipe(bytes) => {
-            let actual_str = String::from_utf8(bytes.clone())
-                .map_err(|e| anyhow::Error::new(diag::eval_pipe_not_utf8(verb, &e)))?;
+            let actual_str =
+                String::from_utf8(bytes.clone()).map_err(|e| diag::eval_pipe_not_utf8(verb, &e))?;
             let Some(want) = expected.and_then(|v| v.as_str()) else {
-                return Err(anyhow::Error::new(diag::eval_assert_pipe_mismatch(
-                    verb,
-                    expected,
-                    &actual_str,
-                )));
+                return Err(diag::eval_assert_pipe_mismatch(verb, expected, &actual_str));
             };
             let is_equal = actual_str == want;
             if is_equal != expect_equal {
                 if expect_equal {
-                    return Err(anyhow::Error::new(diag::eval_assert_pipe_mismatch_text(
+                    return Err(diag::eval_assert_pipe_mismatch_text(
                         verb,
                         want,
                         &actual_str,
-                    )));
+                    ));
                 } else {
-                    return Err(anyhow::Error::new(diag::eval_assert_pipe_unexpected_equal(
-                        verb, want,
-                    )));
+                    return Err(diag::eval_assert_pipe_unexpected_equal(verb, want));
                 }
             }
             Ok(())
@@ -2013,21 +1963,24 @@ pub(super) fn assert_equality<P: ProcessManager>(
 
 /// Drain a piped stdin fully while enforcing the exact-match byte cap.
 /// Shared by `ASSERT_EQ`/`ASSERT_NE stdout` Mode 1.
-fn drain_stdin_bounded(input_stream: SharedInput, verb: &str) -> Result<Vec<u8>> {
+fn drain_stdin_bounded(
+    input_stream: SharedInput,
+    verb: &str,
+) -> oxdock_diagnostics::DiagnosticResult<Vec<u8>> {
     let mut guard = input_stream
         .lock()
-        .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(verb)))?;
+        .map_err(|_| diag::eval_stdin_lock_failed(verb))?;
     let mut out = Vec::new();
     let mut buf = [0u8; super::io::CHUNK_SIZE];
     loop {
         let n = guard
             .read(&mut buf)
-            .map_err(|e| anyhow::Error::new(diag::eval_stdin_read_failed(Some(verb), &e)))?;
+            .map_err(|e| diag::eval_stdin_read_failed(Some(verb), &e))?;
         if n == 0 {
             break;
         }
         if out.len() + n > super::io::EXACT_STDOUT_CAP {
-            return Err(anyhow::Error::new(diag::eval_assert_stdin_overflow(verb)));
+            return Err(diag::eval_assert_stdin_overflow(verb));
         }
         out.extend_from_slice(&buf[..n]);
     }
@@ -2040,18 +1993,16 @@ fn exact_stdout_bytes<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     generation: usize,
     verb: &str,
-) -> Result<Vec<u8>> {
+) -> oxdock_diagnostics::DiagnosticResult<Vec<u8>> {
     let captures = cx
         .state
         .exact_stdout
         .lock()
-        .map_err(|_| anyhow::Error::new(diag::std_assert_lock_poisoned("exact_stdout")))?;
+        .map_err(|_| diag::std_assert_lock_poisoned("exact_stdout"))?;
     match captures.get(&generation) {
-        Some(entry) if entry.overflowed => {
-            Err(anyhow::Error::new(diag::eval_assert_stdout_overflow(verb)))
-        }
+        Some(entry) if entry.overflowed => Err(diag::eval_assert_stdout_overflow(verb)),
         Some(entry) => Ok(entry.bytes.clone()),
-        None => Err(anyhow::Error::new(diag::eval_assert_no_exact_capture(verb))),
+        None => Err(diag::eval_assert_no_exact_capture(verb)),
     }
 }
 
@@ -2065,7 +2016,7 @@ pub(super) fn assert_contains<P: ProcessManager>(
     idx_step: usize,
     haystack: &super::steps::ResolvedAssertTarget,
     needle: &Arg,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     use super::steps::ResolvedAssertTarget;
     let verb = Command::AssertContains.as_str();
     let needle_str = super::args::resolve_arg(needle, cx)?;
@@ -2075,11 +2026,11 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 if hay.contains(needle_str.as_str()) {
                     return Ok(());
                 }
-                return Err(anyhow::Error::new(diag::eval_assert_contains_str_mismatch(
+                return Err(diag::eval_assert_contains_str_mismatch(
                     verb,
                     &needle_str,
                     hay,
-                )));
+                ));
             }
             if let Some(items) = v.as_list() {
                 if items
@@ -2088,22 +2039,19 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 {
                     return Ok(());
                 }
-                return Err(anyhow::Error::new(
-                    diag::eval_assert_contains_value_mismatch(verb, &needle_str, v),
+                return Err(diag::eval_assert_contains_value_mismatch(
+                    verb,
+                    &needle_str,
+                    v,
                 ));
             }
             if let Some(map) = v.as_map() {
                 if map.contains_key(needle_str.as_str()) {
                     return Ok(());
                 }
-                return Err(anyhow::Error::new(diag::eval_assert_contains_missing(
-                    verb,
-                    &needle_str,
-                )));
+                return Err(diag::eval_assert_contains_missing(verb, &needle_str));
             }
-            Err(anyhow::Error::new(
-                diag::eval_assert_contains_needs_haystack(verb, v),
-            ))
+            Err(diag::eval_assert_contains_needs_haystack(verb, v))
         }
         ResolvedAssertTarget::Stdout => {
             // Mode 1: piped stdin is consumed through a local window and
@@ -2111,21 +2059,22 @@ pub(super) fn assert_contains<P: ProcessManager>(
             if let CommandStdin::Stream(input_stream) = cx.stdin.clone() {
                 let mut guard = input_stream
                     .lock()
-                    .map_err(|_| anyhow::Error::new(diag::eval_stdin_lock_failed(verb)))?;
+                    .map_err(|_| diag::eval_stdin_lock_failed(verb))?;
                 let mut window = super::io::SlidingWindow::new(needle_str.as_bytes().to_vec());
                 let mut buf = [0u8; super::io::CHUNK_SIZE];
                 let mut read_any = false;
                 loop {
-                    let n = guard.read(&mut buf).map_err(|e| {
-                        anyhow::Error::new(diag::eval_stdin_read_failed(Some(verb), &e))
-                    })?;
+                    let n = guard
+                        .read(&mut buf)
+                        .map_err(|e| diag::eval_stdin_read_failed(Some(verb), &e))?;
                     if n == 0 {
                         break;
                     }
                     read_any = true;
                     window.push_chunk(&buf[..n]);
                     super::io::write_stdout(cx.out.clone(), |w| {
-                        w.write_all(&buf[..n])?;
+                        w.write_all(&buf[..n])
+                            .map_err(|e| diag::eval_stream_write_failed(&e))?;
                         Ok(())
                     })?;
                 }
@@ -2134,57 +2083,63 @@ pub(super) fn assert_contains<P: ProcessManager>(
                         return Ok(());
                     }
                     let emitted = String::from_utf8_lossy(&window.ring_buffer()).into_owned();
-                    return Err(anyhow::Error::new(
-                        diag::eval_assert_contains_emitted_mismatch(verb, &needle_str, &emitted),
+                    return Err(diag::eval_assert_contains_emitted_mismatch(
+                        verb,
+                        &needle_str,
+                        &emitted,
                     ));
                 }
             }
             // Mode 2: pre-registered stdout window for this step.
-            let windows = cx.state.assert_windows.lock().map_err(|_| {
-                anyhow::Error::new(diag::std_assert_lock_poisoned("assert_windows"))
-            })?;
+            let windows = cx
+                .state
+                .assert_windows
+                .lock()
+                .map_err(|_| diag::std_assert_lock_poisoned("assert_windows"))?;
             match windows.get(&(generation, idx_step)) {
                 Some(w) if w.matched => Ok(()),
                 Some(w) => {
                     let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
-                    Err(anyhow::Error::new(
-                        diag::eval_assert_contains_emitted_mismatch(verb, &needle_str, &emitted),
+                    Err(diag::eval_assert_contains_emitted_mismatch(
+                        verb,
+                        &needle_str,
+                        &emitted,
                     ))
                 }
-                _ => Err(anyhow::Error::new(diag::eval_assert_contains_missing(
-                    verb,
-                    &needle_str,
-                ))),
+                _ => Err(diag::eval_assert_contains_missing(verb, &needle_str)),
             }
         }
         ResolvedAssertTarget::Stderr => {
             // Stderr has no piped-stdin consumption mode: stdin bytes
             // belong to a different stream and are left alone.
-            let windows = cx.state.assert_windows_stderr.lock().map_err(|_| {
-                anyhow::Error::new(diag::std_assert_lock_poisoned("assert_windows_stderr"))
-            })?;
+            let windows = cx
+                .state
+                .assert_windows_stderr
+                .lock()
+                .map_err(|_| diag::std_assert_lock_poisoned("assert_windows_stderr"))?;
             match windows.get(&(generation, idx_step)) {
                 Some(w) if w.matched => Ok(()),
                 Some(w) => {
                     let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
-                    Err(anyhow::Error::new(
-                        diag::eval_assert_contains_emitted_mismatch(verb, &needle_str, &emitted),
+                    Err(diag::eval_assert_contains_emitted_mismatch(
+                        verb,
+                        &needle_str,
+                        &emitted,
                     ))
                 }
-                _ => Err(anyhow::Error::new(diag::eval_assert_contains_missing(
-                    verb,
-                    &needle_str,
-                ))),
+                _ => Err(diag::eval_assert_contains_missing(verb, &needle_str)),
             }
         }
         ResolvedAssertTarget::Pipe(bytes) => {
-            let hay = String::from_utf8(bytes.clone())
-                .map_err(|e| anyhow::Error::new(diag::eval_pipe_not_utf8(verb, &e)))?;
+            let hay =
+                String::from_utf8(bytes.clone()).map_err(|e| diag::eval_pipe_not_utf8(verb, &e))?;
             if hay.contains(needle_str.as_str()) {
                 Ok(())
             } else {
-                Err(anyhow::Error::new(
-                    diag::eval_assert_contains_pipe_mismatch(verb, &needle_str, &hay),
+                Err(diag::eval_assert_contains_pipe_mismatch(
+                    verb,
+                    &needle_str,
+                    &hay,
                 ))
             }
         }
@@ -2196,8 +2151,8 @@ pub(crate) fn with_io_block<P: ProcessManager>(
     _generation: usize,
     _idx: usize,
     _bindings: &[IoBinding],
-) -> Result<()> {
-    Err(anyhow::Error::new(diag::eval_with_io_unexpanded()))
+) -> oxdock_diagnostics::DiagnosticResult<()> {
+    Err(diag::eval_with_io_unexpanded())
 }
 
 /// True when the wrapped command is a lone `RUN`: the only consumer or
@@ -2241,7 +2196,7 @@ pub(crate) fn with_io<P: ProcessManager>(
         resolve_io_streams(cx, bindings, cmd)?;
     let tty = tty_request(bindings, cmd)?;
 
-    super::steps::execute_single_step_with_generation(
+    Ok(super::steps::execute_single_step_with_generation(
         cx.state,
         cx.process,
         cmd,
@@ -2254,7 +2209,7 @@ pub(crate) fn with_io<P: ProcessManager>(
         out_pipe,
         stdin_pipe,
         tty,
-    )
+    )?)
 }
 
 /// Extract the pty request from `WITH_IO` bindings, enforcing the
@@ -2264,7 +2219,10 @@ pub(crate) fn with_io<P: ProcessManager>(
 /// Returns `None` for terminal-unaware steps, keeping hermetic pipes.
 /// Geometry stays unresolved here: the spawn reads the host terminal
 /// for unnamed sides, so a size change between steps is honored.
-fn tty_request(bindings: &[IoBinding], cmd: &StepKind) -> Result<Option<TtyRequest>> {
+fn tty_request(
+    bindings: &[IoBinding],
+    cmd: &StepKind,
+) -> oxdock_diagnostics::DiagnosticResult<Option<TtyRequest>> {
     let mut tty = false;
     let mut rows = None;
     let mut cols = None;
@@ -2278,7 +2236,7 @@ fn tty_request(bindings: &[IoBinding], cmd: &StepKind) -> Result<Option<TtyReque
     }
     if !tty {
         if rows.is_some() || cols.is_some() {
-            return Err(anyhow::Error::new(diag::eval_with_io_geometry_needs_tty()));
+            return Err(diag::eval_with_io_geometry_needs_tty());
         }
         return Ok(None);
     }
@@ -2286,11 +2244,11 @@ fn tty_request(bindings: &[IoBinding], cmd: &StepKind) -> Result<Option<TtyReque
         .iter()
         .any(|b| matches!(b.stream, IoStream::Stderr))
     {
-        return Err(anyhow::Error::new(diag::eval_with_io_tty_no_stderr()));
+        return Err(diag::eval_with_io_tty_no_stderr());
     }
     match cmd {
         StepKind::Run(_) | StepKind::RunExec { .. } => Ok(Some(TtyRequest { rows, cols })),
-        _ => Err(anyhow::Error::new(diag::eval_with_io_tty_needs_run())),
+        _ => Err(diag::eval_with_io_tty_needs_run()),
     }
 }
 
@@ -2307,7 +2265,7 @@ fn resolve_io_streams<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     bindings: &[IoBinding],
     cmd: &StepKind,
-) -> Result<(
+) -> oxdock_diagnostics::DiagnosticResult<(
     CommandStdin,
     bool,
     Option<StreamHandle>,
@@ -2360,9 +2318,7 @@ fn resolve_io_streams<P: ProcessManager>(
         match binding.stream {
             IoStream::Stdin => {
                 if seen_stdin {
-                    return Err(anyhow::Error::new(diag::eval_with_io_duplicate_stream(
-                        "stdin",
-                    )));
+                    return Err(diag::eval_with_io_duplicate_stream(binding.stream.name()));
                 }
                 seen_stdin = true;
                 next_expose_stdin = true;
@@ -2378,9 +2334,7 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Stdout => {
                 if seen_stdout {
-                    return Err(anyhow::Error::new(diag::eval_with_io_duplicate_stream(
-                        "stdout",
-                    )));
+                    return Err(diag::eval_with_io_duplicate_stream(binding.stream.name()));
                 }
                 seen_stdout = true;
                 (step_stdout, out_pipe) = if let Some(target) = &binding.pipe {
@@ -2395,9 +2349,7 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Stderr => {
                 if seen_stderr {
-                    return Err(anyhow::Error::new(diag::eval_with_io_duplicate_stream(
-                        "stderr",
-                    )));
+                    return Err(diag::eval_with_io_duplicate_stream(binding.stream.name()));
                 }
                 seen_stderr = true;
                 step_stderr = if let Some(target) = &binding.pipe {
@@ -2411,25 +2363,19 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Tty => {
                 if seen_tty {
-                    return Err(anyhow::Error::new(diag::eval_with_io_duplicate_stream(
-                        "tty",
-                    )));
+                    return Err(diag::eval_with_io_duplicate_stream(binding.stream.name()));
                 }
                 seen_tty = true;
             }
             IoStream::Rows(_) => {
                 if seen_rows {
-                    return Err(anyhow::Error::new(diag::eval_with_io_duplicate_stream(
-                        "rows",
-                    )));
+                    return Err(diag::eval_with_io_duplicate_stream(binding.stream.name()));
                 }
                 seen_rows = true;
             }
             IoStream::Cols(_) => {
                 if seen_cols {
-                    return Err(anyhow::Error::new(diag::eval_with_io_duplicate_stream(
-                        "cols",
-                    )));
+                    return Err(diag::eval_with_io_duplicate_stream(binding.stream.name()));
                 }
                 seen_cols = true;
             }
@@ -2452,24 +2398,18 @@ fn resolve_io_streams<P: ProcessManager>(
 fn resolve_pipe_handle<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     target: &PipeTarget,
-) -> Result<PipeHandle> {
+) -> oxdock_diagnostics::DiagnosticResult<PipeHandle> {
     let PipeTarget::Var { name: var } = target;
     let _ = super::args::load_var_binding(cx.state, var)?;
     match cx.state.get_var_typed(var) {
         Some((kind, value)) if matches!(kind, TypeTag::Pipe) => {
             let Some(handle) = value.as_pipe_handle() else {
-                return Err(anyhow::Error::new(diag::eval_pipe_handle_mismatch(
-                    kind.name(),
-                    &value,
-                )));
+                return Err(diag::eval_pipe_handle_mismatch(kind.name(), &value));
             };
             Ok(handle)
         }
-        Some((kind, value)) => Err(anyhow::Error::new(diag::eval_pipe_handle_mismatch(
-            kind.name(),
-            &value,
-        ))),
-        None => Err(anyhow::Error::new(diag::eval_undeclared(var))),
+        Some((kind, value)) => Err(diag::eval_pipe_handle_mismatch(kind.name(), &value)),
+        None => Err(diag::eval_undeclared(var)),
     }
 }
 
@@ -2515,7 +2455,7 @@ fn merge_io_layers(layers: &[&Vec<IoBinding>]) -> Vec<IoBinding> {
 fn peel_capture_command<'a, P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     cmd: &'a StepKind,
-) -> Result<PeeledCapture<'a>> {
+) -> oxdock_diagnostics::DiagnosticResult<PeeledCapture<'a>> {
     let mut layers: Vec<&Vec<IoBinding>> = Vec::new();
     let mut deadline: Option<std::time::Duration> = None;
     let mut current = cmd;
@@ -2554,7 +2494,10 @@ fn peel_capture_command<'a, P: ProcessManager>(
     }
 }
 
-pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i64) -> Result<()> {
+pub(super) fn exit<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    code: i64,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     for child in cx.state.bg_children.iter_mut() {
         if let Ok(None) = child.handle.try_wait() {
             let _ = child.handle.kill();
@@ -2562,7 +2505,7 @@ pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i64) -> Res
         }
     }
     cx.state.bg_children.clear();
-    Err(anyhow::Error::new(super::exit::ExitRequest(code)))
+    Err(diag::eval_exit_requested(code))
 }
 
 pub(crate) fn for_loop<P: ProcessManager>(
@@ -2573,7 +2516,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
     val_type: String,
     in_expr: &Expr,
     body: &[Step],
-) -> Result<Flow> {
+) -> oxdock_diagnostics::DiagnosticResult<Flow> {
     let iterable = super::args::evaluate_expr(in_expr, cx)?;
     let clean_val_var = val_var.trim_start_matches('$').to_string();
     let val_tag = cx.state.resolve_tag(&val_type)?;
@@ -2614,7 +2557,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
                 cx.stdin_pipe.clone(),
                 false,
             );
-            let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
+            let pop_res = cx.state.pop_scope();
             let flow = match (res, pop_res) {
                 (Ok(flow), Ok(())) => flow,
                 (Err(e), _) => return Err(e),
@@ -2629,8 +2572,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
         return Ok(Flow::Done);
     }
     if let Some(map) = iterable.as_map() {
-        let key_name =
-            key_var.ok_or_else(|| anyhow::Error::new(diag::eval_for_needs_key_value()))?;
+        let key_name = key_var.ok_or_else(diag::eval_for_needs_key_value)?;
         let clean_key_var = key_name.trim_start_matches('$').to_string();
         let mut keys: Vec<_> = map.keys().cloned().collect();
         keys.sort();
@@ -2641,7 +2583,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
             None => TypeTag::String,
         };
         if !matches!(kt, TypeTag::String) {
-            return Err(anyhow::Error::new(diag::eval_for_map_key_type(kt.name())));
+            return Err(diag::eval_for_map_key_type(kt.name()));
         }
         for k in keys {
             let v = map[&k].clone();
@@ -2669,7 +2611,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
                 cx.stdin_pipe.clone(),
                 false,
             );
-            let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
+            let pop_res = cx.state.pop_scope();
             let flow = match (res, pop_res) {
                 (Ok(flow), Ok(())) => flow,
                 (Err(e), _) => return Err(e),
@@ -2683,9 +2625,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
         }
         return Ok(Flow::Done);
     }
-    Err(anyhow::Error::new(diag::eval_for_needs_list_or_map(
-        &iterable,
-    )))
+    Err(diag::eval_for_needs_list_or_map(&iterable))
 }
 
 /// Define a user function (`FUNC NAME($p: TYPE, ...) { ... }}).
@@ -2778,11 +2718,11 @@ fn build_script_entry<P: ProcessManager>(
     name: &str,
     raw: &RawFuncDef,
     module: Option<String>,
-) -> Result<super::native::FuncEntry<P>> {
+) -> oxdock_diagnostics::DiagnosticResult<super::native::FuncEntry<P>> {
     let resolved_params = super::native::resolve_script_params(state, name, &raw.params)?;
     let return_tag = state
         .resolve_tag(&raw.return_spelling)
-        .map_err(|err| anyhow::Error::new(diag::eval_call_return_tag_failed(name, err)))?;
+        .map_err(|err| diag::eval_call_return_tag_failed(name, err))?;
     state.check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
     Ok(super::native::FuncEntry {
         meta: super::native::FuncMeta {
@@ -2846,7 +2786,7 @@ fn build_script_entry<P: ProcessManager>(
 pub(crate) fn resolve_call_entry<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     name: &str,
-) -> Result<super::native::FuncEntry<P>> {
+) -> oxdock_diagnostics::DiagnosticResult<super::native::FuncEntry<P>> {
     let canonical = cx
         .state
         .functions
@@ -2855,10 +2795,10 @@ pub(crate) fn resolve_call_entry<P: ProcessManager>(
         Some(key) => match cx.state.functions.get(&key) {
             Some(entry) => entry,
             None => {
-                return Err(anyhow::Error::new(diag::eval_call_unknown(
+                return Err(diag::eval_call_unknown(
                     name,
                     &super::import::missing_import_hint(cx.state, name),
-                )));
+                ));
             }
         },
         None => match cx.state.functions.get(name) {
@@ -2875,10 +2815,10 @@ pub(crate) fn resolve_call_entry<P: ProcessManager>(
                     build_script_entry(cx.state, name, &raw, unit)?
                 }
                 None => {
-                    return Err(anyhow::Error::new(diag::eval_call_unknown(
+                    return Err(diag::eval_call_unknown(
                         name,
                         &super::import::missing_import_hint(cx.state, name),
-                    )));
+                    ));
                 }
             },
         },
@@ -2894,12 +2834,10 @@ pub(crate) fn gate_call<P: ProcessManager>(
     name: &str,
     entry: &super::native::FuncEntry<P>,
     nargs: usize,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     // Global recursion check.
     if cx.state.call_depth >= MAX_CALL_DEPTH {
-        return Err(anyhow::Error::new(diag::eval_call_recursion_limit(
-            super::base_name(name),
-        )));
+        return Err(diag::eval_call_recursion_limit(super::base_name(name)));
     }
     // Pre-evaluation arity gate from the entry metadata. Trailing
     // optional MAP params widen exact counts to ranges; everything
@@ -2908,18 +2846,18 @@ pub(crate) fn gate_call<P: ProcessManager>(
         let required = super::required_arity(params);
         if nargs < required || nargs > params.len() {
             if required == params.len() {
-                return Err(anyhow::Error::new(diag::eval_call_arity_exact(
+                return Err(diag::eval_call_arity_exact(
                     super::base_name(name),
                     params.len(),
                     nargs,
-                )));
+                ));
             }
-            return Err(anyhow::Error::new(diag::eval_call_arity_range(
+            return Err(diag::eval_call_arity_range(
                 super::base_name(name),
                 required,
                 params.len(),
                 nargs,
-            )));
+            ));
         }
     }
     Ok(())
@@ -2942,7 +2880,7 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     for arg in args {
         arg_vals.push(super::args::evaluate_expr(arg, cx)?);
     }
-    execute_call_entry(cx, name, entry, arg_vals, false)
+    Ok(execute_call_entry(cx, name, entry, arg_vals, false)?)
 }
 
 /// Execute a resolved entry with evaluated arguments. Single owner
@@ -2957,7 +2895,7 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
     entry: super::native::FuncEntry<P>,
     mut arg_vals: Vec<Value>,
     rpn_only: bool,
-) -> Result<Value> {
+) -> oxdock_diagnostics::DiagnosticResult<Value> {
     // 5. Execution by body kind. Script returns early (no host
     // return gate); host arms share one context wrap and one
     // return-type check below.
@@ -3053,7 +2991,7 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             } else if let Some((envs, inherit_names, _, _)) = callee_ctx {
                 cx.state.reset_module_env(envs);
                 if !inherit_names.is_empty() {
-                    inherit_env(cx, &inherit_names)?;
+                    inherit_env(cx, &inherit_names).map_err(super::args::lift_dispatch_error)?;
                 }
             }
             // Omitted trailing optionals fill with zero values before
@@ -3062,20 +3000,13 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             // unzeroable optionals, so the fill cannot fail here.
             for (pname, ptype, optional) in def.params.iter().skip(arg_vals.len()) {
                 if !optional {
-                    return Err(anyhow::Error::new(diag::eval_call_missing_param(
-                        pname,
-                        super::base_name(name),
-                    )));
+                    return Err(diag::eval_call_missing_param(pname, super::base_name(name)));
                 }
                 arg_vals.push(super::optional_zero_value(ptype).map_err(|err| {
-                    anyhow::Error::new(diag::eval_call_zero_value_failed(
-                        super::base_name(name),
-                        pname,
-                        err,
-                    ))
+                    diag::eval_call_zero_value_failed(super::base_name(name), pname, err)
                 })?);
             }
-            let outcome: Result<Value> = (|| {
+            let outcome: oxdock_diagnostics::DiagnosticResult<Value> = (|| {
                 // Function-local imports scope to this invocation: push
                 // a fresh frame for this unit so the body's own top-level
                 // imports land here (never the shared unit-top map) and
@@ -3129,15 +3060,19 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
                 match flow {
                     Flow::Done => Ok(Value::string(String::new())),
                     Flow::Return { value, .. } => Ok(value),
-                    Flow::Break { idx } => Err(anyhow::Error::new(
-                        diag::eval_call_flow_crosses_func(idx + 1, KEYWORD_BREAK, name),
+                    Flow::Break { idx } => Err(diag::eval_call_flow_crosses_func(
+                        idx + 1,
+                        KEYWORD_BREAK,
+                        name,
                     )),
-                    Flow::Continue { idx } => Err(anyhow::Error::new(
-                        diag::eval_call_flow_crosses_func(idx + 1, KEYWORD_CONTINUE, name),
+                    Flow::Continue { idx } => Err(diag::eval_call_flow_crosses_func(
+                        idx + 1,
+                        KEYWORD_CONTINUE,
+                        name,
                     )),
                 }
             })();
-            let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
+            let pop_res = cx.state.pop_scope();
             if let Some(saved) = saved_vars {
                 cx.state.var_scopes = saved;
             }
@@ -3160,10 +3095,10 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
         FuncBody::Pure(func) => func(arg_vals),
         FuncBody::Ctx(func) => {
             if rpn_only && !entry.meta.rpn {
-                return Err(anyhow::Error::new(diag::eval_call_unknown_rpn(
+                return Err(diag::eval_call_unknown_rpn(
                     name,
                     &super::import::missing_import_hint(cx.state, name),
-                )));
+                ));
             }
             func(cx, arg_vals)
         }
@@ -3175,7 +3110,7 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             }
         }
     }
-    .map_err(|err| anyhow::Error::new(diag::eval_call_failed(name, &err)))?;
+    .map_err(|err| diag::eval_call_failed(name, &super::args::lift_dispatch_error(err)))?;
     super::args::check_host_return_value(
         &format!("function `{}` returned", super::base_name(name)),
         &entry.meta.returns,
@@ -3195,34 +3130,32 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
 pub(crate) fn block_value<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     body: &[Step],
-) -> Result<Value> {
+) -> oxdock_diagnostics::DiagnosticResult<Value> {
     cx.state.push_scope();
-    let outcome: Result<Value> =
-        (|| {
-            let flow = super::steps::execute_steps(
-                cx.state,
-                cx.process,
-                body,
-                cx.stdin.clone(),
-                false,
-                cx.out.clone(),
-                cx.err.clone(),
-                cx.out_pipe.clone(),
-                cx.stdin_pipe.clone(),
-                false,
-            )?;
-            match flow {
-                Flow::Done => Ok(Value::string(String::new())),
-                Flow::Return { value, .. } => Ok(value),
-                Flow::Break { idx } => Err(anyhow::Error::new(
-                    diag::eval_block_flow_crosses_block(idx + 1, KEYWORD_BREAK),
-                )),
-                Flow::Continue { idx } => Err(anyhow::Error::new(
-                    diag::eval_block_flow_crosses_block(idx + 1, KEYWORD_CONTINUE),
-                )),
-            }
-        })();
-    let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
+    let outcome: oxdock_diagnostics::DiagnosticResult<Value> = (|| {
+        let flow = super::steps::execute_steps(
+            cx.state,
+            cx.process,
+            body,
+            cx.stdin.clone(),
+            false,
+            cx.out.clone(),
+            cx.err.clone(),
+            cx.out_pipe.clone(),
+            cx.stdin_pipe.clone(),
+            false,
+        )?;
+        match flow {
+            Flow::Done => Ok(Value::string(String::new())),
+            Flow::Return { value, .. } => Ok(value),
+            Flow::Break { idx } => Err(diag::eval_block_flow_crosses_block(idx + 1, KEYWORD_BREAK)),
+            Flow::Continue { idx } => Err(diag::eval_block_flow_crosses_block(
+                idx + 1,
+                KEYWORD_CONTINUE,
+            )),
+        }
+    })();
+    let pop_res = cx.state.pop_scope();
     match (outcome, pop_res) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(e), _) => Err(e),
@@ -3252,11 +3185,11 @@ pub(crate) fn while_loop<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     cond: &Expr,
     body: &[Step],
-) -> Result<Flow> {
+) -> oxdock_diagnostics::DiagnosticResult<Flow> {
     use std::sync::atomic::Ordering;
     loop {
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            return Err(anyhow::Error::new(diag::eval_async_cancelled()));
+            return Err(diag::eval_async_cancelled());
         }
         let val = super::args::evaluate_expr(cond, cx)?;
         if !super::args::is_truthy(&val)? {
@@ -3275,7 +3208,7 @@ pub(crate) fn while_loop<P: ProcessManager>(
             cx.stdin_pipe.clone(),
             false,
         );
-        let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
+        let pop_res = cx.state.pop_scope();
         let flow = match (res, pop_res) {
             (Ok(flow), Ok(())) => flow,
             (Err(e), _) => return Err(e),
@@ -3342,7 +3275,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     decl_type: String,
     cmd: &StepKind,
     is_const: bool,
-) -> Result<Flow> {
+) -> oxdock_diagnostics::DiagnosticResult<Flow> {
     use std::sync::Arc;
 
     let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
@@ -3361,7 +3294,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                 .iter()
                 .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
             {
-                return Err(anyhow::Error::new(diag::eval_capture_with_io_stdout(kw)));
+                return Err(diag::eval_capture_with_io_stdout(kw));
             }
             let guard = arm_deadline(cx, deadline);
             let result = if bindings.is_empty() {
@@ -3408,11 +3341,11 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                 .iter()
                 .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
             {
-                return Err(anyhow::Error::new(diag::eval_capture_with_io_stdout(kw)));
+                return Err(diag::eval_capture_with_io_stdout(kw));
             }
             let guard = arm_deadline(cx, deadline);
             let result = if bindings.is_empty() {
-                call_func_value(cx, name, args)
+                call_func_value(cx, name, args).map_err(super::args::lift_dispatch_error)
             } else {
                 (|| {
                     let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
@@ -3434,6 +3367,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                         tty: None,
                     };
                     call_func_value(&mut sub_cx, name, args)
+                        .map_err(super::args::lift_dispatch_error)
                 })()
             };
             let value = disarm_deadline(cx, guard, deadline, result)?;
@@ -3467,26 +3401,21 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     match flow {
         Flow::Done => {}
         Flow::Break { idx } => {
-            return Err(anyhow::Error::new(diag::eval_capture_flow_outside_loop(
-                idx + 1,
-                KEYWORD_BREAK,
-            )));
+            return Err(diag::eval_capture_flow_outside_loop(idx + 1, KEYWORD_BREAK));
         }
         Flow::Continue { idx } => {
-            return Err(anyhow::Error::new(diag::eval_capture_flow_outside_loop(
+            return Err(diag::eval_capture_flow_outside_loop(
                 idx + 1,
                 KEYWORD_CONTINUE,
-            )));
+            ));
         }
         Flow::Return { idx, .. } => {
-            return Err(anyhow::Error::new(
-                diag::eval_capture_return_outside_function(idx + 1),
-            ));
+            return Err(diag::eval_capture_return_outside_function(idx + 1));
         }
     }
     let text = sink
         .drain_string_strict()
-        .map_err(|err| anyhow::Error::new(diag::eval_capture_not_utf8(kw, var, err)))?;
+        .map_err(|err| diag::eval_capture_not_utf8(kw, var, err))?;
     let clean_var = var.trim_start_matches('$').to_string();
     let tag = cx.state.resolve_tag(&decl_type)?;
     cx.state
@@ -3503,7 +3432,7 @@ pub(crate) fn if_then<P: ProcessManager>(
 ) -> Result<Flow> {
     let val = super::args::evaluate_expr(cond, cx)?;
     if super::args::is_truthy(&val)? {
-        return super::steps::execute_scoped_steps(
+        return Ok(super::steps::execute_scoped_steps(
             cx.state,
             cx.process,
             then_body,
@@ -3514,12 +3443,12 @@ pub(crate) fn if_then<P: ProcessManager>(
             cx.out_pipe.clone(),
             cx.stdin_pipe.clone(),
             false,
-        );
+        )?);
     }
     for (else_cond, else_block) in else_ifs {
         let val = super::args::evaluate_expr(else_cond.as_ref(), cx)?;
         if super::args::is_truthy(&val)? {
-            return super::steps::execute_scoped_steps(
+            return Ok(super::steps::execute_scoped_steps(
                 cx.state,
                 cx.process,
                 else_block,
@@ -3530,11 +3459,11 @@ pub(crate) fn if_then<P: ProcessManager>(
                 cx.out_pipe.clone(),
                 cx.stdin_pipe.clone(),
                 false,
-            );
+            )?);
         }
     }
     if let Some(body) = else_body {
-        return super::steps::execute_scoped_steps(
+        return Ok(super::steps::execute_scoped_steps(
             cx.state,
             cx.process,
             body,
@@ -3545,7 +3474,7 @@ pub(crate) fn if_then<P: ProcessManager>(
             cx.out_pipe.clone(),
             cx.stdin_pipe.clone(),
             false,
-        );
+        )?);
     }
     Ok(Flow::Done)
 }
@@ -3755,7 +3684,7 @@ fn pin_async_keepers<P: ProcessManager>(
     cx: &StepCtx<'_, P>,
     body: &[Step],
     worker_task_id: u64,
-) -> Result<Option<super::state::KeeperExpiry>> {
+) -> oxdock_diagnostics::DiagnosticResult<Option<super::state::KeeperExpiry>> {
     struct Acc {
         handle: PipeHandle,
         last_producer: Option<usize>,
@@ -3811,7 +3740,7 @@ pub(crate) fn dispatch_run<P: ProcessManager>(
     };
     let cmd = super::args::resolve_arg(arg, cx)?;
     let cmd = super::args::expand_dsl_vars(&cmd, cx.state)?;
-    run(cx, &cmd)
+    Ok(run(cx, &cmd)?)
 }
 
 pub(crate) fn dispatch_run_exec<P: ProcessManager>(
@@ -3822,7 +3751,7 @@ pub(crate) fn dispatch_run_exec<P: ProcessManager>(
         unreachable!()
     };
     let resolved = resolve_run_exec_argv(argv, cx)?;
-    run_argv(cx, &resolved)
+    Ok(run_argv(cx, &resolved)?)
 }
 
 pub(crate) fn dispatch_async_block<P: ProcessManager>(
@@ -3955,7 +3884,7 @@ pub(crate) fn dispatch_workdir<P: ProcessManager>(
         unreachable!()
     };
     let path = super::args::resolve_arg(arg, cx)?;
-    workdir(cx, &path)
+    Ok(workdir(cx, &path)?)
 }
 
 pub(crate) fn dispatch_workspace<P: ProcessManager>(
@@ -4014,7 +3943,12 @@ pub(crate) fn dispatch_copy<P: ProcessManager>(
     }
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
-    copy(cx, from_workspace.clone(), &from_resolved, &to_resolved)
+    Ok(copy(
+        cx,
+        from_workspace.clone(),
+        &from_resolved,
+        &to_resolved,
+    )?)
 }
 
 pub(crate) fn dispatch_archive<P: ProcessManager>(
@@ -4026,7 +3960,7 @@ pub(crate) fn dispatch_archive<P: ProcessManager>(
     };
     let src_resolved = super::args::resolve_arg(src, cx)?;
     let dst_resolved = super::args::resolve_arg(dst, cx)?;
-    archive(cx, &src_resolved, &dst_resolved, *raw)
+    Ok(archive(cx, &src_resolved, &dst_resolved, *raw)?)
 }
 
 pub(crate) fn dispatch_unarchive<P: ProcessManager>(
@@ -4044,7 +3978,12 @@ pub(crate) fn dispatch_unarchive<P: ProcessManager>(
     let src_resolved = super::args::resolve_arg(src, cx)?;
     let dst_resolved = super::args::resolve_arg(dst, cx)?;
     let cap_resolved = super::args::resolve_arg_opt(max_bytes, cx)?;
-    unarchive(cx, &src_resolved, &dst_resolved, cap_resolved.as_deref())
+    Ok(unarchive(
+        cx,
+        &src_resolved,
+        &dst_resolved,
+        cap_resolved.as_deref(),
+    )?)
 }
 
 pub(crate) fn dispatch_copy_git<P: ProcessManager>(
@@ -4063,13 +4002,13 @@ pub(crate) fn dispatch_copy_git<P: ProcessManager>(
     let rev_resolved = super::args::resolve_arg(rev, cx)?;
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
-    copy_git(
+    Ok(copy_git(
         cx,
         &rev_resolved,
         &from_resolved,
         &to_resolved,
         *include_dirty,
-    )
+    )?)
 }
 
 pub(crate) fn dispatch_symlink<P: ProcessManager>(
@@ -4086,7 +4025,12 @@ pub(crate) fn dispatch_symlink<P: ProcessManager>(
     };
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
-    symlink(cx, from_workspace.clone(), &from_resolved, &to_resolved)
+    Ok(symlink(
+        cx,
+        from_workspace.clone(),
+        &from_resolved,
+        &to_resolved,
+    )?)
 }
 
 pub(crate) fn dispatch_mkdir<P: ProcessManager>(
@@ -4097,28 +4041,29 @@ pub(crate) fn dispatch_mkdir<P: ProcessManager>(
         unreachable!()
     };
     let path = super::args::resolve_arg(arg, cx)?;
-    mkdir(cx, &path)
+    Ok(mkdir(cx, &path)?)
 }
 
 pub(super) fn install<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     from: &str,
     to: &str,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let from_abs = cx
         .state
         .fs
         .resolve_read(&cx.state.cwd, from)
-        .map_err(|e| anyhow::Error::new(diag::eval_install_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_install_failed(from, to, &e))?;
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .map_err(|e| anyhow::Error::new(diag::eval_install_failed(from, to, &e)))?;
+        .map_err(|e| diag::eval_install_failed(from, to, &e))?;
     cx.state
         .fs
         .install_file_atomic(&from_abs, &to_abs, EXECUTABLE_MODE)
-        .map_err(|e| anyhow::Error::new(diag::eval_install_failed(from, to, &e)))?;
+        .map_err(anyhow::Error::from)
+        .map_err(|e| diag::eval_install_failed(from, to, &super::args::lift_dispatch_error(e)))?;
     Ok(())
 }
 
@@ -4131,7 +4076,7 @@ pub(crate) fn dispatch_install<P: ProcessManager>(
     };
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
-    install(cx, &from_resolved, &to_resolved)
+    Ok(install(cx, &from_resolved, &to_resolved)?)
 }
 
 pub(crate) fn dispatch_set_executable<P: ProcessManager>(
@@ -4142,7 +4087,7 @@ pub(crate) fn dispatch_set_executable<P: ProcessManager>(
         unreachable!()
     };
     let resolved = super::args::resolve_arg(path, cx)?;
-    set_executable(cx, &resolved)
+    Ok(set_executable(cx, &resolved)?)
 }
 
 pub(crate) fn dispatch_ls<P: ProcessManager>(
@@ -4153,7 +4098,7 @@ pub(crate) fn dispatch_ls<P: ProcessManager>(
         unreachable!()
     };
     let resolved = super::args::resolve_arg_opt(arg, cx)?;
-    ls(cx, &resolved)
+    Ok(ls(cx, &resolved)?)
 }
 
 pub(crate) fn dispatch_read<P: ProcessManager>(
@@ -4164,7 +4109,7 @@ pub(crate) fn dispatch_read<P: ProcessManager>(
         unreachable!()
     };
     let resolved = super::args::resolve_arg_opt(arg, cx)?;
-    read(cx, &resolved)
+    Ok(read(cx, &resolved)?)
 }
 
 pub(crate) fn dispatch_read_line<P: ProcessManager>(
@@ -4174,7 +4119,7 @@ pub(crate) fn dispatch_read_line<P: ProcessManager>(
     let StepKind::ReadLine { var } = step else {
         unreachable!()
     };
-    read_line(cx, var)
+    Ok(read_line(cx, var)?)
 }
 
 /// Render the terminal prompt: `{message} [{default}]: ` with a default,
@@ -4204,7 +4149,7 @@ pub(super) fn prompt<P: ProcessManager>(
     var: &str,
     message: &str,
     default: Option<&str>,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     // No Miri special-case: `SyntheticProcessManager::stdin_is_terminal`
     // reports false without touching a fd, so under Miri this always
     // takes the non-interactive branch below (default binds, else
@@ -4222,7 +4167,7 @@ pub(super) fn prompt<P: ProcessManager>(
                 return Ok(());
             }
             None => {
-                return Err(anyhow::Error::new(diag::eval_prompt_no_answer(message)));
+                return Err(diag::eval_prompt_no_answer(message));
             }
         }
     }
@@ -4231,16 +4176,16 @@ pub(super) fn prompt<P: ProcessManager>(
         use std::io::Write;
         let mut err = std::io::stderr().lock();
         err.write_all(rendered.as_bytes())
-            .map_err(|e| anyhow::Error::new(diag::eval_prompt_write_failed(message, &e)))?;
+            .map_err(|e| diag::eval_prompt_write_failed(message, &e))?;
         err.flush()
-            .map_err(|e| anyhow::Error::new(diag::eval_prompt_flush_failed(message, &e)))?;
+            .map_err(|e| diag::eval_prompt_flush_failed(message, &e))?;
     }
     let mut line = String::new();
     let n = std::io::stdin()
         .read_line(&mut line)
-        .map_err(|e| anyhow::Error::new(diag::eval_prompt_read_failed(message, &e)))?;
+        .map_err(|e| diag::eval_prompt_read_failed(message, &e))?;
     if n == 0 && line.is_empty() {
-        return Err(anyhow::Error::new(diag::eval_prompt_eof(message)));
+        return Err(diag::eval_prompt_eof(message));
     }
     let trimmed = line
         .strip_suffix("\r\n")
@@ -4256,15 +4201,15 @@ fn bind_prompt_var<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     clean_var: &str,
     text: Value,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     if cx.state.get_var_typed(clean_var).is_some() {
         cx.state
             .mutate_var(clean_var, text)
-            .map_err(|e| anyhow::Error::new(diag::eval_prompt_bind_failed(clean_var, e)))?;
+            .map_err(|e| diag::eval_prompt_bind_failed(clean_var, e))?;
     } else {
         cx.state
             .declare_var(clean_var.to_string(), TypeTag::String, text)
-            .map_err(|e| anyhow::Error::new(diag::eval_prompt_bind_failed(clean_var, e)))?;
+            .map_err(|e| diag::eval_prompt_bind_failed(clean_var, e))?;
     }
     Ok(())
 }
@@ -4286,7 +4231,12 @@ pub(crate) fn dispatch_prompt<P: ProcessManager>(
         Some(d) => Some(super::args::resolve_arg(d, cx)?),
         None => None,
     };
-    prompt(cx, var, &message_resolved, default_resolved.as_deref())
+    Ok(prompt(
+        cx,
+        var,
+        &message_resolved,
+        default_resolved.as_deref(),
+    )?)
 }
 
 /// Dispatch `LIST_APPEND $list <item>` : append to a LIST binding in
@@ -4297,10 +4247,10 @@ pub(super) fn push_into<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     var: &str,
     item: Value,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     cx.state
         .push_into_list(var, item)
-        .map_err(|e| anyhow::Error::new(diag::eval_list_append_failed(var, e)))
+        .map_err(|e| diag::eval_list_append_failed(var, e))
 }
 
 pub(crate) fn dispatch_push_into_step<P: ProcessManager>(
@@ -4311,7 +4261,7 @@ pub(crate) fn dispatch_push_into_step<P: ProcessManager>(
         unreachable!()
     };
     let value = super::args::evaluate_assert_operand(item, cx)?;
-    push_into(cx, list, value)
+    Ok(push_into(cx, list, value)?)
 }
 
 pub(crate) fn dispatch_write<P: ProcessManager>(
@@ -4323,7 +4273,7 @@ pub(crate) fn dispatch_write<P: ProcessManager>(
     };
     let path_resolved = super::args::resolve_arg(path, cx)?;
     let contents_resolved = super::args::resolve_arg_opt(contents, cx)?;
-    write(cx, &path_resolved, contents_resolved.as_deref())
+    Ok(write(cx, &path_resolved, contents_resolved.as_deref())?)
 }
 
 pub(crate) fn dispatch_append<P: ProcessManager>(
@@ -4335,7 +4285,7 @@ pub(crate) fn dispatch_append<P: ProcessManager>(
     };
     let path_resolved = super::args::resolve_arg(path, cx)?;
     let contents_resolved = super::args::resolve_arg_opt(contents, cx)?;
-    append(cx, &path_resolved, contents_resolved.as_deref())
+    Ok(append(cx, &path_resolved, contents_resolved.as_deref())?)
 }
 
 pub(crate) fn dispatch_append_line<P: ProcessManager>(
@@ -4347,33 +4297,29 @@ pub(crate) fn dispatch_append_line<P: ProcessManager>(
     };
     let path_resolved = super::args::resolve_arg(path, cx)?;
     let contents_resolved = super::args::resolve_arg(contents, cx)?;
-    append_line(cx, &path_resolved, &contents_resolved)
+    Ok(append_line(cx, &path_resolved, &contents_resolved)?)
 }
 
 pub(super) fn append_line<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
     contents: &str,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_append_line_resolve_failed(path, &e)))?;
-    cx.state.fs.ensure_parent_dir(&target).map_err(|e| {
-        anyhow::Error::new(diag::eval_ensure_parent_failed(
-            &target.display().to_string(),
-            &e,
-        ))
-    })?;
+        .map_err(|e| diag::eval_append_line_resolve_failed(path, &e))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .map_err(|e| diag::eval_ensure_parent_failed(&target.display().to_string(), &e))?;
     let mut line = contents.to_string();
     line.push('\n');
     cx.state
         .fs
         .append_file(&target, line.as_bytes())
-        .map_err(|e| {
-            anyhow::Error::new(diag::eval_append_failed(&target.display().to_string(), &e))
-        })?;
+        .map_err(|e| diag::eval_append_failed(&target.display().to_string(), &e))?;
     Ok(())
 }
 
@@ -4381,7 +4327,7 @@ pub(super) fn remove<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
     recursive: bool,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     // Removal resolves against the ambient cwd. The deletion guard
     // below compares against the real run cwd and roots, so a module
     // can never remove the caller's working directory out from
@@ -4391,7 +4337,7 @@ pub(super) fn remove<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_remove_failed(path, &e)))?;
+        .map_err(|e| diag::eval_remove_failed(path, &e))?;
     // Root and working-directory deletion guard: removing the cwd (or any
     // of its ancestors), the workspace root, or the effective root (`/`
     // under `WORKSPACE SYSTEM`) would destroy the execution context or
@@ -4410,7 +4356,7 @@ pub(super) fn remove<P: ProcessManager>(
         || Some(&target) == cx.state.fs.workspace_root()
         || target == *cx.state.fs.root()
     {
-        return Err(anyhow::Error::new(diag::eval_remove_protected(path)));
+        return Err(diag::eval_remove_protected(path));
     }
     // Lexical link probe: canonical resolution routes through the
     // final link, so a link would otherwise read as its target and the
@@ -4419,33 +4365,34 @@ pub(super) fn remove<P: ProcessManager>(
         .state
         .fs
         .remove_link_if_symlink(&cwd, path)
-        .map_err(|e| anyhow::Error::new(diag::eval_remove_failed(path, &e)))?
+        .map_err(|e| diag::eval_remove_failed(path, &e))?
     {
         return Ok(());
     }
     match cx.state.fs.entry_kind_no_follow(&target) {
-        Err(_) => Err(anyhow::Error::new(diag::eval_remove_missing(path))),
+        Err(_) => Err(diag::eval_remove_missing(path)),
         Ok(EntryKind::File) => {
             cx.state
                 .fs
                 .remove_file(&target)
-                .map_err(|e| anyhow::Error::new(diag::eval_remove_failed(path, &e)))?;
+                .map_err(|e| diag::eval_remove_failed(path, &e))?;
             Ok(())
         }
         // A link reaching here appeared between the probe and the
         // resolve: fail closed rather than touch its target.
-        Ok(EntryKind::Symlink) => Err(anyhow::Error::new(diag::eval_remove_link_changed(path))),
+        Ok(EntryKind::Symlink) => Err(diag::eval_remove_link_changed(path)),
         Ok(EntryKind::Dir) => {
             if recursive {
                 cx.state
                     .fs
                     .remove_dir_all(&target)
-                    .map_err(|e| anyhow::Error::new(diag::eval_remove_failed(path, &e)))?;
+                    .map_err(|e| diag::eval_remove_failed(path, &e))?;
                 Ok(())
             } else {
-                cx.state.fs.remove_empty_dir(&target).map_err(|e| {
-                    anyhow::Error::new(diag::eval_remove_not_empty_failed(path, &e))
-                })?;
+                cx.state
+                    .fs
+                    .remove_empty_dir(&target)
+                    .map_err(|e| diag::eval_remove_not_empty_failed(path, &e))?;
                 Ok(())
             }
         }
@@ -4460,7 +4407,7 @@ pub(crate) fn dispatch_remove<P: ProcessManager>(
         unreachable!()
     };
     let path_resolved = super::args::resolve_arg(path, cx)?;
-    remove(cx, &path_resolved, *recursive)
+    Ok(remove(cx, &path_resolved, *recursive)?)
 }
 
 pub(crate) fn dispatch_expand<P: ProcessManager>(
@@ -4472,7 +4419,7 @@ pub(crate) fn dispatch_expand<P: ProcessManager>(
     };
     let path_resolved = super::args::resolve_arg_opt(path, cx)?;
     let overrides_resolved = super::args::resolve_overrides(overrides, cx)?;
-    replace(cx, &path_resolved, &overrides_resolved)
+    Ok(replace(cx, &path_resolved, &overrides_resolved)?)
 }
 
 fn dispatch_assert_equality<P: ProcessManager>(
@@ -4482,7 +4429,7 @@ fn dispatch_assert_equality<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     verb: &str,
     expect_equal: bool,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let target = super::steps::resolve_assert_target(actual, cx)?;
     let expected_val = match expected {
         Some(e) => Some(super::args::evaluate_assert_operand(e, cx)?),
@@ -4511,7 +4458,14 @@ pub(crate) fn dispatch_assert_eq<P: ProcessManager>(
     else {
         unreachable!()
     };
-    dispatch_assert_equality(hash, actual, expected, cx, Command::AssertEq.as_str(), true)
+    Ok(dispatch_assert_equality(
+        hash,
+        actual,
+        expected,
+        cx,
+        Command::AssertEq.as_str(),
+        true,
+    )?)
 }
 
 pub(crate) fn dispatch_assert_ne<P: ProcessManager>(
@@ -4526,14 +4480,14 @@ pub(crate) fn dispatch_assert_ne<P: ProcessManager>(
     else {
         unreachable!()
     };
-    dispatch_assert_equality(
+    Ok(dispatch_assert_equality(
         hash,
         actual,
         expected,
         cx,
         Command::AssertNe.as_str(),
         false,
-    )
+    )?)
 }
 
 pub(crate) fn dispatch_assert_contains<P: ProcessManager>(
@@ -4544,7 +4498,7 @@ pub(crate) fn dispatch_assert_contains<P: ProcessManager>(
         unreachable!()
     };
     let target = super::steps::resolve_assert_target(haystack, cx)?;
-    assert_contains(cx, 0, 0, &target, needle)
+    Ok(assert_contains(cx, 0, 0, &target, needle)?)
 }
 
 pub(crate) fn dispatch_exit<P: ProcessManager>(
@@ -4555,7 +4509,7 @@ pub(crate) fn dispatch_exit<P: ProcessManager>(
         unreachable!()
     };
     let code = super::args::resolve_arg_as_int(code, cx)?;
-    exit(cx, code)
+    Ok(exit(cx, code)?)
 }
 
 /// Write a `FAIL` message to stderr: same single-`write_all` atomicity
@@ -4564,7 +4518,9 @@ pub(crate) fn dispatch_exit<P: ProcessManager>(
 pub(super) fn fail_message<P: ProcessManager>(cx: &mut StepCtx<'_, P>, msg: &str) -> Result<()> {
     let line = format!("{msg}\n");
     write_stderr(cx.err.clone(), |writer| {
-        writer.write_all(line.as_bytes())?;
+        writer
+            .write_all(line.as_bytes())
+            .map_err(|e| diag::eval_stream_write_failed(&e))?;
         Ok(())
     })?;
     Ok(())
@@ -4626,7 +4582,9 @@ pub(crate) fn fail<P: ProcessManager>(
         let msg = super::args::resolve_arg(msg, cx)?;
         fail_message(cx, &msg)?;
     }
-    exit(cx, code).map(|()| Flow::Done)
+    exit(cx, code)
+        .map(|()| Flow::Done)
+        .map_err(anyhow::Error::from)
 }
 
 pub(crate) fn dispatch_fail<P: ProcessManager>(
@@ -4641,7 +4599,7 @@ pub(crate) fn dispatch_fail<P: ProcessManager>(
     else {
         unreachable!()
     };
-    top_level_flow(fail(cx, code, message, body)?)
+    Ok(top_level_flow(fail(cx, code, message, body)?)?)
 }
 
 pub(crate) fn dispatch_inherit_env<P: ProcessManager>(
@@ -4661,7 +4619,7 @@ pub(crate) fn dispatch_isolated_inherit_env<P: ProcessManager>(
     let StepKind::IsolatedInheritEnv { keys } = step else {
         unreachable!()
     };
-    isolated_inherit_env(cx, keys)
+    Ok(isolated_inherit_env(cx, keys)?)
 }
 
 // ── Structural dispatch wrappers ────────────────────────────────────────────
@@ -4681,7 +4639,7 @@ pub(crate) fn dispatch_for_loop<P: ProcessManager>(
     else {
         unreachable!()
     };
-    top_level_flow(for_loop(
+    Ok(top_level_flow(for_loop(
         cx,
         key_var.as_deref(),
         key_type.clone(),
@@ -4689,7 +4647,7 @@ pub(crate) fn dispatch_for_loop<P: ProcessManager>(
         var_type.clone(),
         in_expr,
         body,
-    )?)
+    )?)?)
 }
 
 pub(crate) fn dispatch_if_then<P: ProcessManager>(
@@ -4705,7 +4663,9 @@ pub(crate) fn dispatch_if_then<P: ProcessManager>(
     else {
         unreachable!()
     };
-    top_level_flow(if_then(cx, cond, then_body, else_ifs, else_body)?)
+    Ok(top_level_flow(if_then(
+        cx, cond, then_body, else_ifs, else_body,
+    )?)?)
 }
 
 pub(crate) fn dispatch_switch<P: ProcessManager>(
@@ -4720,7 +4680,12 @@ pub(crate) fn dispatch_switch<P: ProcessManager>(
     else {
         unreachable!()
     };
-    top_level_flow(switch_run(cx, discriminant, cases, default_body)?)
+    Ok(top_level_flow(switch_run(
+        cx,
+        discriminant,
+        cases,
+        default_body,
+    )?)?)
 }
 
 pub(crate) fn dispatch_set<P: ProcessManager>(
@@ -4740,7 +4705,7 @@ pub(crate) fn dispatch_with_io<P: ProcessManager>(
     let StepKind::WithIo { bindings, cmd } = step else {
         unreachable!()
     };
-    top_level_flow(with_io(cx, 0, 0, bindings, cmd)?)
+    Ok(top_level_flow(with_io(cx, 0, 0, bindings, cmd)?)?)
 }
 
 pub(crate) fn dispatch_with_io_block<P: ProcessManager>(
@@ -4750,7 +4715,7 @@ pub(crate) fn dispatch_with_io_block<P: ProcessManager>(
     let StepKind::WithIoBlock { bindings } = step else {
         unreachable!()
     };
-    with_io_block(cx, 0, 0, bindings)
+    Ok(with_io_block(cx, 0, 0, bindings)?)
 }
 
 pub(crate) fn dispatch_func_def<P: ProcessManager>(
@@ -4778,7 +4743,7 @@ pub(crate) fn dispatch_import_file<P: ProcessManager>(
     let StepKind::ImportFile { path, alias } = step else {
         unreachable!()
     };
-    super::import::import_file(cx, path, alias).map(|_| ())
+    Ok(super::import::import_file(cx, path, alias).map(|_| ())?)
 }
 
 pub(crate) fn dispatch_import_funcs<P: ProcessManager>(
@@ -4794,7 +4759,13 @@ pub(crate) fn dispatch_import_funcs<P: ProcessManager>(
     else {
         unreachable!()
     };
-    super::import::import_funcs(cx, path, alias.as_deref(), func_names, type_names)
+    Ok(super::import::import_funcs(
+        cx,
+        path,
+        alias.as_deref(),
+        func_names,
+        type_names,
+    )?)
 }
 
 pub(crate) fn dispatch_call<P: ProcessManager>(
@@ -4814,7 +4785,7 @@ pub(crate) fn dispatch_return<P: ProcessManager>(
     let StepKind::Return { expr, .. } = step else {
         unreachable!()
     };
-    top_level_flow(handle_return(cx, 0, expr)?)
+    Ok(top_level_flow(handle_return(cx, 0, expr)?)?)
 }
 
 pub(crate) fn dispatch_while_loop<P: ProcessManager>(
@@ -4824,7 +4795,7 @@ pub(crate) fn dispatch_while_loop<P: ProcessManager>(
     let StepKind::While { cond, body } = step else {
         unreachable!()
     };
-    top_level_flow(while_loop(cx, cond, body)?)
+    Ok(top_level_flow(while_loop(cx, cond, body)?)?)
 }
 
 pub(crate) fn dispatch_break<P: ProcessManager>(
@@ -4907,7 +4878,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     body: &[Step],
     cx: &mut StepCtx<'_, P>,
     is_const: bool,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     // Generate a unique task ID. Allocation refuses past the live-task
     // cap, so a spawn storm fails the step loudly instead of wedging
     // the host.
@@ -5061,14 +5032,14 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
 fn resolve_task_entry<P: ProcessManager>(
     var: &str,
     cx: &StepCtx<'_, P>,
-) -> Result<Arc<super::state::TaskEntry>> {
+) -> oxdock_diagnostics::DiagnosticResult<Arc<super::state::TaskEntry>> {
     // Resolve the variable to a TaskHandle
     let val = cx
         .state
         .get_var(var)
-        .ok_or_else(|| anyhow::Error::new(diag::eval_task_var_undefined(var)))?;
+        .ok_or_else(|| diag::eval_task_var_undefined(var))?;
     let Some(task_id) = val.as_handle() else {
-        return Err(anyhow::Error::new(diag::eval_task_not_handle(var)));
+        return Err(diag::eval_task_not_handle(var));
     };
     resolve_task_entry_by_id(task_id, &sigil_var(var), cx)
 }
@@ -5081,7 +5052,7 @@ pub(crate) fn resolve_task_entry_by_id<P: ProcessManager>(
     task_id: u64,
     label: &str,
     cx: &StepCtx<'_, P>,
-) -> Result<Arc<super::state::TaskEntry>> {
+) -> oxdock_diagnostics::DiagnosticResult<Arc<super::state::TaskEntry>> {
     // Clone the shared entry under a short map lock.
     let entry = {
         let named = cx
@@ -5092,7 +5063,7 @@ pub(crate) fn resolve_task_entry_by_id<P: ProcessManager>(
         named.get(&task_id).cloned()
     };
     let Some(entry) = entry else {
-        return Err(anyhow::Error::new(diag::eval_task_not_found(label)));
+        return Err(diag::eval_task_not_found(label));
     };
     Ok(entry)
 }
@@ -5106,7 +5077,7 @@ fn await_task_entry(
     entry: &Arc<super::state::TaskEntry>,
     cancel_token: &Arc<std::sync::atomic::AtomicBool>,
     var: &str,
-) -> Result<std::process::ExitStatus> {
+) -> oxdock_diagnostics::DiagnosticResult<std::process::ExitStatus> {
     use super::state::TaskPhase;
 
     // Claim the entry for awaiting.
@@ -5117,12 +5088,10 @@ fn await_task_entry(
                 drop(guard);
                 // Teardown barrier: never outrun the killer's join.
                 entry.wait_reaped();
-                return Err(anyhow::Error::new(diag::eval_await_cancelled(var)));
+                return Err(diag::eval_await_cancelled(var));
             }
             TaskPhase::Completed | TaskPhase::Awaiting => {
-                return Err(anyhow::Error::new(diag::eval_task_not_found(&sigil_var(
-                    var,
-                ))));
+                return Err(diag::eval_task_not_found(&sigil_var(var)));
             }
             TaskPhase::Running => {
                 guard.phase = TaskPhase::Awaiting;
@@ -5196,21 +5165,19 @@ fn await_task_entry(
             }
             Decision::Cancelled => {
                 entry.wait_reaped();
-                return Err(anyhow::Error::new(diag::eval_await_cancelled(var)));
+                return Err(diag::eval_await_cancelled(var));
             }
             Decision::KillOnTimeout => {
                 if let Some(mut handle) = timeout_kill {
                     let _ = handle.kill();
                 }
                 entry.finish_teardown();
-                return Err(anyhow::Error::new(diag::eval_await_timeout(var)));
+                return Err(diag::eval_await_timeout(var));
             }
             Decision::Done(status) => {
                 entry.finish_teardown();
                 if !status.success() {
-                    return Err(anyhow::Error::new(diag::eval_await_exit_status(
-                        var, &status,
-                    )));
+                    return Err(diag::eval_await_exit_status(var, &status));
                 }
                 return Ok(status);
             }
@@ -5227,11 +5194,14 @@ fn await_task_entry(
 /// `CANCEL` (or a `TIMEOUT` deadline) transitions the entry to `Cancelled`;
 /// this loop observes that within ~10ms and rendezvouses on teardown
 /// completion before reporting cancellation.
-pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -> Result<()> {
+pub(crate) fn dispatch_await<P: ProcessManager>(
+    var: &str,
+    cx: &mut StepCtx<'_, P>,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let val = cx
         .state
         .get_var(var)
-        .ok_or_else(|| anyhow::Error::new(diag::eval_task_var_undefined(var)))?;
+        .ok_or_else(|| diag::eval_task_var_undefined(var))?;
     // A LIST of HANDLEs awaits every member in order, so worker pools
     // collected with PUSH join as a group; an empty LIST is a no-op. The
     // first failing member bails like sequential single AWAITs would.
@@ -5247,10 +5217,7 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
             let member = format!("{var}[{idx}]");
             let label = sigil_var(&member);
             let Some(task_id) = item.as_handle() else {
-                return Err(anyhow::Error::new(diag::eval_await_member_not_handle(
-                    &label,
-                    item.type_name(),
-                )));
+                return Err(diag::eval_await_member_not_handle(&label, item.type_name()));
             };
             let entry = resolve_task_entry_by_id(task_id, &label, cx)?;
             await_task_entry(&entry, &cx.state.cancel_token, &member)?;
@@ -5277,7 +5244,7 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
     task_var: &str,
     cx: &mut StepCtx<'_, P>,
     is_const: bool,
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
     let entry = resolve_task_entry(task_var, cx)?;
     await_task_entry(&entry, &cx.state.cancel_token, task_var)?;
@@ -5296,9 +5263,7 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
         return Ok(());
     }
     if returns_value {
-        return Err(anyhow::Error::new(diag::eval_await_fell_off(
-            kw, out_var, task_var,
-        )));
+        return Err(diag::eval_await_fell_off(kw, out_var, task_var));
     }
     let tag = cx.state.resolve_tag(&out_type)?;
     cx.state.declare_binding(
@@ -5317,15 +5282,18 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
 /// process is dead and no residual filesystem/stream mutation can follow.
 /// A concurrent `AWAIT` rendezvouses on teardown completion and reports
 /// cancellation.
-pub(crate) fn dispatch_cancel<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -> Result<()> {
+pub(crate) fn dispatch_cancel<P: ProcessManager>(
+    var: &str,
+    cx: &mut StepCtx<'_, P>,
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     use super::state::TaskPhase;
 
     let val = cx
         .state
         .get_var(var)
-        .ok_or_else(|| anyhow::Error::new(diag::eval_task_var_undefined(var)))?;
+        .ok_or_else(|| diag::eval_task_var_undefined(var))?;
     let Some(task_id) = val.as_handle() else {
-        return Err(anyhow::Error::new(diag::eval_task_not_handle(var)));
+        return Err(diag::eval_task_not_handle(var));
     };
 
     let entry = {
@@ -5337,7 +5305,7 @@ pub(crate) fn dispatch_cancel<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_,
         named.get(&task_id).cloned()
     };
     let Some(entry) = entry else {
-        return Err(anyhow::Error::new(diag::eval_cancel_gone(var)));
+        return Err(diag::eval_cancel_gone(var));
     };
 
     // Transition to Cancelled and take the handle under a short lock.
@@ -5345,10 +5313,10 @@ pub(crate) fn dispatch_cancel<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_,
         let mut guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
         match guard.phase {
             TaskPhase::Cancelled => {
-                return Err(anyhow::Error::new(diag::eval_cancel_already(var)));
+                return Err(diag::eval_cancel_already(var));
             }
             TaskPhase::Completed => {
-                return Err(anyhow::Error::new(diag::eval_cancel_gone(var)));
+                return Err(diag::eval_cancel_gone(var));
             }
             TaskPhase::Running | TaskPhase::Awaiting => {
                 guard.phase = TaskPhase::Cancelled;
@@ -5384,7 +5352,7 @@ pub(crate) fn dispatch_bind_step<P: ProcessManager>(
     use oxdock_parser::BindRhs;
     match rhs {
         BindRhs::Expr(expr) => assign(cx, var, decl_type.clone(), expr, *is_const),
-        BindRhs::Capture(cmd) => top_level_flow(assign_capture(
+        BindRhs::Capture(cmd) => Ok(top_level_flow(assign_capture(
             cx,
             super::steps::allocate_assert_generation(),
             0,
@@ -5392,11 +5360,21 @@ pub(crate) fn dispatch_bind_step<P: ProcessManager>(
             decl_type.clone(),
             cmd,
             *is_const,
+        )?)?),
+        BindRhs::Async(body) => Ok(dispatch_assign_async(
+            var,
+            decl_type.clone(),
+            body,
+            cx,
+            *is_const,
         )?),
-        BindRhs::Async(body) => dispatch_assign_async(var, decl_type.clone(), body, cx, *is_const),
-        BindRhs::Await { task_var, .. } => {
-            dispatch_await_capture(var, decl_type.clone(), task_var, cx, *is_const)
-        }
+        BindRhs::Await { task_var, .. } => Ok(dispatch_await_capture(
+            var,
+            decl_type.clone(),
+            task_var,
+            cx,
+            *is_const,
+        )?),
     }
 }
 
@@ -5408,7 +5386,7 @@ pub(crate) fn dispatch_await_step<P: ProcessManager>(
     let StepKind::Await { var, .. } = step else {
         unreachable!()
     };
-    dispatch_await(var, cx)
+    Ok(dispatch_await(var, cx)?)
 }
 
 /// Pipeline dispatch wrapper for `Cancel`
@@ -5419,7 +5397,7 @@ pub(crate) fn dispatch_cancel_step<P: ProcessManager>(
     let StepKind::Cancel { var, .. } = step else {
         unreachable!()
     };
-    dispatch_cancel(var, cx)
+    Ok(dispatch_cancel(var, cx)?)
 }
 
 /// Pipeline dispatch wrapper for `Timeout`
@@ -5431,7 +5409,7 @@ pub(crate) fn dispatch_timeout_step<P: ProcessManager>(
         unreachable!()
     };
     let duration = super::args::resolve_arg_as_duration(duration, cx)?;
-    top_level_flow(timeout(cx, &duration, body)?)
+    Ok(top_level_flow(timeout(cx, &duration, body)?)?)
 }
 
 /// Pipeline dispatch wrapper for `Isolated`
@@ -5442,7 +5420,7 @@ pub(crate) fn dispatch_isolated_step<P: ProcessManager>(
     let StepKind::Isolated { body } = step else {
         unreachable!()
     };
-    top_level_flow(isolated(cx, body)?)
+    Ok(top_level_flow(isolated(cx, body)?)?)
 }
 
 /// Owned deadline watch shared by `TIMEOUT` steps and deadline-bound
@@ -5538,8 +5516,8 @@ fn disarm_deadline<T, P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     mut guard: Option<DeadlineGuard>,
     duration: Option<std::time::Duration>,
-    result: Result<T>,
-) -> Result<T> {
+    result: oxdock_diagnostics::DiagnosticResult<T>,
+) -> oxdock_diagnostics::DiagnosticResult<T> {
     use std::sync::atomic::Ordering;
 
     let Some(guard) = guard.as_mut() else {
@@ -5566,13 +5544,13 @@ fn disarm_deadline<T, P: ProcessManager>(
     match result {
         Ok(value) => {
             if guard.fired.load(Ordering::SeqCst) {
-                return Err(anyhow::Error::new(diag::eval_timeout_deadline(&budget)));
+                return Err(diag::eval_timeout_deadline(&budget));
             }
             Ok(value)
         }
         Err(err) => {
             if guard.fired.load(Ordering::SeqCst) {
-                Err(err).with_context(|| diag::eval_timeout_deadline(&budget))
+                Err(diag::eval_timeout_deadline(&budget).with_source(std::sync::Arc::new(err)))
             } else {
                 Err(err)
             }
@@ -5605,7 +5583,7 @@ pub(crate) fn timeout<P: ProcessManager>(
         cx.stdin_pipe.clone(),
         true,
     );
-    disarm_deadline(cx, guard, Some(*duration), result)
+    disarm_deadline(cx, guard, Some(*duration), result).map_err(anyhow::Error::from)
 }
 
 /// RAII scope for `ISOLATED` bodies: snapshots the script env, clears it,
@@ -5682,7 +5660,9 @@ pub(crate) fn isolated<P: ProcessManager>(cx: &mut StepCtx<'_, P>, body: &[Step]
     // Inner steps number from the block, not the script: name the
     // boundary so `step 1: RUN ...` inside ISOLATED never reads as the
     // script's first step.
-    result.with_context(diag::eval_inside_isolated)
+    result
+        .map_err(|e| e.with_contexts(vec![diag::eval_inside_isolated().to_string()]))
+        .map_err(anyhow::Error::from)
 }
 
 /// Resolve a block allowlist against the enclosing `ISOLATED` snapshot
@@ -5694,9 +5674,9 @@ pub(crate) fn isolated<P: ProcessManager>(cx: &mut StepCtx<'_, P>, body: &[Step]
 pub(crate) fn isolated_inherit_env<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     keys: &[String],
-) -> Result<()> {
+) -> oxdock_diagnostics::DiagnosticResult<()> {
     let Some(snapshot) = cx.state.isolated_stack.last().cloned() else {
-        return Err(anyhow::Error::new(diag::eval_isolated_outside_allowlist()));
+        return Err(diag::eval_isolated_outside_allowlist());
     };
     let envs = Arc::make_mut(&mut cx.state.envs);
     for key in keys {

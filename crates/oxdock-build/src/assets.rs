@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
-use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::diagnostics as build_diag;
 use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot};
@@ -194,7 +194,7 @@ fn debug_enabled_from(value: Option<String>) -> bool {
 /// Build-script entry point. On failure prints `error[oxdock]: …` plus the
 /// decorated executor diagnostics to stderr; cargo then aborts before
 /// compiling the consumer.
-pub fn embed_assets(spec: &EmbedSpec) -> Result<()> {
+pub fn embed_assets(spec: &EmbedSpec) -> DiagnosticResult<()> {
     try_embed_assets(spec).inspect_err(|err| {
         eprintln!("error[oxdock]: {err:#}");
     })?;
@@ -203,7 +203,7 @@ pub fn embed_assets(spec: &EmbedSpec) -> Result<()> {
 
 /// Testable core behind [`embed_assets`]: identical behavior but returns the
 /// emitted directive list instead of printing it.
-pub fn try_embed_assets(spec: &EmbedSpec) -> Result<Vec<String>> {
+pub fn try_embed_assets(spec: &EmbedSpec) -> DiagnosticResult<Vec<String>> {
     init();
     if execution_is_skipped() {
         init();
@@ -230,17 +230,20 @@ pub fn try_embed_assets(spec: &EmbedSpec) -> Result<Vec<String>> {
     let resolver = PathResolver::from_manifest_env()?;
     let module_path = module_guarded_path(&out_dir, &module_file_name(&spec.name))?;
     let asset_root = out_dir.join(&spec.subdir_name())?;
-    let assets = gather_assets(&resolver, &asset_root)
-        .map_err(|e| anyhow::Error::new(build_diag::collect_assets_failed(&e)))?;
+    let assets = gather_assets(&resolver, &asset_root).map_err(|e| {
+        let inner = build_diag::from_anyhow(e);
+        build_diag::collect_assets_failed(&inner)
+    })?;
     let name_ident = syn::Ident::new(&spec.name, proc_macro2::Span::call_site());
-    let module = emit_embed_module(&name_ident, &assets)?;
+    let module =
+        emit_embed_module(&name_ident, &assets).map_err(|e| build_diag::from_anyhow(e.into()))?;
     resolver.write_file(&module_path, module.to_string().as_bytes())?;
     Ok(directives)
 }
 
 /// Prepare-only entry point: materializes assets into `$OUT_DIR` but writes
 /// no runtime module.
-pub fn prepare_assets(spec: &PrepareSpec) -> Result<()> {
+pub fn prepare_assets(spec: &PrepareSpec) -> DiagnosticResult<()> {
     try_prepare_assets(spec).inspect_err(|err| {
         eprintln!("error[oxdock]: {err:#}");
     })?;
@@ -248,7 +251,7 @@ pub fn prepare_assets(spec: &PrepareSpec) -> Result<()> {
 }
 
 /// Testable core behind [`prepare_assets`].
-pub fn try_prepare_assets(spec: &PrepareSpec) -> Result<Vec<String>> {
+pub fn try_prepare_assets(spec: &PrepareSpec) -> DiagnosticResult<Vec<String>> {
     init();
     if execution_is_skipped() {
         return Ok(Vec::new());
@@ -266,17 +269,16 @@ fn init() {
     oxdock_fs::init_temp_gc();
 }
 
-fn out_dir_root() -> Result<GuardedPath> {
+fn out_dir_root() -> DiagnosticResult<GuardedPath> {
     let out = std::env::var(oxdock_env::cargo::build::OUT_DIR)
-        .map_err(|err| anyhow::Error::new(build_diag::out_dir_missing(&err)))?;
-    GuardedPath::new_root_from_str(&out)
-        .map_err(|e| anyhow::Error::new(build_diag::invalid_out_dir(&out, &e)))
+        .map_err(|err| build_diag::out_dir_missing(&err))?;
+    GuardedPath::new_root_from_str(&out).map_err(|e| build_diag::invalid_out_dir(&out, &e))
 }
 
-fn module_guarded_path(out_dir: &GuardedPath, rel: &str) -> Result<GuardedPath> {
+fn module_guarded_path(out_dir: &GuardedPath, rel: &str) -> DiagnosticResult<GuardedPath> {
     out_dir
         .join(rel)
-        .map_err(|e| anyhow::Error::new(build_diag::module_path_rejected(&e)))
+        .map_err(|e| build_diag::module_path_rejected(&e))
 }
 
 impl EmbedSpec {
@@ -287,20 +289,19 @@ impl EmbedSpec {
     }
 }
 
-fn script_text(source: DslSource) -> Result<(String, Option<String>)> {
+fn script_text(source: DslSource) -> DiagnosticResult<(String, Option<String>)> {
     match source {
         DslSource::Inline(text) => Ok((text.to_string(), None)),
         DslSource::File(rel) => {
-            let resolver = PathResolver::from_manifest_env().map_err(|err| {
-                anyhow::Error::new(build_diag::manifest_dir_missing_for_dsl_resolution(&err))
-            })?;
+            let resolver = PathResolver::from_manifest_env()
+                .map_err(|err| build_diag::manifest_dir_missing_for_dsl_resolution(&err))?;
             let guarded = resolver
                 .root()
                 .join(rel)
-                .map_err(|e| anyhow::Error::new(build_diag::dsl_path_escapes_manifest(rel, &e)))?;
+                .map_err(|e| build_diag::dsl_path_escapes_manifest(rel, &e))?;
             let text = resolver
                 .read_to_string(&guarded)
-                .map_err(|err| anyhow::Error::new(build_diag::dsl_script_read_failed(rel, &err)))?;
+                .map_err(|err| build_diag::dsl_script_read_failed(rel, &err))?;
             Ok((text, Some(rel.to_string())))
         }
     }
@@ -311,13 +312,15 @@ fn run_spec(
     script: DslSource,
     subdir: &str,
     extra_inputs: &[&'static str],
-) -> Result<Vec<String>> {
+) -> DiagnosticResult<Vec<String>> {
     let (text, file_rel) = script_text(script)?;
 
     // Directives are computed even on the skip path callers may inspect them,
     // but only the non-skip path returns them for emission.
-    let steps = oxdock_core::parse_script(&text)
-        .map_err(|e| anyhow::Error::new(build_diag::script_parse_failed(&e)))?;
+    let steps = oxdock_core::parse_script(&text).map_err(|e| {
+        let inner = build_diag::from_anyhow(e);
+        build_diag::script_parse_failed(&inner)
+    })?;
     let (changed, env_changed) = plan_input_directives(&steps);
 
     let mut directives: Vec<String> = Vec::new();
@@ -331,7 +334,7 @@ fn run_spec(
     // Emitting ANY rerun directive disables cargo's default invalidate-
     // everything, so watching build.rs is mandatory completeness.
     let manifest = std::env::var(oxdock_env::cargo::MANIFEST_DIR)
-        .map_err(|err| anyhow::Error::new(build_diag::manifest_dir_missing_for_directives(&err)))?;
+        .map_err(|err| build_diag::manifest_dir_missing_for_directives(&err))?;
     push(
         &mut directives,
         &mut seen,
@@ -387,22 +390,21 @@ fn join_manifest(manifest: &str, rel: &str) -> String {
 /// contract for such runs: `ensure()` is prohibited here. The output dir is
 /// emitted EMPTY directly, without syncing from any snapshot or (worse) the
 /// live workspace tree.
-fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
+fn build_and_materialize(name: &str, script: &str, subdir: &str) -> DiagnosticResult<()> {
     let debug = debug_enabled_from(std::env::var(oxdock_env::oxdock::EMBED_DEBUG).ok());
 
     // Parse first so LOCAL-only scripts never create a snapshot directory.
-    let steps = oxdock_core::parse_script(script)
-        .map_err(|e| anyhow::Error::new(build_diag::script_parse_failed(&e)))?;
-    let resolver = PathResolver::from_manifest_env()
-        .map_err(|err| anyhow::Error::new(build_diag::manifest_dir_missing(&err)))?;
+    let steps = oxdock_core::parse_script(script).map_err(|e| {
+        let inner = build_diag::from_anyhow(e);
+        build_diag::script_parse_failed(&inner)
+    })?;
+    let resolver =
+        PathResolver::from_manifest_env().map_err(|err| build_diag::manifest_dir_missing(&err))?;
     let workspace_root = oxdock_fs::discover_workspace_root()
-        .map_err(|err| anyhow::Error::new(build_diag::workspace_root_discover_failed(&err)))?;
+        .map_err(|err| build_diag::workspace_root_discover_failed(&err))?;
 
-    let output =
-        run_steps_with_lazy_snapshot(&workspace_root, &steps, ExecIo::new()).map_err(|e| {
-            // Alternate formatting keeps the full chain + filesystem snapshot.
-            anyhow::Error::new(build_diag::script_execution_failed(&e))
-        })?;
+    let output = run_steps_with_lazy_snapshot(&workspace_root, &steps, ExecIo::new())
+        .map_err(|e| build_diag::script_execution_failed(&e))?;
     let final_cwd = output.final_cwd;
 
     if debug {
@@ -424,16 +426,13 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
         // unguarded escape hatch, exactly as in the historical proc-macro flow.
         #[allow(clippy::disallowed_types)]
         let final_external = UnguardedPath::external(final_cwd.as_path().to_path_buf());
-        let meta = resolver.metadata_unguarded(&final_external).map_err(|e| {
-            anyhow::Error::new(build_diag::final_workdir_missing(
-                &final_cwd.display().to_string(),
-                &e,
-            ))
-        })?;
+        let meta = resolver
+            .metadata_unguarded(&final_external)
+            .map_err(|e| build_diag::final_workdir_missing(&final_cwd.display().to_string(), &e))?;
         if !meta.is_dir() {
-            return Err(anyhow::Error::new(build_diag::final_workdir_not_dir(
+            return Err(build_diag::final_workdir_not_dir(
                 &final_cwd.display().to_string(),
-            )));
+            ));
         }
 
         stage_materialize(&resolver, &final_external, &target)?;
@@ -453,7 +452,10 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
 /// except the `.oxdock_hash` cache marker (mirrors `sync_tree`'s stale-entry
 /// removal with an empty source set). Used for `WORKSPACE LOCAL`-only runs,
 /// where `ensure()` is prohibited and no snapshot exists to sync from.
-pub fn clear_materialize_dir(resolver: &PathResolver, target: &GuardedPath) -> Result<()> {
+pub fn clear_materialize_dir(
+    resolver: &PathResolver,
+    target: &GuardedPath,
+) -> DiagnosticResult<()> {
     for entry in resolver.read_dir_entries(target)? {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name == ".oxdock_hash" {
@@ -473,22 +475,19 @@ pub fn clear_materialize_dir(resolver: &PathResolver, target: &GuardedPath) -> R
     Ok(())
 }
 
-fn ensure_materialize_dir(resolver: &PathResolver, target: &GuardedPath) -> Result<()> {
+fn ensure_materialize_dir(resolver: &PathResolver, target: &GuardedPath) -> DiagnosticResult<()> {
     if target.as_path().exists() {
         let kind = resolver.entry_kind(target)?;
         if kind != EntryKind::Dir {
-            return Err(anyhow::Error::new(build_diag::out_dir_target_not_dir(
+            return Err(build_diag::out_dir_target_not_dir(
                 &target.display().to_string(),
-            )));
+            ));
         }
         return Ok(());
     }
-    resolver.create_dir_all(target).map_err(|e| {
-        anyhow::Error::new(build_diag::out_dir_create_failed(
-            &target.display().to_string(),
-            &e,
-        ))
-    })
+    resolver
+        .create_dir_all(target)
+        .map_err(|e| build_diag::out_dir_create_failed(&target.display().to_string(), &e))
 }
 
 /// Typed placeholder used when IDE-skip predicates short-circuit the build:
@@ -522,7 +521,7 @@ pub fn asset_input_fingerprint(
     steps: &[oxdock_parser::Step],
     out_dir_key: &str,
     envs: &HashMap<String, String>,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     let mut hasher = Sha256::new();
     hasher.update(script_text.as_bytes());
     hasher.update(b"\0");
@@ -564,7 +563,7 @@ fn hash_input_path(
     root: &GuardedPath,
     rel: &str,
     hasher: &mut Sha256,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let guarded = root.join(rel)?;
     match resolver.entry_kind(&guarded) {
         // Following inspection resolves links to their targets, so a
@@ -613,7 +612,7 @@ pub fn stage_materialize(
     resolver: &PathResolver,
     final_external: &UnguardedPath,
     target: &GuardedPath,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let stage = target.join(".oxdock-staging")?;
     if resolver.entry_kind(&stage).is_ok() {
         resolver.remove_dir_all(&stage)?;
@@ -622,7 +621,7 @@ pub fn stage_materialize(
 
     resolver
         .copy_dir_from_unguarded(final_external, &stage)
-        .map_err(|e| anyhow::Error::new(build_diag::stage_copy_failed(&e)))?;
+        .map_err(|e| build_diag::stage_copy_failed(&e))?;
     for marker in SANDBOX_MARKERS {
         let marker_path = stage.join(marker)?;
         if resolver.entry_kind(&marker_path).is_ok() {
@@ -644,7 +643,11 @@ pub fn stage_materialize(
 /// present in `dst` but absent from `src` are removed (best-effort, except
 /// `.oxdock_hash`, which is always preserved) so the
 /// destination never accumulates stale artifacts.
-pub fn sync_tree(resolver: &PathResolver, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
+pub fn sync_tree(
+    resolver: &PathResolver,
+    src: &GuardedPath,
+    dst: &GuardedPath,
+) -> DiagnosticResult<()> {
     resolver.create_dir_all(dst)?;
 
     let src_entries = resolver.read_dir_entries(src)?;
@@ -657,7 +660,10 @@ pub fn sync_tree(resolver: &PathResolver, src: &GuardedPath, dst: &GuardedPath) 
         let name = entry.file_name().to_string_lossy().into_owned();
         let src_child = src.join(&name)?;
         let dst_child = dst.join(&name)?;
-        match entry.file_type()? {
+        match entry
+            .file_type()
+            .map_err(|e| build_diag::from_anyhow(e.into()))?
+        {
             ft if ft.is_dir() => {
                 resolver.create_dir_all(&dst_child)?;
                 sync_tree(resolver, &src_child, &dst_child)?;
@@ -772,7 +778,7 @@ mod fingerprint_tests {
     /// without any snapshot. Stale entries are cleared, the `.oxdock_hash`
     /// cache marker is preserved.
     #[test]
-    fn clear_materialize_dir_empties_target_but_keeps_hash() -> Result<()> {
+    fn clear_materialize_dir_empties_target_but_keeps_hash() -> anyhow::Result<()> {
         let (_t, resolver) = ctx();
         let ctx_root = resolver.root().clone();
         let target = ctx_root.join("out-target").unwrap();
@@ -793,7 +799,7 @@ mod fingerprint_tests {
     }
 
     #[test]
-    fn fingerprint_is_deterministic_and_sensitive() -> Result<()> {
+    fn fingerprint_is_deterministic_and_sensitive() -> anyhow::Result<()> {
         // Hermetic: pin the process-level salt away from other parallel tests.
         let _salt = oxdock_sys_test_utils::TestEnvGuard::remove(FINGERPRINT_SALT_ENV);
         let (_t, resolver) = ctx();
@@ -842,7 +848,7 @@ mod fingerprint_tests {
     }
 
     #[test]
-    fn salt_changes_digest_only_when_defined() -> Result<()> {
+    fn salt_changes_digest_only_when_defined() -> anyhow::Result<()> {
         let (_t, resolver) = ctx();
         let steps = parse_script(SCRIPT, test_lower).unwrap();
         let envs: HashMap<String, String> = HashMap::new();
@@ -868,7 +874,7 @@ mod fingerprint_tests {
     }
 
     #[test]
-    fn salt_map_entry_overrides_process_env() -> Result<()> {
+    fn salt_map_entry_overrides_process_env() -> anyhow::Result<()> {
         use oxdock_sys_test_utils::TestEnvGuard;
 
         let (_t, resolver) = ctx();
@@ -910,7 +916,7 @@ mod fingerprint_tests {
     }
 
     #[test]
-    fn guard_referenced_keys_affect_fingerprint() -> Result<()> {
+    fn guard_referenced_keys_affect_fingerprint() -> anyhow::Result<()> {
         // Hermetic: pin the process-level salt away from other parallel tests.
         let _salt = oxdock_sys_test_utils::TestEnvGuard::remove(FINGERPRINT_SALT_ENV);
         let (_t, resolver) = ctx();
@@ -936,7 +942,7 @@ mod staging_tests {
         miri,
         ignore = "GuardedPath::tempdir and stage_materialize use real filesystem ops"
     )]
-    fn staged_materialize_overwrites_removes_stale_and_strips_markers() -> Result<()> {
+    fn staged_materialize_overwrites_removes_stale_and_strips_markers() -> anyhow::Result<()> {
         let temp = GuardedPath::tempdir()?;
         let root = temp.as_guarded_path().clone();
         let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;

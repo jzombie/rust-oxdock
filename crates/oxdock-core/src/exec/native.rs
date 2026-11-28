@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
-use oxdock_diagnostics::DiagnosticResult;
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 use oxdock_fs::to_forward_slashes;
 use oxdock_fs::{GuardedPath, WorkspaceSelection};
 use oxdock_func_macro::oxdock_func;
@@ -435,7 +435,11 @@ pub(super) fn const_holder_files<S: ModuleGraphView>(
 /// Failure modes of [`chase_const_forward`], rendered by each caller
 /// with its own position context (static line/col, runtime none,
 /// eager file attribution). Wording lives here once, on [`std::fmt::Display`],
-/// so diagnostics cannot drift between the twins.
+/// so diagnostics cannot drift between the twins. The walk
+/// returns the keyed diagnostic directly ([`DiagnosticResult`]);
+/// [`forward_failed`] is the single conversion from wording to
+/// key, so no `anyhow` carrier sits between the walk and its
+/// callers.
 #[derive(Debug)]
 pub(super) enum ForwardError {
     /// The holder file itself is gone from the view.
@@ -518,7 +522,13 @@ impl std::fmt::Display for ForwardError {
     }
 }
 
-impl std::error::Error for ForwardError {}
+/// Single conversion from `ForwardError` wording to key: the walk
+/// builds the `dsl.import.const_forward_failed` diagnostic at
+/// each failure site, so callers receive [`DiagnosticResult`]
+/// with no `anyhow` carrier in between.
+fn forward_failed(err: ForwardError) -> Diagnostic {
+    std_diag::import_const_forward_failed(&err.to_string())
+}
 
 /// Follow qualified `EXPORT CONST $ALIAS::NAME` forwards from `file`
 /// to the files holding the stored bare binding, resolving each hop
@@ -531,7 +541,7 @@ pub(super) fn chase_const_forward<S: ModuleGraphView>(
     file: &str,
     name: &str,
     original: &str,
-) -> Result<Vec<String>, ForwardError> {
+) -> DiagnosticResult<Vec<String>> {
     let mut terminals: Vec<String> = Vec::new();
     chase_from(view, file, name, original, &mut Vec::new(), &mut terminals)?;
     terminals.sort();
@@ -546,7 +556,7 @@ fn chase_from<S: ModuleGraphView>(
     original: &str,
     chain: &mut Vec<String>,
     terminals: &mut Vec<String>,
-) -> Result<(), ForwardError> {
+) -> DiagnosticResult<()> {
     let suffix = const_canonical_suffix(name);
     let covering = |canonical: &str| {
         canonical
@@ -557,9 +567,9 @@ fn chase_from<S: ModuleGraphView>(
     let mut current = current.to_string();
     loop {
         let Some(names) = view.const_exports(current.as_str()) else {
-            return Err(ForwardError::Unknown {
+            return Err(forward_failed(ForwardError::Unknown {
                 original: original.to_string(),
-            });
+            }));
         };
         if names.iter().any(|entry| entry == name) {
             terminals.push(current);
@@ -576,9 +586,9 @@ fn chase_from<S: ModuleGraphView>(
         }
         if aliases.is_empty() {
             if chain.is_empty() {
-                return Err(ForwardError::Unknown {
+                return Err(forward_failed(ForwardError::Unknown {
                     original: original.to_string(),
-                });
+                }));
             }
             let hop = chain.last().expect("chain never empty").clone();
             let detail = match view.binding(current.as_str(), name) {
@@ -586,46 +596,50 @@ fn chase_from<S: ModuleGraphView>(
                 BindingPresence::Let => BrokenDetail::Let,
                 BindingPresence::Absent => BrokenDetail::Absent,
             };
-            return Err(ForwardError::Broken {
+            return Err(forward_failed(ForwardError::Broken {
                 original: original.to_string(),
                 hop,
                 detail,
-            });
+            }));
         }
         if aliases.len() > 1 {
             let mut hops: Vec<String> = aliases.iter().map(|alias| qualify(alias, name)).collect();
             hops.sort();
-            return Err(ForwardError::Split {
+            return Err(forward_failed(ForwardError::Split {
                 original: original.to_string(),
                 hops,
-            });
+            }));
         }
         let forward = aliases[0];
         let hop = qualify(forward, name);
         if chain.contains(&hop) {
             chain.push(hop);
-            return Err(ForwardError::Cycle {
+            return Err(forward_failed(ForwardError::Cycle {
                 chain: chain.clone(),
-            });
+            }));
         }
         chain.push(hop.clone());
         let targets = view.alias_targets(current.as_str());
         match classify_alias_call(&targets, &hop, &covering) {
             AliasResolution::Global | AliasResolution::Unknown => {
-                return Err(ForwardError::Broken {
+                return Err(forward_failed(ForwardError::Broken {
                     original: original.to_string(),
                     hop,
                     detail: BrokenDetail::Absent,
-                });
+                }));
             }
             AliasResolution::Ambiguous { alias, base, files } => {
-                return Err(ForwardError::HopAmbiguous { alias, base, files });
+                return Err(forward_failed(ForwardError::HopAmbiguous {
+                    alias,
+                    base,
+                    files,
+                }));
             }
             AliasResolution::Canonical(canonical) => {
                 let Some(next) = canonical.strip_suffix(suffix.as_str()) else {
-                    return Err(ForwardError::Unknown {
+                    return Err(forward_failed(ForwardError::Unknown {
                         original: original.to_string(),
-                    });
+                    }));
                 };
                 current = next.to_string();
             }
@@ -641,11 +655,11 @@ fn chase_from<S: ModuleGraphView>(
                 covering.sort();
                 match covering.len() {
                     0 => {
-                        return Err(ForwardError::Broken {
+                        return Err(forward_failed(ForwardError::Broken {
                             original: original.to_string(),
                             hop,
                             detail: BrokenDetail::Absent,
-                        });
+                        }));
                     }
                     1 => {
                         current = covering.into_iter().next().expect("len checked");
@@ -3250,8 +3264,9 @@ type CliSpecs = BTreeMap<String, CliSpec>;
 /// Checked `LIST<STRING>` extraction for the CLI trio. Single owner
 /// so all three functions admit exactly the same argv shape.
 fn string_list_arg(val: &Value, what: &str) -> DiagnosticResult<Vec<String>> {
-    crate::check_value_at(&TypeTag::ListOf(Arc::new(TypeTag::String)), val, what)
-        .map_err(|err| std_diag::std_parse_args_arg_shape(&err))?;
+    crate::check_value_at(&TypeTag::ListOf(Arc::new(TypeTag::String)), val, what).map_err(
+        |err| std_diag::std_parse_args_arg_shape(&super::args::lift_dispatch_error(err)),
+    )?;
     Ok(val
         .as_list()
         .expect("check_value_at enforces LIST")
@@ -3372,7 +3387,7 @@ fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> DiagnosticResu
     let tag = cx
         .state
         .resolve_tag(name)
-        .map_err(|err| std_diag::std_parse_args_schema_type(name, &anyhow::Error::new(err)))?;
+        .map_err(|err| std_diag::std_parse_args_schema_type(name, &err))?;
     let TypeTag::Record(fields) = tag else {
         return Err(std_diag::std_parse_args_schema_shape(name));
     };

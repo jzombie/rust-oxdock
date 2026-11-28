@@ -133,14 +133,14 @@ fn run_cli_steps(
     #[cfg(not(feature = "net"))] registry: Option<&Arc<()>>,
     entry_file: Option<GuardedPath>,
 ) -> Result<oxdock_core::exec::LazyRunOutput> {
-    run_steps_with_lazy_snapshot_and_modules_and_entry(
+    Ok(run_steps_with_lazy_snapshot_and_modules_and_entry(
         workspace_root,
         steps,
         io,
         cli_host_modules_with(registry),
         cli_host_types(),
         entry_file,
-    )
+    )?)
 }
 
 /// Parse a CLI script against STD plus any bundled host modules. Without
@@ -299,7 +299,8 @@ fn print_dry_run(
 
 pub fn run() -> Result<()> {
     init_temp_gc();
-    let workspace_root = discover_workspace_root().map_err(|e| errors::guard_workspace_root(&e))?;
+    let workspace_root = discover_workspace_root()
+        .map_err(|e| errors::guard_workspace_root(&anyhow::Error::from(e)))?;
 
     let mut args = std::env::args().skip(1);
     // `--help`/`-h` and `--version`/`-V` surface as text in the parse
@@ -473,9 +474,9 @@ impl Options {
                     } else {
                         reject_url_script(&path)?;
                         script = Some(ScriptSource::Path(
-                            workspace_root
-                                .join_script(&path)
-                                .map_err(|e| errors::guard_script_path(&path, &e))?,
+                            workspace_root.join_script(&path).map_err(|e| {
+                                errors::guard_script_path(&path, &anyhow::Error::from(e))
+                            })?,
                         ));
                     }
                     // After the script, stop option parsing entirely:
@@ -589,9 +590,9 @@ impl Options {
                     }
                     reject_url_script(&text)?;
                     script = Some(ScriptSource::Path(
-                        workspace_root
-                            .join_script(&text)
-                            .map_err(|e| errors::guard_script_path(&text, &e))?,
+                        workspace_root.join_script(&text).map_err(|e| {
+                            errors::guard_script_path(&text, &anyhow::Error::from(e))
+                        })?,
                     ));
                     script_args = drain_tail(&mut parser, true)?;
                     break;
@@ -852,9 +853,9 @@ fn read_script(source: &ScriptSource) -> Result<String> {
     match source {
         ScriptSource::Path(path) => {
             let resolver = PathResolver::new(path.root(), path.root())?;
-            resolver
-                .read_to_string(path)
-                .map_err(|e| errors::read_script_at(&path.display().to_string(), &e))
+            resolver.read_to_string(path).map_err(|e| {
+                errors::read_script_at(&path.display().to_string(), &anyhow::Error::new(e))
+            })
         }
         ScriptSource::Stdin => {
             let mut buf = String::new();
@@ -990,14 +991,14 @@ where
                 if fs.is_snapshot_pending() {
                     snapshot
                         .materialize()
-                        .map_err(|e| errors::create_shell_temp_dir(&e))?;
+                        .map_err(|e| errors::create_shell_temp_dir(&anyhow::Error::from(e)))?;
                 }
                 final_cwd = fs.concretize_cwd(&final_cwd);
             }
             None => {
                 snapshot
                     .materialize()
-                    .map_err(|e| errors::create_shell_temp_dir(&e))?;
+                    .map_err(|e| errors::create_shell_temp_dir(&anyhow::Error::from(e)))?;
                 final_cwd = snapshot
                     .get()
                     .cloned()
@@ -1091,7 +1092,11 @@ fn maybe_reexec_shell_to_temp(opts: &Options) -> Result<()> {
 }
 
 pub fn run_script(workspace_root: &GuardedPath, steps: &[Step]) -> Result<()> {
-    run_steps_with_context(workspace_root, workspace_root, steps)
+    Ok(run_steps_with_context(
+        workspace_root,
+        workspace_root,
+        steps,
+    )?)
 }
 
 fn shell_banner(cwd: &GuardedPath, workspace_root: &GuardedPath) -> String {
@@ -2246,19 +2251,25 @@ mod tests {
 
     #[test]
     fn process_exit_code_relays_exit_requests() {
-        let exit = anyhow::Error::new(ExitRequest(3));
+        let exit = anyhow::Error::new(ExitRequest::new(3));
         assert_eq!(process_exit_code(&exit), 3);
         let relayed =
-            anyhow::Error::new(ExitRequest(3)).context("REMOTE 'prod' exited with code 3");
+            anyhow::Error::new(ExitRequest::new(3)).context("REMOTE 'prod' exited with code 3");
         assert_eq!(process_exit_code(&relayed), 3);
+        let keyed = anyhow::Error::new(oxdock_core::exec::diagnostics::eval_exit_requested(3));
+        assert_eq!(process_exit_code(&keyed), 3);
+        let keyed_wrapped =
+            anyhow::Error::new(oxdock_core::exec::diagnostics::eval_exit_requested(3))
+                .context("step 1");
+        assert_eq!(process_exit_code(&keyed_wrapped), 3);
         assert_eq!(process_exit_code(&anyhow::anyhow!("boom")), 1);
         assert_eq!(
-            process_exit_code(&anyhow::Error::new(ExitRequest(300))),
+            process_exit_code(&anyhow::Error::new(ExitRequest::new(300))),
             255,
             "codes clamp to the portable range"
         );
         assert_eq!(
-            process_exit_code(&anyhow::Error::new(ExitRequest(-1))),
+            process_exit_code(&anyhow::Error::new(ExitRequest::new(-1))),
             0,
             "negative codes clamp to zero"
         );

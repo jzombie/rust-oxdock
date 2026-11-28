@@ -52,8 +52,9 @@ pub fn check_options(
             .iter()
             .find(|known| known.name == *key)
             .expect("unknown keys rejected above");
-        crate::check_value_at(&option.value, value, &format!("{func}() option '{key}'"))
-            .map_err(|err| typing_diag::check_option_value(&err))?;
+        crate::check_value_at(&option.value, value, &format!("{func}() option '{key}'")).map_err(
+            |err| typing_diag::check_option_value(&super::args::lift_dispatch_error(err)),
+        )?;
     }
     Ok(())
 }

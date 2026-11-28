@@ -1,6 +1,5 @@
 use super::*;
 
-use anyhow::bail;
 use indoc::indoc;
 use oxdock_fs::{EntryKind, GuardedPath, MockFs, WorkspaceFs, to_forward_slashes};
 use oxdock_parser::{Expr, Guard, GuardExpr, IoBinding, IoStream, STD_MODULE_NAME, StepKind};
@@ -23,6 +22,7 @@ fn run_expect_err<P: ProcessManager>(
 ) -> anyhow::Error {
     run_steps_with_manager(fs, steps, process, ExecIo::new())
         .map(|_| ())
+        .map_err(anyhow::Error::from)
         .unwrap_err()
 }
 
@@ -2008,13 +2008,15 @@ impl ProcessManager for FailingRunner {
         ctx: &CommandContext,
         script: &str,
         options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>> {
+    ) -> DiagnosticResult<CommandResult<Self::Handle>> {
         self.calls
             .lock()
             .expect("poisoned")
             .push(script.to_string());
         if script == self.fail_script {
-            bail!("simulated failure")
+            return Err(diagnostics::eval_dispatch_failed(
+                &diagnostics::reason_sample("simulated failure"),
+            ));
         }
         if options.mode == CommandMode::Background {
             // Delegate spawns so we get kill-logging mock handles.
@@ -3649,7 +3651,7 @@ impl ProcessManager for BlockingRunner {
         _ctx: &CommandContext,
         script: &str,
         options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>, anyhow::Error> {
+    ) -> DiagnosticResult<CommandResult<Self::Handle>> {
         match options.mode {
             CommandMode::Foreground => Ok(CommandResult::Completed),
             CommandMode::Background => Ok(CommandResult::Background(BlockingHandle {
@@ -3662,7 +3664,7 @@ impl ProcessManager for BlockingRunner {
 }
 
 impl BackgroundHandle for BlockingHandle {
-    fn try_wait(&mut self) -> Result<Option<ExitStatus>, anyhow::Error> {
+    fn try_wait(&mut self) -> oxdock_diagnostics::DiagnosticResult<Option<ExitStatus>> {
         let (lock, _) = &*self.state;
         if *lock.lock().unwrap() {
             Ok(Some(exit_status_from_code(137)))
@@ -3671,7 +3673,7 @@ impl BackgroundHandle for BlockingHandle {
         }
     }
 
-    fn kill(&mut self) -> Result<(), anyhow::Error> {
+    fn kill(&mut self) -> oxdock_diagnostics::DiagnosticResult<()> {
         self.kills.lock().unwrap().push(self.script.clone());
         let (lock, cvar) = &*self.state;
         *lock.lock().unwrap() = true;
@@ -3679,7 +3681,7 @@ impl BackgroundHandle for BlockingHandle {
         Ok(())
     }
 
-    fn wait(&mut self) -> Result<ExitStatus, anyhow::Error> {
+    fn wait(&mut self) -> oxdock_diagnostics::DiagnosticResult<ExitStatus> {
         let (lock, cvar) = &*self.state;
         let mut done = lock.lock().unwrap();
         while !*done {
@@ -11723,5 +11725,45 @@ fn missing_import_hint_names_exporter_and_spelling() {
     assert!(
         hint.contains("[FUNC OUT_DIR FROM \"C:/proj/shared.oxfile\"]"),
         "forward-slash FROM path, got: {hint}"
+    );
+}
+
+#[test]
+fn snapshot_outer_preserves_keyed_exit_and_text() {
+    let leaf =
+        diagnostics::eval_exit_requested(3).with_span(oxdock_diagnostics::Span::line_col(9, 1));
+    let diag = leaf.with_contexts(vec!["step 1, line 9".to_string()]);
+    let snapshot = "filesystem snapshot: never materialized (no snapshot directory was created)";
+    let out = error_with_snapshot(diag, snapshot.to_string());
+    assert_eq!(exit::exit_code_of_diag(&out), Some(3));
+    assert_eq!(out.key(), "dsl.eval.exit_requested");
+    assert_eq!(out.snapshot(), Some(snapshot));
+    let span = out.span().expect("span survives on the head");
+    assert_eq!((span.line, span.col_start), (9, Some(1)));
+    let expected = format!("step 1, line 9 (EXIT requested with code 3)\n{snapshot}");
+    assert_eq!(out.to_string(), expected);
+    assert_eq!(format!("{out:#}"), expected);
+}
+
+#[test]
+fn snapshot_outer_keeps_bare_request_shape() {
+    let diag = diagnostics::eval_exit_requested(7);
+    let snapshot = "filesystem snapshot: pending";
+    let out = error_with_snapshot(diag, snapshot.to_string());
+    assert_eq!(exit::exit_code_of_diag(&out), Some(7));
+    let expected = format!("EXIT requested with code 7\n{snapshot}");
+    assert_eq!(out.to_string(), expected);
+    assert_eq!(format!("{out:#}"), expected);
+}
+
+#[test]
+fn snapshot_outer_without_exit_has_no_source() {
+    let diag = diagnostics::eval_dispatch_failed(&diagnostics::reason_sample("boom"));
+    let out = error_with_snapshot(diag, "filesystem snapshot: pending".to_string());
+    assert_eq!(exit::exit_code_of_diag(&out), None);
+    assert_eq!(out.to_string(), "boom\nfilesystem snapshot: pending");
+    assert!(
+        std::error::Error::source(&out).is_none(),
+        "sourceless stays single: {out:#}"
     );
 }

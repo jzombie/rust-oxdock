@@ -1368,7 +1368,9 @@ fn with_io_routes_stdout_into_later_stdin() {
 
 fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
     let steps = oxdock_core::parse_script(script).expect("parse script");
-    run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
+    run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new())
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
 }
 
 fn run_script_headless(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
@@ -1387,6 +1389,7 @@ fn run_script_with_process<P: oxdock_process::ProcessManager>(
     let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
     oxdock_core::run_steps_with_manager(Box::new(resolver), &steps, process, ExecIo::new())
         .map(|_| ())
+        .map_err(anyhow::Error::from)
 }
 
 /// Reports a host TTY while running everything else through the mock.
@@ -1406,7 +1409,7 @@ impl oxdock_process::ProcessManager for TtyManager {
         ctx: &oxdock_process::CommandContext,
         script: &str,
         options: oxdock_process::CommandOptions,
-    ) -> anyhow::Result<oxdock_process::CommandResult<Self::Handle>> {
+    ) -> oxdock_diagnostics::DiagnosticResult<oxdock_process::CommandResult<Self::Handle>> {
         self.0.run_command(ctx, script, options)
     }
 }
@@ -4896,7 +4899,9 @@ fn run_script_captured(
     let mut io_cfg = ExecIo::new();
     io_cfg.set_stdout(Some(out.clone()));
     io_cfg.set_stderr(Some(err.clone()));
-    let res = run_steps_with_context_result_with_io(root, root, &steps, io_cfg).map(|_| ());
+    let res = run_steps_with_context_result_with_io(root, root, &steps, io_cfg)
+        .map(|_| ())
+        .map_err(anyhow::Error::from);
     let out_s = String::from_utf8(out.lock().unwrap().clone()).unwrap();
     let err_s = String::from_utf8(err.lock().unwrap().clone()).unwrap();
     (res, out_s, err_s)

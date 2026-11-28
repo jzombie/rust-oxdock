@@ -41,7 +41,7 @@ fn read_import_bytes(fs: &dyn WorkspaceFs, resolved: &GuardedPath) -> Result<Vec
             #[cfg(miri)]
             {
                 let _ = resolved;
-                Err(first)
+                Err(anyhow::Error::from(first))
             }
             #[cfg(not(miri))]
             {
@@ -54,15 +54,15 @@ fn read_import_bytes(fs: &dyn WorkspaceFs, resolved: &GuardedPath) -> Result<Vec
                 // Missing files fail here too; return the original
                 // workspace error to preserve the containment message.
                 if !fs.is_host_backed() {
-                    return Err(first);
+                    return Err(anyhow::Error::from(first));
                 }
                 let root = resolved.root();
                 match oxdock_fs::PathResolver::new(root, root) {
                     Ok(fallback) => match fallback.read_file(resolved) {
                         Ok(bytes) => Ok(bytes),
-                        Err(_) => Err(first),
+                        Err(_) => Err(anyhow::Error::from(first)),
                     },
-                    Err(_) => Err(first),
+                    Err(_) => Err(anyhow::Error::from(first)),
                 }
             }
         }
@@ -374,8 +374,8 @@ fn read_and_parse_import(
     path: &str,
     table: &ModuleTable,
 ) -> DiagnosticResult<Vec<Step>> {
-    let bytes =
-        read_import_bytes(fs, resolved).map_err(|e| import_diag::import_cannot_read(path, &e))?;
+    let bytes = read_import_bytes(fs, resolved)
+        .map_err(|e| import_diag::import_cannot_read(path, &super::args::lift_dispatch_error(e)))?;
     let text = std::str::from_utf8(&bytes).map_err(|e| import_diag::import_bad_utf8(path, &e))?;
     let table = table.clone();
     let mut reserved = super::native::builtin_function_names();
@@ -446,7 +446,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
     alias: Option<&str>,
     func_names: &[String],
     type_names: &[String],
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     // Host plugin types use the same `IMPORT [TYPE X FROM MOD]` syntax as
     // script types: when the path names a known host module (not a file)
     // and only types are harvested, validate the types resolve globally
@@ -462,9 +462,9 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         let file_exists = top_level_file_exists(cx.state, &base, &stack, path);
         if !file_exists && cx.state.module_table.modules.contains_key(path) {
             for name in type_names {
-                cx.state.resolve_tag(name).map_err(|e| {
-                    anyhow::Error::new(import_diag::import_unknown_type(path, name, Some(e)))
-                })?;
+                cx.state
+                    .resolve_tag(name)
+                    .map_err(|e| import_diag::import_unknown_type(path, name, Some(e)))?;
             }
             if let Some(alias) = alias {
                 // Harvest aliases register like file imports; no funcs
@@ -493,7 +493,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
     // importer-relative resolution.
     cx.state.import_stack.push(resolved.clone());
     let saved_aliases = cx.state.type_aliases.clone();
-    let outcome: Result<()> = (|| {
+    let outcome: DiagnosticResult<()> = (|| {
         let aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
         for (name, target) in aliases {
             cx.state.register_alias(name, target);
@@ -513,9 +513,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             super::static_check::harvest_touches_module(cx.state, &key, &steps, func_names)
                 .map_err(|e| import_diag::import_failed_validation(path, e))?
         {
-            return Err(anyhow::Error::new(import_diag::import_stateful_harvest(
-                path, &offender,
-            )));
+            return Err(import_diag::import_stateful_harvest(path, &offender));
         }
         for name in func_names {
             // Harvest validity lives in `gate_harvested_name` (single
@@ -537,9 +535,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             }) else {
                 // Gated above: the scan already proved the def exists.
                 // This preserves loud failure without restating it.
-                return Err(anyhow::Error::new(import_diag::import_unknown_function(
-                    path, name,
-                )));
+                return Err(import_diag::import_unknown_function(path, name));
             };
             let resolved_params = resolve_script_params(cx.state, name, &def.0)?;
             let return_tag = cx.state.resolve_tag(&def.1)?;
@@ -601,9 +597,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                 // keeps loud failure instead of restating the scan.
                 gate_harvested_name(ExportKind::Type, &steps, &exports, name, path)?;
                 let Some(target) = file_aliases.get(name) else {
-                    return Err(anyhow::Error::new(import_diag::import_unknown_type(
-                        path, name, None,
-                    )));
+                    return Err(import_diag::import_unknown_type(path, name, None));
                 };
                 insert_imported_type(cx.state, name, target, alias, path)?;
             }
@@ -612,7 +606,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         // file on the context stack, so unit attribution matches the
         // static pass.
         cx.state.module_stack.push(Some(key.clone()));
-        let mut nested_cause: Option<anyhow::Error> = None;
+        let mut nested_cause: Option<oxdock_diagnostics::Diagnostic> = None;
         for step in &steps {
             match &step.kind {
                 StepKind::ImportFile { path, alias } => {
@@ -680,9 +674,9 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             // idempotent, differing targets fail naming both files.
             if let Some(existing) = cx.state.type_aliases.get(&name) {
                 if existing != &target {
-                    return Err(anyhow::Error::new(import_diag::import_type_collision(
+                    return Err(import_diag::import_type_collision(
                         path, &name, existing, &target,
-                    )));
+                    ));
                 }
             } else {
                 cx.state.register_alias(name, target);
@@ -853,7 +847,7 @@ fn ensure_module_init<P: ProcessManager>(
     resolved: &GuardedPath,
     steps: &[Step],
     path: &str,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     // Cached init: every alias shares the first run's state and
     // `RETURN`. Nothing pushed below, so unwinds stay balanced.
     if let Some(init) = cx
@@ -874,7 +868,7 @@ fn ensure_module_init<P: ProcessManager>(
     let saved_consts = std::mem::take(&mut cx.state.const_scopes);
     let saved_aliases = cx.state.type_aliases.clone();
     let saved_isolated = std::mem::take(&mut cx.state.isolated_stack);
-    let outcome: Result<Value> = (|| {
+    let outcome: DiagnosticResult<Value> = (|| {
         let aliases = super::typing::collect_type_aliases(steps, cx.state)?;
         for (name, target) in aliases {
             cx.state.register_alias(name, target);
@@ -975,13 +969,17 @@ fn ensure_module_init<P: ProcessManager>(
             Flow::Done => Value::string(String::new()),
             Flow::Return { value, .. } => value,
             Flow::Break { idx } => {
-                return Err(anyhow::Error::new(
-                    import_diag::import_flow_crosses_boundary("BREAK", idx + 1, path),
+                return Err(import_diag::import_flow_crosses_boundary(
+                    "BREAK",
+                    idx + 1,
+                    path,
                 ));
             }
             Flow::Continue { idx } => {
-                return Err(anyhow::Error::new(
-                    import_diag::import_flow_crosses_boundary("CONTINUE", idx + 1, path),
+                return Err(import_diag::import_flow_crosses_boundary(
+                    "CONTINUE",
+                    idx + 1,
+                    path,
                 ));
             }
         };
@@ -1021,7 +1019,7 @@ fn ensure_module_init<P: ProcessManager>(
         });
         Ok(value)
     })();
-    let pop_res = cx.state.pop_scope().map_err(anyhow::Error::from);
+    let pop_res = cx.state.pop_scope();
     let _ = cx.state.func_floors.pop();
     let init_depth = cx.state.scope_stack.len() + 1;
     cx.state
@@ -1043,7 +1041,7 @@ pub(crate) fn import_file<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
     alias: &str,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     let LoadedFile {
         resolved,
         steps,
@@ -1060,7 +1058,7 @@ pub(crate) fn import_file<P: ProcessManager>(
     let saved_aliases = cx.state.type_aliases.clone();
     // Phase 1 (no pushes): merge aliases, validate, register views.
     // Runs on every import so new aliases attach and bodies re-check.
-    let phase_one: Result<Option<Value>> = (|| {
+    let phase_one: DiagnosticResult<Option<Value>> = (|| {
         let aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
         for (name, target) in &aliases {
             cx.state.register_alias(name.clone(), target.clone());
@@ -1625,7 +1623,7 @@ fn load_file<P: ProcessManager>(
         });
     }
     let bytes = read_import_bytes(state.fs.as_ref(), &resolved)
-        .map_err(|e| import_diag::import_cannot_read(path, &e))?;
+        .map_err(|e| import_diag::import_cannot_read(path, &super::args::lift_dispatch_error(e)))?;
     let text = std::str::from_utf8(&bytes).map_err(|e| import_diag::import_bad_utf8(path, &e))?;
     let table = state.module_table.clone();
     let mut reserved = super::native::builtin_function_names();
@@ -2039,8 +2037,7 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
     // included (the clone below shares the frozen buffer). Runtime
     // targets carry no guards, so disjoint branches cannot co-exist
     // here: several terminals fail loud like several holders.
-    let mut terminals = chase_const_forward(state, &file, name, &qualified)
-        .map_err(|err| import_diag::import_const_forward_failed(&anyhow::Error::new(err)))?;
+    let mut terminals = chase_const_forward(state, &file, name, &qualified)?;
     if terminals.len() > 1 {
         let files: std::collections::HashSet<String> = terminals.drain(..).collect();
         return Err(import_diag::import_const_ambiguous(alias, name, &files));

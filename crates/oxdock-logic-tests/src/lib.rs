@@ -9,8 +9,9 @@ pub mod recording;
 ///
 /// In-process trial runners synthesize stderr with this helper so `expect`
 /// assertions evaluate identical text across in-process (Tier 1/2) and
-/// external-binary (Tier 3) execution paths.
-pub fn format_fixture_stderr(err: &anyhow::Error) -> String {
+/// external-binary (Tier 3) execution paths. Takes `Display` so both the
+/// keyed diagnostic and any anyhow carrier render through one helper.
+pub fn format_fixture_stderr(err: &dyn std::fmt::Display) -> String {
     format!("fixture failed: {err:#}")
 }
 
@@ -1088,7 +1089,7 @@ pub mod harness {
         // PathResolver::new creates a missing root (see Backend::new), so
         // this both creates and guards in one step.
         let _resolver = PathResolver::new(path, path)?;
-        GuardedPath::new_root(path)
+        Ok(GuardedPath::new_root(path)?)
     }
 
     fn ensure_target_dir_guarded(path: &GuardedPath) -> Result<GuardedPath> {
@@ -1474,7 +1475,7 @@ pub mod expectations {
 
     pub fn assert_error_matches(
         expectation: &ErrorExpectation,
-        err: &anyhow::Error,
+        err: &dyn std::fmt::Display,
         context: &str,
     ) -> Result<()> {
         assert_text_matches(expectation, &err.to_string(), context)

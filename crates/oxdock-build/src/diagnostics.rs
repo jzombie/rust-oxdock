@@ -4,10 +4,11 @@
 //! the generic [`oxdock_diagnostics::Diagnostic`] transport but owns its
 //! wording: changing build text happens here, never at the call sites.
 //! Call sites pass structured data only, never `format!` strings.
-//! Chain passthroughs render `{reason:#}` inline (never `with_source`,
+//! Chain passthroughs render the flattened chain inline (never `with_source`,
 //! since `Display` does not render `source` and `anyhow` would print a
 //! chained source twice).
 
+use oxdock_core::exec::diagnostics::flatten_chain;
 use oxdock_diagnostics::Diagnostic;
 use oxdock_fs::env as oxdock_env;
 
@@ -21,10 +22,11 @@ const FIELD_TARGET: &str = "target";
 const FIELD_WORKDIR: &str = "workdir";
 
 /// Asset collection from the materialized tree failed. Takes the
-/// underlying failure; `{reason:#}` formatting lives here so call
-/// sites stay `format!`-free.
-pub fn collect_assets_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+/// underlying failure; the flattened chain lives here so call sites
+/// stay `format!`-free. Sourceless inlining wrapper (same shape as
+/// the `exec` inlining family): the chain text is the message.
+pub fn collect_assets_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("failed to collect assets: {reason_text}");
     Diagnostic::new(
         "build.assets.collect_failed",
@@ -36,8 +38,8 @@ pub fn collect_assets_failed(reason: &anyhow::Error) -> Diagnostic {
 /// `$OUT_DIR` does not name a guarded root. Takes the raw value plus
 /// the underlying failure; the `OUT_DIR` spelling derives from the
 /// declared env contract, never a literal.
-pub fn invalid_out_dir(out: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn invalid_out_dir(out: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!(
         "invalid {} {out}: {reason_text}",
         oxdock_env::cargo::build::OUT_DIR,
@@ -50,9 +52,9 @@ pub fn invalid_out_dir(out: &str, reason: &anyhow::Error) -> Diagnostic {
 }
 
 /// Generated module path rejected by the guard. Takes the underlying
-/// failure; `{reason:#}` formatting lives here.
-pub fn module_path_rejected(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+/// failure; the flattened chain lives here.
+pub fn module_path_rejected(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("generated module path rejected: {reason_text}");
     Diagnostic::new(
         "build.module.path_rejected",
@@ -63,8 +65,8 @@ pub fn module_path_rejected(reason: &anyhow::Error) -> Diagnostic {
 
 /// DSL file path escapes the manifest dir. Takes the relative path
 /// plus the underlying failure; quoting lives here.
-pub fn dsl_path_escapes_manifest(rel: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn dsl_path_escapes_manifest(rel: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("DSL path {rel} escapes manifest dir: {reason_text}");
     Diagnostic::new(
         "build.script.escapes_manifest",
@@ -74,10 +76,10 @@ pub fn dsl_path_escapes_manifest(rel: &str, reason: &anyhow::Error) -> Diagnosti
 }
 
 /// DSL text failed to parse. Takes the underlying failure;
-/// `{reason:#}` formatting lives here so call sites stay
+/// the flattened chain lives here so call sites stay
 /// `format!`-free. Shared by both parse sites (one key, one mode).
-pub fn script_parse_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn script_parse_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("parse error: {reason_text}");
     Diagnostic::new(
         "build.script.parse_failed",
@@ -87,9 +89,9 @@ pub fn script_parse_failed(reason: &anyhow::Error) -> Diagnostic {
 }
 
 /// DSL execution failed. Takes the underlying failure; the full
-/// chain (`{reason:#}`) lives here.
-pub fn script_execution_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+/// flattened chain lives here.
+pub fn script_execution_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("execution error: {reason_text}");
     Diagnostic::new(
         "build.script.execution_failed",
@@ -100,8 +102,8 @@ pub fn script_execution_failed(reason: &anyhow::Error) -> Diagnostic {
 
 /// Final workdir missing after the build. Takes the display path plus
 /// the underlying failure; rendering lives here.
-pub fn final_workdir_missing(workdir: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn final_workdir_missing(workdir: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("final workdir missing after build: {workdir} ({reason_text})");
     Diagnostic::new(
         "build.workdir.missing",
@@ -138,8 +140,8 @@ pub fn out_dir_target_not_dir(target: &str) -> Diagnostic {
 
 /// Materialize target could not be created. Takes the display path
 /// plus the underlying failure; rendering lives here.
-pub fn out_dir_create_failed(target: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn out_dir_create_failed(target: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("failed to create {target}: {reason_text}");
     Diagnostic::new(
         "build.out_dir.create_failed",
@@ -149,8 +151,8 @@ pub fn out_dir_create_failed(target: &str, reason: &anyhow::Error) -> Diagnostic
 }
 
 /// `$OUT_DIR` is unset (not running as a build script). Takes the
-/// concrete env failure (chainless, so `{reason:#}` equals the
-/// `Display`); the `OUT_DIR` spelling derives from the declared env
+/// concrete env failure (chainless, so the `Display` equals the
+/// flattened text); the `OUT_DIR` spelling derives from the declared env
 /// contract, never a literal.
 pub fn out_dir_missing(reason: &std::env::VarError) -> Diagnostic {
     let reason_text = reason.to_string();
@@ -169,8 +171,8 @@ pub fn out_dir_missing(reason: &std::env::VarError) -> Diagnostic {
 /// Takes the wrapped resolver failure; the chain renders inline.
 /// Distinct key from the sibling manifest-dir ctors below: the retired
 /// context wordings differ, and bytes stay identical.
-pub fn manifest_dir_missing_for_dsl_resolution(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn manifest_dir_missing_for_dsl_resolution(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!(
         "{} missing for DSL resolution: {reason_text}",
         oxdock_env::cargo::MANIFEST_DIR,
@@ -201,8 +203,8 @@ pub fn manifest_dir_missing_for_directives(reason: &std::env::VarError) -> Diagn
 /// Manifest dir unavailable when materializing. Takes the wrapped
 /// resolver failure; the chain renders inline. Distinct key: the
 /// retired wording is the bare missing text.
-pub fn manifest_dir_missing(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn manifest_dir_missing(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("{} missing: {reason_text}", oxdock_env::cargo::MANIFEST_DIR,);
     Diagnostic::new(
         "build.manifest_dir.missing",
@@ -214,8 +216,8 @@ pub fn manifest_dir_missing(reason: &anyhow::Error) -> Diagnostic {
 /// DSL source file unreadable. Takes the relative path plus the
 /// wrapped filesystem failure; quoting lives here, the chain renders
 /// inline.
-pub fn dsl_script_read_failed(rel: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn dsl_script_read_failed(rel: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("failed to read DSL script {rel}: {reason_text}");
     Diagnostic::new(
         "build.script.read_failed",
@@ -226,8 +228,8 @@ pub fn dsl_script_read_failed(rel: &str, reason: &anyhow::Error) -> Diagnostic {
 
 /// Workspace root discovery failed. Takes the wrapped failure; the
 /// chain renders inline.
-pub fn workspace_root_discover_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn workspace_root_discover_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("failed to discover workspace root: {reason_text}");
     Diagnostic::new(
         "build.workspace_root.discover_failed",
@@ -237,14 +239,76 @@ pub fn workspace_root_discover_failed(reason: &anyhow::Error) -> Diagnostic {
 }
 
 /// Built tree could not be copied into staging. Takes the underlying
-/// failure; `{reason:#}` formatting lives here.
-pub fn stage_copy_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+/// failure; the flattened chain lives here.
+pub fn stage_copy_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("failed to copy build output into staging: {reason_text}");
     Diagnostic::new(
         "build.stage.copy_failed",
         message,
         Diagnostic::make_fields(&[(FIELD_REASON, &reason_text)]),
+    )
+}
+
+/// Generic build-operation failure. Takes the underlying failure;
+/// the flattened chain lives here so call sites stay
+/// `format!`-free. Already-keyed payloads are reclaimed by
+/// [`from_anyhow`], so this only names genuinely unkeyed fallout.
+/// Message is the reason verbatim (like `proc.run.synthetic_failed`)
+/// so reclaimed chains render byte-identical.
+pub fn operation_failed(reason: &Diagnostic) -> Diagnostic {
+    operation_failed_fallback(&flatten_chain(reason))
+}
+
+/// Unkeyed build-operation fallback. Takes the pre-rendered anyhow
+/// chain text verbatim (like `eval_dispatch_fallback`); rendering
+/// lives here. Single owner for the `from_anyhow` fallback so the
+/// anyhow-to-Diagnostic direction keeps one keyed home.
+pub fn operation_failed_fallback(reason_text: &str) -> Diagnostic {
+    Diagnostic::new(
+        "build.operation.failed",
+        reason_text.to_string(),
+        Diagnostic::make_fields(&[(FIELD_REASON, reason_text)]),
+    )
+}
+
+/// Reclaim an already-keyed diagnostic from an `anyhow` failure,
+/// wrapping anything else as a generic build-operation failure. Single
+/// owner for the build-surface mapping so filesystem plumbing (whose
+/// `anyhow` carriers already hold keyed `fs.*` diagnostics) preserves
+/// keys instead of restating the downcast. Outer `.context(...)`
+/// frames above the keyed payload replay natively via
+/// `with_contexts` (mirroring `lift_dispatch_error`), so no chain
+/// text is lost at the flip boundary.
+pub fn from_anyhow(err: anyhow::Error) -> Diagnostic {
+    if let Some(found) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+        .cloned()
+    {
+        let mut outer_frames: Vec<String> = Vec::new();
+        for cause in err.chain() {
+            if cause.downcast_ref::<Diagnostic>().is_some() {
+                break;
+            }
+            // Transport echoes (`anyhow::Error::from(diag)`)
+            // restate the reclaimed message verbatim; keeping
+            // them would print every cause twice.
+            if cause.to_string() != found.message() {
+                outer_frames.push(cause.to_string());
+            }
+        }
+        return found.with_contexts(outer_frames);
+    }
+    operation_failed_fallback(&format!("{err:#}"))
+}
+
+#[cfg(test)]
+pub(crate) fn reason_sample(msg: &str) -> Diagnostic {
+    Diagnostic::new(
+        "test.reason.sample",
+        msg.to_string(),
+        Diagnostic::make_fields(&[]),
     )
 }
 
@@ -258,7 +322,7 @@ mod tests {
 
     #[test]
     fn each_failure_has_a_distinct_key() {
-        let err = anyhow::anyhow!("boom");
+        let err = reason_sample("boom");
         let keys = [
             collect_assets_failed(&err).key(),
             invalid_out_dir("out", &err).key(),
@@ -277,6 +341,7 @@ mod tests {
             dsl_script_read_failed("a.oxdock", &err).key(),
             workspace_root_discover_failed(&err).key(),
             stage_copy_failed(&err).key(),
+            operation_failed(&err).key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -286,7 +351,7 @@ mod tests {
 
     #[test]
     fn messages_match_canonical_wording() {
-        let err = anyhow::anyhow!("boom");
+        let err = reason_sample("boom");
         assert_eq!(
             collect_assets_failed(&err).message(),
             "failed to collect assets: boom"
@@ -352,11 +417,24 @@ mod tests {
             stage_copy_failed(&err).message(),
             "failed to copy build output into staging: boom"
         );
+        assert_eq!(operation_failed(&err).message(), "boom");
+        assert_eq!(operation_failed_fallback("boom").message(), "boom");
+        assert_eq!(from_anyhow(anyhow::anyhow!("boom")).message(), "boom");
+        let keyed = script_parse_failed(&reason_sample("boom"));
+        let keyed_key = keyed.key();
+        let reclaimed = from_anyhow(anyhow::Error::new(keyed));
+        assert_eq!(reclaimed.key(), keyed_key);
+        let framed = script_parse_failed(&reason_sample("boom"));
+        let framed_key = framed.key();
+        let wrapped = anyhow::Error::new(framed).context("outer frame");
+        let reclaimed_framed = from_anyhow(wrapped);
+        assert_eq!(reclaimed_framed.key(), framed_key);
+        assert_eq!(reclaimed_framed.contexts(), &["outer frame".to_string()]);
     }
 
     #[test]
     fn out_dir_spelling_follows_env_contract() {
-        let err = anyhow::anyhow!("boom");
+        let err = reason_sample("boom");
         assert!(
             invalid_out_dir("out", &err)
                 .message()

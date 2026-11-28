@@ -15,6 +15,7 @@ use crate::contract::{
 };
 use crate::diagnostics as proc_diag;
 use crate::expand::expand_with_lookup;
+use oxdock_diagnostics::DiagnosticResult;
 
 #[cfg(miri)]
 #[derive(Clone, Default)]
@@ -40,7 +41,7 @@ enum Action {
 
 #[cfg(miri)]
 impl BackgroundHandle for SyntheticBgHandle {
-    fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+    fn try_wait(&mut self) -> DiagnosticResult<Option<ExitStatus>> {
         if self.killed {
             self.applied = true;
             return Ok(Some(self.status));
@@ -56,7 +57,7 @@ impl BackgroundHandle for SyntheticBgHandle {
         self.last_polled = now;
 
         if self.remaining.is_zero() {
-            apply_actions(&self.ctx, &self.actions)?;
+            apply_actions(&self.ctx, &self.actions).map_err(proc_diag::from_anyhow)?;
             self.applied = true;
             Ok(Some(self.status))
         } else {
@@ -64,12 +65,12 @@ impl BackgroundHandle for SyntheticBgHandle {
         }
     }
 
-    fn kill(&mut self) -> Result<()> {
+    fn kill(&mut self) -> DiagnosticResult<()> {
         self.killed = true;
         Ok(())
     }
 
-    fn wait(&mut self) -> Result<ExitStatus> {
+    fn wait(&mut self) -> DiagnosticResult<ExitStatus> {
         if self.killed {
             self.applied = true;
             return Ok(self.status);
@@ -78,7 +79,7 @@ impl BackgroundHandle for SyntheticBgHandle {
             if !self.remaining.is_zero() {
                 std::thread::sleep(self.remaining);
             }
-            apply_actions(&self.ctx, &self.actions)?;
+            apply_actions(&self.ctx, &self.actions).map_err(proc_diag::from_anyhow)?;
             self.applied = true;
         }
         Ok(self.status)
@@ -110,7 +111,7 @@ impl ProcessManager for SyntheticProcessManager {
         ctx: &CommandContext,
         script: &str,
         options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>> {
+    ) -> DiagnosticResult<CommandResult<Self::Handle>> {
         let CommandOptions {
             mode,
             stdin,
@@ -129,11 +130,10 @@ impl ProcessManager for SyntheticProcessManager {
             CommandMode::Foreground => {
                 let needs_bytes = matches!(stdout, CommandStdout::Capture)
                     || matches!(stdout, CommandStdout::Stream(_));
-                let (out, status) = execute_sync(ctx, script, needs_bytes)?;
+                let (out, status) =
+                    execute_sync(ctx, script, needs_bytes).map_err(proc_diag::from_anyhow)?;
                 if !status.success() {
-                    return Err(anyhow::Error::new(proc_diag::run_command_failed(
-                        &script, &status,
-                    )));
+                    return Err(proc_diag::run_command_failed(&script, &status));
                 }
                 if matches!(stderr, CommandStderr::Stream(_)) {
                     // Synthetic manager does not produce stderr output; warn if requested.
@@ -152,19 +152,13 @@ impl ProcessManager for SyntheticProcessManager {
                 }
             }
             CommandMode::Background => match stdout {
-                CommandStdout::Capture => Err(anyhow::Error::new(
-                    proc_diag::run_bg_capture_unsupported_miri(),
-                )),
-                CommandStdout::Stream(_) => Err(anyhow::Error::new(
-                    proc_diag::run_bg_stdout_stream_unsupported_miri(),
-                )),
+                CommandStdout::Capture => Err(proc_diag::run_bg_capture_unsupported_miri()),
+                CommandStdout::Stream(_) => Err(proc_diag::run_bg_stdout_stream_unsupported_miri()),
                 CommandStdout::Inherit => {
                     if matches!(stderr, CommandStderr::Stream(_)) {
-                        return Err(anyhow::Error::new(
-                            proc_diag::run_bg_stderr_stream_unsupported_miri(),
-                        ));
+                        return Err(proc_diag::run_bg_stderr_stream_unsupported_miri());
                     }
-                    let plan = plan_background(ctx, script)?;
+                    let plan = plan_background(ctx, script).map_err(proc_diag::from_anyhow)?;
                     Ok(CommandResult::Background(plan))
                 }
             },
@@ -176,7 +170,7 @@ impl ProcessManager for SyntheticProcessManager {
         ctx: &CommandContext,
         argv: &[String],
         options: CommandOptions,
-    ) -> Result<CommandResult<Self::Handle>> {
+    ) -> DiagnosticResult<CommandResult<Self::Handle>> {
         let CommandOptions {
             mode,
             stdin,
@@ -192,18 +186,17 @@ impl ProcessManager for SyntheticProcessManager {
         }
 
         if argv.is_empty() {
-            return Err(anyhow::Error::new(proc_diag::run_exec_requires_argv()));
+            return Err(proc_diag::run_exec_requires_argv());
         }
 
         match mode {
             CommandMode::Foreground => {
                 let needs_bytes = matches!(stdout, CommandStdout::Capture)
                     || matches!(stdout, CommandStdout::Stream(_));
-                let (out, status) = execute_argv_sync(ctx, argv, needs_bytes)?;
+                let (out, status) =
+                    execute_argv_sync(ctx, argv, needs_bytes).map_err(proc_diag::from_anyhow)?;
                 if !status.success() {
-                    return Err(anyhow::Error::new(proc_diag::run_command_failed(
-                        &argv, &status,
-                    )));
+                    return Err(proc_diag::run_command_failed(&argv, &status));
                 }
                 if matches!(stderr, CommandStderr::Stream(_)) {
                     // Synthetic manager does not produce stderr output.
@@ -221,19 +214,13 @@ impl ProcessManager for SyntheticProcessManager {
                 }
             }
             CommandMode::Background => match stdout {
-                CommandStdout::Capture => Err(anyhow::Error::new(
-                    proc_diag::run_bg_capture_unsupported_miri(),
-                )),
-                CommandStdout::Stream(_) => Err(anyhow::Error::new(
-                    proc_diag::run_bg_stdout_stream_unsupported_miri(),
-                )),
+                CommandStdout::Capture => Err(proc_diag::run_bg_capture_unsupported_miri()),
+                CommandStdout::Stream(_) => Err(proc_diag::run_bg_stdout_stream_unsupported_miri()),
                 CommandStdout::Inherit => {
                     if matches!(stderr, CommandStderr::Stream(_)) {
-                        return Err(anyhow::Error::new(
-                            proc_diag::run_bg_stderr_stream_unsupported_miri(),
-                        ));
+                        return Err(proc_diag::run_bg_stderr_stream_unsupported_miri());
                     }
-                    let plan = plan_argv_background(ctx, argv)?;
+                    let plan = plan_argv_background(ctx, argv).map_err(proc_diag::from_anyhow)?;
                     Ok(CommandResult::Background(plan))
                 }
             },

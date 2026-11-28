@@ -11,7 +11,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
 use oxdock_diagnostics::DiagnosticResult;
 use oxdock_parser::{Expr, ParsedScript, StepKind};
 use oxdock_process::{CommandStdin, ProcessManager, SharedOutput};
@@ -67,7 +66,7 @@ impl<P: ProcessManager> McpSession<P> {
         types: Vec<&'static TypeDescriptor>,
         parsed: &ParsedScript,
         entry_file: Option<oxdock_fs::GuardedPath>,
-    ) -> Result<Self> {
+    ) -> DiagnosticResult<Self> {
         let stdout_buf: Arc<Mutex<TailRing>> = Arc::new(Mutex::new(TailRing {
             buf: Vec::new(),
             total: 0,
@@ -113,7 +112,7 @@ impl<P: ProcessManager> McpSession<P> {
             }
             for name in &parsed.exports.types {
                 if !local.contains(name) && !exported_available.contains(name) {
-                    return Err(anyhow::Error::new(mcp_diag::mcp_export_type_unknown(name)));
+                    return Err(mcp_diag::mcp_export_type_unknown(name));
                 }
             }
         }
@@ -148,19 +147,13 @@ impl<P: ProcessManager> McpSession<P> {
         match flow {
             Flow::Done => {}
             Flow::Break { idx } => {
-                return Err(anyhow::Error::new(mcp_diag::mcp_break_outside_loop(
-                    idx + 1,
-                )));
+                return Err(mcp_diag::mcp_break_outside_loop(idx + 1));
             }
             Flow::Continue { idx } => {
-                return Err(anyhow::Error::new(mcp_diag::mcp_continue_outside_loop(
-                    idx + 1,
-                )));
+                return Err(mcp_diag::mcp_continue_outside_loop(idx + 1));
             }
             Flow::Return { idx, .. } => {
-                return Err(anyhow::Error::new(mcp_diag::mcp_return_outside_function(
-                    idx + 1,
-                )));
+                return Err(mcp_diag::mcp_return_outside_function(idx + 1));
             }
         }
 
@@ -262,7 +255,11 @@ impl<P: ProcessManager> McpSession<P> {
                     // this call's bytes, and the tails are the diagnosis.
                     let stdout = capped_drain(&self.stdout_buf);
                     let stderr = capped_drain(&self.stderr_buf);
-                    return Err(mcp_diag::mcp_call_failed(&err, &stdout, &stderr));
+                    return Err(mcp_diag::mcp_call_failed(
+                        &super::args::lift_dispatch_error(err),
+                        &stdout,
+                        &stderr,
+                    ));
                 }
             }
         };

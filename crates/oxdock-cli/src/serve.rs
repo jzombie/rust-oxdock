@@ -103,8 +103,8 @@ struct FetchStage {
 
 impl FetchStage {
     fn new() -> Result<Self> {
-        let dir =
-            GuardedPath::tempdir().map_err(|err| errors::serve_transfer_tempdir_failed(&err))?;
+        let dir = GuardedPath::tempdir()
+            .map_err(|err| errors::serve_transfer_tempdir_failed(&anyhow::Error::from(err)))?;
         let root = dir.as_guarded_path().clone();
         let resolver = PathResolver::new(root.root(), root.root())?;
         // Memory-backed under Miri: the serve loop never runs there (no
@@ -382,7 +382,8 @@ fn prepare_staging(
     spill: &mut oxdock_core::TransferStage,
 ) -> Result<(GuardedPath, oxdock_fs::GuardedTempDir, PathResolver)> {
     spill.rewind()?;
-    let dir = GuardedPath::tempdir().map_err(|err| errors::serve_staging_tempdir_failed(&err))?;
+    let dir = GuardedPath::tempdir()
+        .map_err(|err| errors::serve_staging_tempdir_failed(&anyhow::Error::from(err)))?;
     let staging = dir.as_guarded_path().clone();
     let resolver = PathResolver::new(staging.root(), staging.root())?;
     tar::unpack_from(spill, &mut |entry| match entry {
@@ -392,20 +393,18 @@ fn prepare_staging(
             }
             let dest = staging
                 .join(&path)
-                .map_err(|err| errors::fetch_dir_escapes(&path, &err))?;
+                .map_err(|err| errors::fetch_dir_escapes(&path, &anyhow::Error::from(err)))?;
             resolver.create_dir_all(&dest)?;
             Ok(())
         }
         tar::StreamedEntry::File { path, reader, .. } => {
             let dest = staging
                 .join(&path)
-                .map_err(|err| errors::fetch_file_escapes(&path, &err))?;
+                .map_err(|err| errors::fetch_file_escapes(&path, &anyhow::Error::from(err)))?;
             if let Some(idx) = path.rfind('/') {
-                resolver.create_dir_all(
-                    &staging
-                        .join(&path[..idx])
-                        .map_err(|err| errors::fetch_parent_escapes(&path[..idx], &err))?,
-                )?;
+                resolver.create_dir_all(&staging.join(&path[..idx]).map_err(|err| {
+                    errors::fetch_parent_escapes(&path[..idx], &anyhow::Error::from(err))
+                })?)?;
             }
             let mut writer = resolver.open_write(&dest)?;
             let mut buf = [0u8; 65536];
@@ -590,7 +589,7 @@ fn pack_manifest(
     for guest_src in &ordered {
         let src = staging
             .join(guest_src)
-            .map_err(|err| errors::push_source_escapes(guest_src, &err))?;
+            .map_err(|err| errors::push_source_escapes(guest_src, &anyhow::Error::from(err)))?;
         match resolver.entry_kind(&src) {
             Ok(oxdock_fs::EntryKind::Dir) => {
                 dirs.push(guest_src.clone());
@@ -608,10 +607,13 @@ fn pack_manifest(
                                 stack.push((child, child_rel));
                             }
                             _ => {
-                                let len = resolver
-                                    .metadata(&child)
-                                    .map(|m| m.len())
-                                    .map_err(|e| errors::push_source_unreadable(&child_rel, &e))?;
+                                let len =
+                                    resolver.metadata(&child).map(|m| m.len()).map_err(|e| {
+                                        errors::push_source_unreadable(
+                                            &child_rel,
+                                            &anyhow::Error::new(e),
+                                        )
+                                    })?;
                                 files.push((
                                     child_rel,
                                     len,
@@ -623,10 +625,9 @@ fn pack_manifest(
                 }
             }
             Ok(_) => {
-                let len = resolver
-                    .metadata(&src)
-                    .map(|m| m.len())
-                    .map_err(|e| errors::push_source_unreadable(guest_src, &e))?;
+                let len = resolver.metadata(&src).map(|m| m.len()).map_err(|e| {
+                    errors::push_source_unreadable(guest_src, &anyhow::Error::new(e))
+                })?;
                 files.push((
                     guest_src.clone(),
                     len,
@@ -634,11 +635,15 @@ fn pack_manifest(
                 ));
             }
             Err(err) => {
-                return Err(errors::push_source_missing(guest_src, &err));
+                return Err(errors::push_source_missing(
+                    guest_src,
+                    &anyhow::Error::new(err),
+                ));
             }
         }
     }
-    let push_dir = GuardedPath::tempdir().map_err(|err| errors::serve_push_tempdir_failed(&err))?;
+    let push_dir = GuardedPath::tempdir()
+        .map_err(|err| errors::serve_push_tempdir_failed(&anyhow::Error::from(err)))?;
     let push_root = push_dir.as_guarded_path().clone();
     let push_resolver = PathResolver::new(push_root.root(), push_root.root())?;
     // Memory-backed under Miri: same unreachable-spill rationale as

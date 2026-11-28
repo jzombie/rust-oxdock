@@ -9,12 +9,13 @@
 //! both hex strings; the truncation takes the byte count; unsupported
 //! types take the entry type for `Debug` rendering here.
 
-use oxdock_diagnostics::Diagnostic;
+use oxdock_diagnostics::{Diagnostic, flatten_chain};
 
 /// Structured field keys. Single spelling for the whole module:
 /// constructors reference these, never literals, so a key rename is
 /// one edit.
 const FIELD_RAW: &str = "raw";
+const FIELD_REASON: &str = "reason";
 const FIELD_EXPECTED: &str = "expected";
 const FIELD_ACTUAL: &str = "actual";
 const FIELD_FILLED: &str = "filled";
@@ -117,12 +118,119 @@ pub fn unsupported_type(other: &impl std::fmt::Debug, raw: &str) -> Diagnostic {
     )
 }
 
+/// Tarball pack I/O failure. Takes the underlying failure; the
+/// flattened chain lives here so call sites stay `format!`-free.
+/// Message is the reason verbatim (like `build.operation.failed`)
+/// so reclaimed chains render byte-identical.
+pub fn pack_failed(reason: &Diagnostic) -> Diagnostic {
+    pack_failed_fallback(&flatten_chain(reason))
+}
+
+/// Unkeyed pack fallback. Takes the pre-rendered anyhow chain text
+/// verbatim; rendering lives here. Single owner for the pack lift
+/// so the anyhow-to-Diagnostic direction keeps one keyed home.
+pub fn pack_failed_fallback(reason_text: &str) -> Diagnostic {
+    Diagnostic::new(
+        "tar.pack.failed",
+        reason_text.to_string(),
+        Diagnostic::make_fields(&[(FIELD_REASON, reason_text)]),
+    )
+}
+
+/// Tarball unpack I/O failure. Takes the underlying failure; the
+/// flattened chain lives here. Already-keyed payloads are reclaimed
+/// by [`from_anyhow`], so this only names genuinely unkeyed fallout.
+pub fn unpack_failed(reason: &Diagnostic) -> Diagnostic {
+    unpack_failed_fallback(&flatten_chain(reason))
+}
+
+/// Unkeyed unpack fallback. Takes the pre-rendered anyhow chain
+/// text verbatim; rendering lives here. Single owner for the
+/// unpack lift so the anyhow-to-Diagnostic direction keeps one
+/// keyed home.
+pub fn unpack_failed_fallback(reason_text: &str) -> Diagnostic {
+    Diagnostic::new(
+        "tar.unpack.failed",
+        reason_text.to_string(),
+        Diagnostic::make_fields(&[(FIELD_REASON, reason_text)]),
+    )
+}
+
+/// Reclaim an already-keyed diagnostic from an `anyhow` pack
+/// failure, wrapping anything else as a pack failure. Pack-direction
+/// sibling of [`from_anyhow`]: the two lifts share one reclaim
+/// shape with distinct fallback keys, so pack io (`tar.pack.failed`)
+/// and unpack io (`tar.unpack.failed`) never cross keys.
+pub fn pack_from_anyhow(err: anyhow::Error) -> Diagnostic {
+    if let Some(found) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+        .cloned()
+    {
+        let mut outer_frames: Vec<String> = Vec::new();
+        for cause in err.chain() {
+            if cause.downcast_ref::<Diagnostic>().is_some() {
+                break;
+            }
+            // Transport echoes (`anyhow::Error::from(diag)`)
+            // restate the reclaimed message verbatim; keeping
+            // them would print every cause twice.
+            if cause.to_string() != found.message() {
+                outer_frames.push(cause.to_string());
+            }
+        }
+        return found.with_contexts(outer_frames);
+    }
+    pack_failed_fallback(&format!("{err:#}"))
+}
+
+/// Reclaim an already-keyed diagnostic from an `anyhow` failure,
+/// wrapping anything else as an unpack failure. Single owner for
+/// the unpack-driver mapping so `apply`-callback carriers (whose
+/// `anyhow` payloads already hold keyed caller diagnostics) preserve
+/// keys instead of restating the downcast. Outer `.context(...)`
+/// frames above the keyed payload replay natively via
+/// `with_contexts` (mirroring `lift_dispatch_error`), so no chain
+/// text is lost at the flip boundary.
+pub fn from_anyhow(err: anyhow::Error) -> Diagnostic {
+    if let Some(found) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+        .cloned()
+    {
+        let mut outer_frames: Vec<String> = Vec::new();
+        for cause in err.chain() {
+            if cause.downcast_ref::<Diagnostic>().is_some() {
+                break;
+            }
+            // Transport echoes (`anyhow::Error::from(diag)`)
+            // restate the reclaimed message verbatim; keeping
+            // them would print every cause twice.
+            if cause.to_string() != found.message() {
+                outer_frames.push(cause.to_string());
+            }
+        }
+        return found.with_contexts(outer_frames);
+    }
+    unpack_failed_fallback(&format!("{err:#}"))
+}
+
+#[cfg(test)]
+pub(crate) fn reason_sample(msg: &str) -> Diagnostic {
+    Diagnostic::new(
+        "test.reason.sample",
+        msg.to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn each_failure_has_a_distinct_key() {
+        let err = reason_sample("boom");
         let keys = [
             empty_path().key(),
             backslash_path("a\\b").key(),
@@ -133,6 +241,8 @@ mod tests {
             archive_empty().key(),
             archive_truncated(100).key(),
             unsupported_type(&"fifo", "raw").key(),
+            pack_failed(&err).key(),
+            unpack_failed(&err).key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -142,6 +252,7 @@ mod tests {
 
     #[test]
     fn messages_match_canonical_wording() {
+        let err = reason_sample("boom");
         assert_eq!(empty_path().message(), "tarball entry has an empty path");
         assert_eq!(
             backslash_path("a\\b").message(),
@@ -173,5 +284,25 @@ mod tests {
                 .message()
                 .starts_with("tarball entry has unsupported type ")
         );
+        assert_eq!(pack_failed(&err).message(), "boom");
+        assert_eq!(pack_failed_fallback("boom").message(), "boom");
+        assert_eq!(unpack_failed(&err).message(), "boom");
+        assert_eq!(unpack_failed_fallback("boom").message(), "boom");
+        assert_eq!(from_anyhow(anyhow::anyhow!("boom")).message(), "boom");
+        assert_eq!(pack_from_anyhow(anyhow::anyhow!("boom")).message(), "boom");
+        assert_eq!(
+            pack_from_anyhow(anyhow::anyhow!("boom")).key(),
+            "tar.pack.failed"
+        );
+        let keyed = archive_empty();
+        let keyed_key = keyed.key();
+        let reclaimed = from_anyhow(anyhow::Error::new(keyed));
+        assert_eq!(reclaimed.key(), keyed_key);
+        let framed = archive_truncated(7);
+        let framed_key = framed.key();
+        let wrapped = anyhow::Error::new(framed).context("outer frame");
+        let reclaimed_framed = from_anyhow(wrapped);
+        assert_eq!(reclaimed_framed.key(), framed_key);
+        assert_eq!(reclaimed_framed.contexts(), &["outer frame".to_string()]);
     }
 }

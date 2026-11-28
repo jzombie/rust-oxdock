@@ -35,7 +35,7 @@ fn load_markdown(name: &str) -> Result<String> {
     let root = GuardedPath::new_root_from_str(&repo_root)?;
     let resolver = PathResolver::new_guarded(root.clone(), root)?;
     let readme_path = resolver.root().join(name)?;
-    resolver.read_to_string(&readme_path)
+    Ok(resolver.read_to_string(&readme_path)?)
 }
 
 fn load_blocks(name: &str) -> Result<Vec<FencedBlock>> {

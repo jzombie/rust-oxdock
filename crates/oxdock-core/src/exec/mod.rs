@@ -70,8 +70,7 @@ pub use self::typing::{
     unshare_shared,
 };
 
-use anyhow::Result;
-use oxdock_diagnostics::DiagnosticResult;
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 use oxdock_fs::{
     GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs, reserve_cargo_scratch,
 };
@@ -109,7 +108,7 @@ pub const SNAPSHOT_TREE_UNAVAILABLE: &str = "<unavailable>";
 /// [`run_steps_with_lazy_snapshot`]: for bindings and the snapshot
 /// handle, call that directly. For runs that must land exactly in a
 /// given root with no snapshot, use [`run_steps_without_snapshot`].
-pub fn run_steps(build_context: &GuardedPath, steps: &[Step], io: ExecIo) -> Result<()> {
+pub fn run_steps(build_context: &GuardedPath, steps: &[Step], io: ExecIo) -> DiagnosticResult<()> {
     run_steps_with_lazy_snapshot(build_context, steps, io).map(|_| ())
 }
 
@@ -117,7 +116,7 @@ pub fn run_steps(build_context: &GuardedPath, steps: &[Step], io: ExecIo) -> Res
 /// writes land exactly in the given root and read-backs observe them.
 /// Tests pinning on-disk state and hosts with caller-built filesystems
 /// want this; interactive runs want [`run_steps`].
-pub fn run_steps_without_snapshot(fs_root: &GuardedPath, steps: &[Step]) -> Result<()> {
+pub fn run_steps_without_snapshot(fs_root: &GuardedPath, steps: &[Step]) -> DiagnosticResult<()> {
     run_steps_with_context(fs_root, fs_root, steps)
 }
 
@@ -125,7 +124,7 @@ pub fn run_steps_with_context(
     fs_root: &GuardedPath,
     build_context: &GuardedPath,
     steps: &[Step],
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     run_steps_with_context_result(fs_root, build_context, steps, None, None).map(|_| ())
 }
 
@@ -136,7 +135,7 @@ pub fn run_steps_with_context_result(
     steps: &[Step],
     stdin: Option<SharedInput>,
     stdout: Option<SharedOutput>,
-) -> Result<GuardedPath> {
+) -> DiagnosticResult<GuardedPath> {
     let io = assemble_default_io(stdin, stdout);
     run_steps_with_context_result_with_io(fs_root, build_context, steps, io)
 }
@@ -146,7 +145,7 @@ pub fn run_steps_with_context_result_with_io(
     build_context: &GuardedPath,
     steps: &[Step],
     io: ExecIo,
-) -> Result<GuardedPath> {
+) -> DiagnosticResult<GuardedPath> {
     match run_steps_inner(fs_root, build_context, steps, io) {
         Ok(final_cwd) => Ok(final_cwd),
         Err(err) => {
@@ -165,40 +164,17 @@ pub fn run_steps_with_context_result_with_io(
 /// Build a single error message with the top cause plus a caller-provided
 /// filesystem-snapshot section. Shared by the eager and lazy runners so both
 /// render identical chains and only differ in the snapshot section.
-fn error_with_snapshot(err: anyhow::Error, snapshot_section: String) -> anyhow::Error {
-    // Build a single error message with the top cause plus a compact fs snapshot.
-    let chain = err.chain().map(|e| e.to_string()).collect::<Vec<_>>();
-    let mut primary = chain
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "unknown error".into());
-    let rest = if chain.len() > 1 {
-        let first_cause = chain[1].clone();
-        primary = format!("{primary} ({first_cause})");
-        if chain.len() > 2 {
-            let causes = chain
-                .iter()
-                .skip(2)
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join("\n  ");
-            format!("\ncauses:\n  {}", causes)
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
-    };
-    let msg = format!("{}{}\n{}", primary, rest, snapshot_section);
-    // The snapshot renderer flattens the chain into one message for CLI
-    // rendering. Re-attach a relayed EXIT code as the inner error under
-    // that message: the text stays byte-identical while the code stays
-    // machine readable (context values are invisible to chain traversal,
-    // so the typed request must ride as a real error, not as context).
-    match exit::exit_code_of(&err) {
-        Some(code) => anyhow::Error::new(exit::ExitRequest(code)).context(msg),
-        None => anyhow::anyhow!(msg),
-    }
+fn error_with_snapshot(diag: Diagnostic, snapshot_section: String) -> Diagnostic {
+    // The failure is already a keyed diagnostic by the time it reaches
+    // the runner boundary (step failures carry their key from
+    // `step_error`, foreign errors lift through `lift_dispatch_error`
+    // with the `dispatch_failed` fallback, bare exits ride the keyed
+    // `exit_requested` carrier): the snapshot section attaches as
+    // provenance with the exit code and call-path frames riding
+    // natively. The `snapshot_context` constructor stays reserved for
+    // unkeyed fallbacks (B1j) but nothing reaches it past this
+    // boundary anymore.
+    diag.with_snapshot(&snapshot_section)
 }
 
 fn run_steps_inner(
@@ -206,7 +182,7 @@ fn run_steps_inner(
     build_context: &GuardedPath,
     steps: &[Step],
     io: ExecIo,
-) -> Result<GuardedPath> {
+) -> DiagnosticResult<GuardedPath> {
     let mut resolver = PathResolver::new_guarded(fs_root.clone(), build_context.clone())?;
     resolver.set_workspace_root(build_context.clone());
     run_steps_with_fs_with_io(Box::new(resolver), steps, io)
@@ -234,7 +210,7 @@ pub fn run_steps_with_lazy_snapshot(
     build_context: &GuardedPath,
     steps: &[Step],
     io: ExecIo,
-) -> Result<LazyRunOutput> {
+) -> DiagnosticResult<LazyRunOutput> {
     run_steps_with_lazy_snapshot_and_modules(build_context, steps, io, Vec::new(), Vec::new())
 }
 
@@ -248,7 +224,7 @@ pub fn run_steps_with_lazy_snapshot_and_modules(
     io: ExecIo,
     modules: Vec<HostModule<DefaultProcessManager>>,
     types: Vec<&'static TypeDescriptor>,
-) -> Result<LazyRunOutput> {
+) -> DiagnosticResult<LazyRunOutput> {
     run_steps_with_lazy_snapshot_and_modules_and_entry(
         build_context,
         steps,
@@ -269,7 +245,7 @@ pub fn run_steps_with_lazy_snapshot_and_modules_and_entry(
     modules: Vec<HostModule<DefaultProcessManager>>,
     types: Vec<&'static TypeDescriptor>,
     entry_file: Option<GuardedPath>,
-) -> Result<LazyRunOutput> {
+) -> DiagnosticResult<LazyRunOutput> {
     let mut resolver = PathResolver::new_lazy(build_context.clone())?;
     resolver.set_workspace_root(build_context.clone());
     let snapshot = resolver.snapshot_handle();
@@ -300,8 +276,8 @@ pub fn run_steps_with_lazy_snapshot_and_modules_and_entry(
 pub fn enrich_lazy_error(
     snapshot: &Arc<LazyGuardedTempDir>,
     build_context: &GuardedPath,
-    err: anyhow::Error,
-) -> anyhow::Error {
+    err: Diagnostic,
+) -> Diagnostic {
     match snapshot.get() {
         Some(concrete) => {
             let tree = match PathResolver::new(concrete.as_path(), build_context.as_path()) {
@@ -329,7 +305,7 @@ pub fn run_steps_with_fs(
     steps: &[Step],
     stdin: Option<SharedInput>,
     stdout: Option<SharedOutput>,
-) -> Result<GuardedPath> {
+) -> DiagnosticResult<GuardedPath> {
     let io = assemble_default_io(stdin, stdout);
     run_steps_with_fs_with_io(fs, steps, io)
 }
@@ -338,7 +314,7 @@ pub fn run_steps_with_fs_with_io(
     fs: Box<dyn WorkspaceFs>,
     steps: &[Step],
     io: ExecIo,
-) -> Result<GuardedPath> {
+) -> DiagnosticResult<GuardedPath> {
     run_steps_with_manager(fs, steps, default_process_manager(), io).map(|(cwd, _, _)| cwd)
 }
 
@@ -361,7 +337,7 @@ pub fn run_steps_with_manager<P: ProcessManager>(
     steps: &[Step],
     process: P,
     io: ExecIo,
-) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+) -> DiagnosticResult<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
     run_steps_with_manager_with_modules(fs, steps, process, io, Vec::new(), Vec::new())
 }
 
@@ -380,7 +356,7 @@ pub fn run_steps_with_manager_with_modules<P: ProcessManager>(
     io: ExecIo,
     modules: Vec<HostModule<P>>,
     types: Vec<&'static self::typing::TypeDescriptor>,
-) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+) -> DiagnosticResult<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
     run_steps_with_manager_with_modules_and_entry(fs, steps, process, io, modules, types, None)
 }
 
@@ -397,7 +373,7 @@ pub fn run_steps_with_manager_with_modules_and_entry<P: ProcessManager>(
     modules: Vec<HostModule<P>>,
     types: Vec<&'static self::typing::TypeDescriptor>,
     entry_file: Option<GuardedPath>,
-) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+) -> DiagnosticResult<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
     let mut state = new_state(fs, io)?;
     state.entry_file = entry_file;
     state.module_table = build_module_table(&modules);
@@ -598,7 +574,7 @@ fn finish_run<P: ProcessManager>(
     mut state: ExecState<P>,
     process: P,
     steps: &[Step],
-) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+) -> DiagnosticResult<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
     validate_closure_for_run(&mut state, steps)?;
     let assert_windows = Arc::clone(&state.assert_windows);
     let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);
@@ -653,19 +629,19 @@ fn finish_run<P: ProcessManager>(
                 .unwrap_or_default();
             Ok((state.fs.concretize_cwd(&state.cwd), state.fs, bindings))
         }
-        self::steps::Flow::Break { idx } => Err(anyhow::Error::new(
-            self::diagnostics::check_flow_outside_loop(idx + 1, KEYWORD_BREAK),
+        self::steps::Flow::Break { idx } => Err(self::diagnostics::check_flow_outside_loop(
+            idx + 1,
+            KEYWORD_BREAK,
         )),
-        self::steps::Flow::Continue { idx } => Err(anyhow::Error::new(
-            self::diagnostics::check_flow_outside_loop(idx + 1, KEYWORD_CONTINUE),
+        self::steps::Flow::Continue { idx } => Err(self::diagnostics::check_flow_outside_loop(
+            idx + 1,
+            KEYWORD_CONTINUE,
         )),
         self::steps::Flow::Return { idx, .. } => {
             // Values only cross a boundary: a function call, an ASYNC
             // task, or an inline LET block. With none enclosing, the
             // pipeline top rejects it like any other escaped flow.
-            Err(anyhow::Error::new(self::diagnostics::check_return_outside(
-                idx + 1,
-            )))
+            Err(self::diagnostics::check_return_outside(idx + 1))
         }
     }
 }

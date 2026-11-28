@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::Result;
-use oxdock_diagnostics::DiagnosticResult;
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult, Span};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::{
     Arg, AssertTarget, Command, KEYWORD_BREAK, KEYWORD_CONTINUE, KEYWORD_RETURN, Step, StepKind,
@@ -49,11 +49,25 @@ pub(super) struct ThreadJoinHandle {
     /// is undefined behavior (`pthread_join` on self). Detect that case and
     /// detach instead of joining.
     worker: Arc<Mutex<Option<std::thread::ThreadId>>>,
-    /// Preserved error from the child thread, if any.
-    thread_error: Option<anyhow::Error>,
-    /// `EXIT` code from the child thread, if it exited. anyhow errors do
-    /// not cross the join boundary by value, and the re-emit below would
-    /// otherwise flatten the typed request into a plain string.
+    /// Preserved error from the child thread, if any. Stored as a
+    /// `Diagnostic` (`Clone` removes the flatten re-emit): key and
+    /// span survive the join boundary without string flattening.
+    /// Outer frames ride separately in `thread_context` and re-attach
+    /// natively via `with_contexts` on re-emit (no anyhow layers),
+    /// so the handle crosses `DiagnosticResult` boundaries.
+    thread_error: Option<Diagnostic>,
+    /// Plain-text contexts captured above the reclaimed diagnostic
+    /// (outer `step N` positions, call frames), outermost first.
+    /// They replay natively via `with_contexts` on re-emit; the
+    /// diagnostic itself already carries its innermost position
+    /// natively via `step_error`'s `with_span` sync.
+    /// `ExitRequest` nodes are never captured here; the code rides in
+    /// `thread_exit_code` instead.
+    thread_context: Vec<String>,
+    /// `EXIT` code from the child thread, if it exited. The code rides
+    /// alongside because the join boundary cannot move the typed
+    /// request by value; re-emit re-attaches it when the stored
+    /// diagnostic chain lacks one.
     thread_exit_code: Option<i64>,
 }
 
@@ -72,25 +86,40 @@ impl ThreadJoinHandle {
             active_process,
             worker,
             thread_error: None,
+            thread_context: Vec::new(),
             thread_exit_code: None,
         }
     }
 
-    /// Re-emit the preserved thread error. `anyhow` errors do not cross
-    /// the join boundary by value, so an EXIT code rides alongside in
-    /// `thread_exit_code` and is re-attached here as a typed request
-    /// under the flattened message: the text stays identical, and the
-    /// code stays machine readable.
-    fn reemit_error(&self) -> anyhow::Error {
-        let msg = self
-            .thread_error
-            .as_ref()
-            .map(|err| format!("{err:#}"))
-            .unwrap_or_else(|| "background thread failed without an error".to_string());
-        match self.thread_exit_code {
-            Some(code) => anyhow::Error::new(super::exit::ExitRequest(code)).context(msg),
-            None => anyhow::anyhow!("{msg}"),
-        }
+    /// Re-emit the preserved thread error as a `Diagnostic`. Branches
+    /// on the stored pair: a diagnostic clones directly (key, message,
+    /// span, hint, and fields survive, with an `EXIT` code chained
+    /// through the request itself only when the stored chain lacks
+    /// one); a bare exit relays as the keyed exit-requested diagnostic
+    /// (code in the field, no identical source); neither stored means
+    /// the thread vanished without an error. Captured plain-text
+    /// contexts replay natively via `with_contexts` (outermost first),
+    /// preserving the full call path without anyhow layers.
+    fn reemit_error(&self) -> Diagnostic {
+        let diag = match (self.thread_error.clone(), self.thread_exit_code) {
+            (Some(mut diag), maybe_code) => {
+                if let Some(code) = maybe_code
+                    && super::exit::exit_code_of_diag(&diag).is_none()
+                {
+                    let exit = match diag.shared_source() {
+                        Some(prior) => super::exit::ExitRequest::with_source(code, prior),
+                        None => super::exit::ExitRequest::new(code),
+                    };
+                    diag = diag.with_source(Arc::new(exit));
+                }
+                diag
+            }
+            (None, Some(code)) => step_diag::eval_exit_requested(code),
+            (None, None) => {
+                step_diag::eval_async_thread_panicked("background thread failed without an error")
+            }
+        };
+        diag.with_contexts(self.thread_context.clone())
     }
 
     /// Whether the caller is the worker thread owned by this handle.
@@ -116,7 +145,44 @@ impl ThreadJoinHandle {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 self.thread_exit_code = super::exit::exit_code_of(&e);
-                self.thread_error = Some(e);
+                // Reclaim the keyed payload by walking the chain:
+                // parents attach `.context(...)` during migration, so
+                // the `Diagnostic` is rarely outermost. Layers above
+                // it are plain-text contexts (step positions, call
+                // frames); keep each frame so the full call path still
+                // renders. The diagnostic itself already carries its
+                // innermost position natively (`step_error` sync).
+                // `ExitRequest` nodes are never captured as text: the
+                // code already rides in `thread_exit_code`. Cloning
+                // keeps key, span, hint, and fields. Genuinely unkeyed
+                // failures flatten to the `reason` field (no source
+                // attached, matching every other foreign boundary).
+                // A bare exit stores its frames with no diagnostic.
+                let mut outer: Vec<String> = Vec::new();
+                let mut found: Option<Diagnostic> = None;
+                for cause in e.chain() {
+                    if let Some(diag) = cause.downcast_ref::<Diagnostic>() {
+                        found = Some(diag.clone());
+                        break;
+                    }
+                    if cause.downcast_ref::<super::exit::ExitRequest>().is_none() {
+                        outer.push(cause.to_string());
+                    }
+                }
+                match found {
+                    Some(diag) => {
+                        self.thread_context = outer;
+                        self.thread_error = Some(diag);
+                    }
+                    None if self.thread_exit_code.is_some() => {
+                        self.thread_context = outer;
+                    }
+                    None => {
+                        self.thread_error = Some(step_diag::eval_dispatch_failed(
+                            &super::args::lift_dispatch_error(e),
+                        ));
+                    }
+                }
             }
             Err(panic) => {
                 let msg = if let Some(s) = panic.downcast_ref::<&str>() {
@@ -126,14 +192,14 @@ impl ThreadJoinHandle {
                 } else {
                     "thread panicked".to_string()
                 };
-                self.thread_error = Some(anyhow::anyhow!("{msg}"));
+                self.thread_error = Some(step_diag::eval_async_thread_panicked(&msg));
             }
         }
     }
 }
 
 impl BackgroundHandle for ThreadJoinHandle {
-    fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+    fn try_wait(&mut self) -> DiagnosticResult<Option<ExitStatus>> {
         if let Some(join) = &self.join {
             if join.is_finished() {
                 self.reap();
@@ -141,19 +207,17 @@ impl BackgroundHandle for ThreadJoinHandle {
                 return Ok(None);
             }
         }
-        // anyhow::Error is not Clone and this method may run repeatedly,
-        // so the preserved error is re-emitted rather than moved. The
-        // alternate display (`{err:#}`) flattens the full causal chain
-        // into the new message: `{err}` alone would drop every
-        // `Caused by` layer at the ASYNC task boundary.
-        if self.thread_error.is_some() {
+        // The stored diagnostic clones directly, so repeated polls
+        // re-emit without moving or flattening the chain. A bare
+        // exit (no diagnostic) re-emits too.
+        if self.thread_error.is_some() || self.thread_exit_code.is_some() {
             Err(self.reemit_error())
         } else {
             Ok(Some(exit_status_from_code(0)))
         }
     }
 
-    fn kill(&mut self) -> Result<()> {
+    fn kill(&mut self) -> DiagnosticResult<()> {
         // Signal cancellation
         self.cancel_token.store(true, Ordering::SeqCst);
         // Fan out to pump supervisors waiting on the hub (blocking
@@ -170,10 +234,10 @@ impl BackgroundHandle for ThreadJoinHandle {
         Ok(())
     }
 
-    fn wait(&mut self) -> Result<ExitStatus> {
+    fn wait(&mut self) -> DiagnosticResult<ExitStatus> {
         self.reap();
         // Same chain-preserving re-emit as `try_wait` above.
-        if self.thread_error.is_some() {
+        if self.thread_error.is_some() || self.thread_exit_code.is_some() {
             Err(self.reemit_error())
         } else {
             Ok(exit_status_from_code(0))
@@ -276,9 +340,11 @@ pub(super) fn resolve_assert_target<P: ProcessManager>(
         AssertTarget::Value(arg) => {
             let value = super::args::evaluate_assert_operand(arg, cx)?;
             if let Some(handle) = value.as_pipe_handle() {
-                let bytes = cx.state.io.peek_pipe_content(&handle).map_err(|e| {
-                    step_diag::eval_pipe_assertion_read_failed(&anyhow::Error::from(e))
-                })?;
+                let bytes = cx
+                    .state
+                    .io
+                    .peek_pipe_content(&handle)
+                    .map_err(|e| step_diag::eval_pipe_assertion_read_failed(&e))?;
                 return Ok(ResolvedAssertTarget::Pipe(bytes));
             }
             Ok(ResolvedAssertTarget::Value(value))
@@ -671,7 +737,7 @@ pub(super) fn execute_steps<P: ProcessManager>(
     out_pipe: Option<Arc<PipeInner>>,
     stdin_pipe: Option<Arc<PipeInner>>,
     wait_at_end: bool,
-) -> Result<Flow> {
+) -> DiagnosticResult<Flow> {
     let generation = allocate_assert_generation();
     let flow = match execute_steps_inner(InnerArgs {
         state,
@@ -786,7 +852,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
     out_pipe: Option<Arc<PipeInner>>,
     stdin_pipe: Option<Arc<PipeInner>>,
     tty: Option<TtyRequest>,
-) -> Result<Flow> {
+) -> DiagnosticResult<Flow> {
     let mut cx = StepCtx {
         state,
         process,
@@ -838,26 +904,31 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         }
         StepKind::Echo(arg) => {
             let msg = super::args::resolve_arg(arg, &mut cx)?;
-            handlers::echo(&mut cx, &msg)
+            handlers::echo(&mut cx, &msg).map_err(super::args::lift_dispatch_error)
         }
-        StepKind::AsyncBlock { .. } => handlers::dispatch_async_block(cmd, &mut cx),
+        StepKind::AsyncBlock { .. } => {
+            handlers::dispatch_async_block(cmd, &mut cx).map_err(super::args::lift_dispatch_error)
+        }
         StepKind::Workdir(arg) => {
             let path = super::args::resolve_arg(arg, &mut cx)?;
             handlers::workdir(&mut cx, &path)
         }
-        StepKind::Workspace(target) => handlers::workspace(&mut cx, target),
+        StepKind::Workspace(target) => {
+            handlers::workspace(&mut cx, target).map_err(super::args::lift_dispatch_error)
+        }
         StepKind::RemoteBlock {
             target,
             vars,
             env,
             body,
-        } => super::remote::run_remote_block(&mut cx, target, vars, env, body),
+        } => super::remote::run_remote_block(&mut cx, target, vars, env, body)
+            .map_err(super::args::lift_dispatch_error),
         StepKind::Env { key, value } => {
             let resolved = super::args::resolve_arg(value, &mut cx)?;
-            handlers::env(&mut cx, key, &resolved)
+            handlers::env(&mut cx, key, &resolved).map_err(super::args::lift_dispatch_error)
         }
         StepKind::InheritEnv { keys } => {
-            handlers::inherit_env(&mut cx, keys)?;
+            handlers::inherit_env(&mut cx, keys).map_err(super::args::lift_dispatch_error)?;
             sync_iteration_assert_needles(
                 cx.state,
                 &[Step {
@@ -885,6 +956,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         } => {
             if *from_host || *to_host {
                 super::remote::copy_transfer(&mut cx, *from_host, *to_host, from, to)
+                    .map_err(super::args::lift_dispatch_error)
             } else {
                 let from_resolved = super::args::resolve_arg(from, &mut cx)?;
                 let to_resolved = super::args::resolve_arg(to, &mut cx)?;
@@ -1042,7 +1114,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let target = resolve_assert_target(haystack, &mut cx)?;
             handlers::assert_contains(&mut cx, generation, idx, &target, needle)
         }
-        StepKind::WithIoBlock { .. } => Err(step_diag::eval_with_io_unexpanded().into()),
+        StepKind::WithIoBlock { .. } => Err(step_diag::eval_with_io_unexpanded()),
         StepKind::Exit(code) => {
             let code = super::args::resolve_arg_as_int(code, &mut cx)?;
             handlers::exit(&mut cx, code)
@@ -1052,7 +1124,8 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             decl_type,
             is_const,
             rhs: oxdock_parser::BindRhs::Expr(expr),
-        } => handlers::assign(&mut cx, var, decl_type.clone(), expr, *is_const),
+        } => handlers::assign(&mut cx, var, decl_type.clone(), expr, *is_const)
+            .map_err(super::args::lift_dispatch_error),
         StepKind::Bind {
             var,
             decl_type,
@@ -1065,7 +1138,9 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             is_const,
             rhs: oxdock_parser::BindRhs::Await { task_var, .. },
         } => handlers::dispatch_await_capture(var, decl_type.clone(), task_var, &mut cx, *is_const),
-        StepKind::Set { var, expr } => handlers::set_var_value(&mut cx, var, expr),
+        StepKind::Set { var, expr } => {
+            handlers::set_var_value(&mut cx, var, expr).map_err(super::args::lift_dispatch_error)
+        }
         StepKind::Await { var, .. } => handlers::dispatch_await(var, &mut cx),
         StepKind::Cancel { var, .. } => handlers::dispatch_cancel(var, &mut cx),
         StepKind::Sleep { duration } => {
@@ -1107,8 +1182,12 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
 /// `line L` / `col C` when the step carries coordinates (parsed
 /// scripts do; hand-built steps keep the historical bare rendering).
 /// Applied once per dispatch level, so nested bodies chain outer and
-/// inner positions like a call path.
-fn step_error(step: &Step, idx: usize, err: anyhow::Error) -> anyhow::Error {
+/// inner positions like a call path. The text prefix stays
+/// byte-identical; when the step carries coordinates the position
+/// also attaches natively via `with_span` on the reclaimed
+/// diagnostic (innermost wins: span-less only, so outer dispatch
+/// levels never clobber the inner span).
+fn step_error(step: &Step, idx: usize, mut err: Diagnostic) -> Diagnostic {
     let mut loc = format!("step {}", idx + 1);
     if step.line > 0 {
         loc.push_str(&format!(", line {}", step.line));
@@ -1116,7 +1195,21 @@ fn step_error(step: &Step, idx: usize, err: anyhow::Error) -> anyhow::Error {
             loc.push_str(&format!(", col {}", step.col));
         }
     }
-    err.context(loc)
+    if step.line > 0 {
+        let span = if step.col > 0 {
+            Span::line_col(step.line, step.col)
+        } else {
+            Span::line_only(step.line)
+        };
+        // Innermost wins: outer dispatch levels never clobber the
+        // inner span, so the position stays at the failure site.
+        if err.span().is_none() {
+            err = err.with_span(span);
+        }
+    }
+    // Native frame storage (outermost first via prepend): renders
+    // byte-identical to the historic anyhow `.context(loc)` chain.
+    err.with_contexts(vec![loc])
 }
 
 /// Bundled inputs for [`execute_steps_inner`]. One struct parameter
@@ -1136,7 +1229,7 @@ struct InnerArgs<'a, P: ProcessManager> {
     wait_at_end: bool,
 }
 
-fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow> {
+fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> DiagnosticResult<Flow> {
     let InnerArgs {
         state,
         process,
@@ -1156,7 +1249,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
     for (idx, step) in steps.iter().enumerate() {
         // Check for cancellation before each step
         if state.cancel_token.load(Ordering::SeqCst) {
-            return Err(step_diag::eval_async_cancelled().into());
+            return Err(step_diag::eval_async_cancelled());
         }
         if step.scope_enter > 0 {
             for _ in 0..step.scope_enter {
@@ -1168,7 +1261,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
         // One position wrap per iteration: the closure funnels every
         // error path (including `?` inside match arms, which would
         // otherwise return past a post-hoc wrap) through `step_error`.
-        let flow_result: Result<Flow> = (|| {
+        let flow_result: DiagnosticResult<Flow> = (|| {
             if !should_run {
                 Ok(Flow::Done)
             } else {
@@ -1176,7 +1269,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                 // every other variant runs the shared leaf pipeline in
                 // `execute_single_step_with_generation`, so the two loops
                 // can never drift.
-                let flow_result: Result<Flow> = match &step.kind {
+                let flow_result: DiagnosticResult<Flow> = match &step.kind {
                     StepKind::FuncDef { .. }
                     | StepKind::Call { .. }
                     | StepKind::Return { .. }
@@ -1292,14 +1385,14 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
     let has_named = named_pending(state);
     if wait_at_end && (has_bg || has_named) {
         loop {
-            let mut failed_status: Option<anyhow::Error> = None;
+            let mut failed_status: Option<Diagnostic> = None;
 
             // Cancellation (deadline watcher or parent teardown) must break
             // the poll loop: without this, a stuck background handle would
             // hang the reaper forever. Flows into the shared fail-fast
             // teardown below.
             if failed_status.is_none() && state.cancel_token.load(Ordering::SeqCst) {
-                failed_status = Some(step_diag::eval_async_cancelled().into());
+                failed_status = Some(step_diag::eval_async_cancelled());
             }
 
             // 1. Poll anonymous background handles. Handles below the
@@ -1314,8 +1407,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                 match state.bg_children[i].handle.try_wait() {
                     Ok(Some(status)) => {
                         if !status.success() && failed_status.is_none() {
-                            failed_status =
-                                Some(step_diag::eval_async_exit_status(None, &status).into());
+                            failed_status = Some(step_diag::eval_async_exit_status(None, &status));
                             break;
                         }
                         state.bg_children.swap_remove(i);
@@ -1350,7 +1442,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                     enum Poll {
                         Pending,
                         CompletedOk,
-                        CompletedErr(anyhow::Error),
+                        CompletedErr(Diagnostic),
                     }
                     let poll = {
                         let mut guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1368,8 +1460,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                                     step_diag::eval_async_exit_status(
                                                         Some(*id),
                                                         &status,
-                                                    )
-                                                    .into(),
+                                                    ),
                                                 )
                                             }
                                         }
@@ -1510,7 +1601,7 @@ pub(super) fn execute_scoped_remote_body<P: ProcessManager>(
     err: Option<StreamHandle>,
     out_pipe: Option<Arc<PipeInner>>,
     stdin_pipe: Option<Arc<PipeInner>>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let flow = execute_scoped_steps(
         state,
         process,
@@ -1525,14 +1616,13 @@ pub(super) fn execute_scoped_remote_body<P: ProcessManager>(
     )?;
     match flow {
         Flow::Done => Ok(()),
-        Flow::Break { idx } => {
-            Err(step_diag::eval_flow_crosses_remote(idx + 1, KEYWORD_BREAK).into())
-        }
-        Flow::Continue { idx } => {
-            Err(step_diag::eval_flow_crosses_remote(idx + 1, KEYWORD_CONTINUE).into())
-        }
+        Flow::Break { idx } => Err(step_diag::eval_flow_crosses_remote(idx + 1, KEYWORD_BREAK)),
+        Flow::Continue { idx } => Err(step_diag::eval_flow_crosses_remote(
+            idx + 1,
+            KEYWORD_CONTINUE,
+        )),
         Flow::Return { idx, .. } => {
-            Err(step_diag::eval_flow_crosses_remote(idx + 1, KEYWORD_RETURN).into())
+            Err(step_diag::eval_flow_crosses_remote(idx + 1, KEYWORD_RETURN))
         }
     }
 }
@@ -1553,7 +1643,7 @@ pub(super) fn execute_scoped_steps<P: ProcessManager>(
     out_pipe: Option<Arc<PipeInner>>,
     stdin_pipe: Option<Arc<PipeInner>>,
     wait_at_end: bool,
-) -> Result<Flow> {
+) -> DiagnosticResult<Flow> {
     state.push_scope();
     let res = execute_steps(
         state,
@@ -1569,7 +1659,7 @@ pub(super) fn execute_scoped_steps<P: ProcessManager>(
     );
     // Restore the scope even when the body failed, but never let an
     // unwinding failure mask the body's own error.
-    let pop_res = state.pop_scope().map_err(anyhow::Error::from);
+    let pop_res = state.pop_scope();
     match (res, pop_res) {
         (Ok(flow), Ok(())) => Ok(flow),
         (Err(e), _) => Err(e),
@@ -1585,7 +1675,7 @@ fn dispatch_flow_step<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     generation: usize,
     idx: usize,
-) -> Result<Flow> {
+) -> DiagnosticResult<Flow> {
     match cmd {
         StepKind::FuncDef {
             name,
@@ -1595,14 +1685,18 @@ fn dispatch_flow_step<P: ProcessManager>(
             body,
             ..
         } => {
-            handlers::define_func(cx, name, params, return_type, *is_async, body)?;
+            handlers::define_func(cx, name, params, return_type, *is_async, body)
+                .map_err(super::args::lift_dispatch_error)?;
             Ok(Flow::Done)
         }
         StepKind::Call { name, args } => {
-            let _ = handlers::call_func_value(cx, name, args)?;
+            let _ = handlers::call_func_value(cx, name, args)
+                .map_err(super::args::lift_dispatch_error)?;
             Ok(Flow::Done)
         }
-        StepKind::Return { expr, .. } => handlers::handle_return(cx, idx, expr),
+        StepKind::Return { expr, .. } => {
+            handlers::handle_return(cx, idx, expr).map_err(super::args::lift_dispatch_error)
+        }
         StepKind::ImportFile { path, alias } => {
             let _ = super::import::import_file(cx, path, alias)?;
             Ok(Flow::Done)
@@ -1640,23 +1734,28 @@ fn dispatch_flow_step<P: ProcessManager>(
             then_body,
             else_ifs,
             else_body,
-        } => handlers::if_then(cx, cond, then_body, else_ifs, else_body),
+        } => handlers::if_then(cx, cond, then_body, else_ifs, else_body)
+            .map_err(super::args::lift_dispatch_error),
         StepKind::Switch {
             discriminant,
             cases,
             default_body,
-        } => handlers::switch_run(cx, discriminant, cases, default_body),
+        } => handlers::switch_run(cx, discriminant, cases, default_body)
+            .map_err(super::args::lift_dispatch_error),
         StepKind::Timeout { duration, body } => {
             let duration = super::args::resolve_arg_as_duration(duration, cx)?;
-            handlers::timeout(cx, &duration, body)
+            handlers::timeout(cx, &duration, body).map_err(super::args::lift_dispatch_error)
         }
         StepKind::Fail {
             code,
             message,
             body,
-        } => handlers::fail(cx, code, message, body),
-        StepKind::Isolated { body } => handlers::isolated(cx, body),
-        StepKind::WithIo { bindings, cmd } => handlers::with_io(cx, generation, idx, bindings, cmd),
+        } => handlers::fail(cx, code, message, body).map_err(super::args::lift_dispatch_error),
+        StepKind::Isolated { body } => {
+            handlers::isolated(cx, body).map_err(super::args::lift_dispatch_error)
+        }
+        StepKind::WithIo { bindings, cmd } => handlers::with_io(cx, generation, idx, bindings, cmd)
+            .map_err(super::args::lift_dispatch_error),
         StepKind::Bind {
             var,
             decl_type,
@@ -1666,5 +1765,223 @@ fn dispatch_flow_step<P: ProcessManager>(
         _ => {
             unreachable!("dispatch_flow_step handles only compound steps")
         }
+    }
+}
+
+#[cfg(test)]
+mod thread_handle_tests {
+    use super::super::exit::{exit_code_of, exit_code_of_diag};
+    use super::*;
+
+    fn bare_handle(join: Option<std::thread::JoinHandle<Result<()>>>) -> ThreadJoinHandle {
+        ThreadJoinHandle {
+            join,
+            cancel_token: Arc::new(AtomicBool::new(false)),
+            cancel_hub: Arc::new(oxdock_process::CancelHub::new()),
+            active_process: Arc::new(Mutex::new(None)),
+            worker: Arc::new(Mutex::new(None)),
+            thread_error: None,
+            thread_context: Vec::new(),
+            thread_exit_code: None,
+        }
+    }
+
+    #[test]
+    fn panic_payload_reports_thread_panicked_key() {
+        let join = std::thread::spawn(|| -> Result<()> {
+            panic!("boom-payload");
+        });
+        let mut handle = bare_handle(Some(join));
+        let err = anyhow::Error::new(handle.wait().expect_err("panic must surface"));
+        let diag = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+            .expect("keyed panic diagnostic survives");
+        assert_eq!(diag.key(), "dsl.eval.async_thread_panicked");
+        assert!(diag.message().contains("boom-payload"));
+    }
+
+    #[test]
+    fn wrapped_diagnostic_keeps_key_and_outer_context() {
+        let leaf = step_diag::eval_async_cancelled();
+        let join = std::thread::spawn(|| -> Result<()> {
+            Err(anyhow::Error::new(leaf).context("step 2").context("step 1"))
+        });
+        let mut handle = bare_handle(Some(join));
+        let err = anyhow::Error::new(handle.wait().expect_err("wrapped failure must surface"));
+        let diag = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+            .expect("key survives context wrappers");
+        assert_eq!(diag.key(), "dsl.eval.async_cancelled");
+        assert_eq!(
+            diag.contexts(),
+            &["step 1".to_string(), "step 2".to_string()],
+            "each outer frame replays natively in order: {err:#}"
+        );
+        assert_eq!(err.to_string(), "step 1: step 2: ASYNC task cancelled");
+    }
+
+    #[test]
+    fn sourceless_diagnostic_keeps_key_and_exit_code() {
+        let mut handle = bare_handle(None);
+        handle.thread_error = Some(step_diag::eval_async_cancelled());
+        handle.thread_exit_code = Some(7);
+        let diag = handle.reemit_error();
+        let err = anyhow::Error::new(diag.clone());
+        assert_eq!(exit_code_of(&err), Some(7));
+        assert_eq!(exit_code_of_diag(&diag), Some(7));
+        assert_eq!(diag.key(), "dsl.eval.async_cancelled");
+    }
+
+    #[test]
+    fn sourced_diagnostic_keeps_key_source_and_exit_code() {
+        let sourced = step_diag::eval_async_cancelled().with_source(Arc::new(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "gone",
+        )));
+        assert!(
+            std::error::Error::source(&sourced).is_some(),
+            "fixture must carry a source to cover the chained branch"
+        );
+        let mut handle = bare_handle(None);
+        handle.thread_error = Some(sourced);
+        handle.thread_exit_code = Some(7);
+        let diag = handle.reemit_error();
+        let err = anyhow::Error::new(diag.clone());
+        assert_eq!(exit_code_of(&err), Some(7));
+        assert_eq!(exit_code_of_diag(&diag), Some(7));
+        assert_eq!(diag.key(), "dsl.eval.async_cancelled");
+        let io = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+            .expect("original source survives behind the exit code");
+        assert_eq!(io.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            format!("{err:#}"),
+            "ASYNC task cancelled: EXIT requested with code 7: gone"
+        );
+    }
+
+    #[test]
+    fn unkeyed_thread_error_reports_dispatch_failed_without_duplicating_chain() {
+        let join = std::thread::spawn(|| -> Result<()> {
+            Err(anyhow::Error::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))
+            .context("step 3"))
+        });
+        let mut handle = bare_handle(Some(join));
+        let diag = handle.wait().expect_err("unkeyed failure must surface");
+        let err = anyhow::Error::new(diag.clone());
+        assert_eq!(diag.key(), "dsl.eval.dispatch_failed");
+        assert_eq!(format!("{err:#}"), "step 3: denied");
+    }
+
+    #[test]
+    fn bare_exit_request_relays_as_keyed_diagnostic() {
+        let join = std::thread::spawn(|| -> Result<()> {
+            Err(anyhow::Error::new(super::super::exit::ExitRequest::new(7)).context("step 2"))
+        });
+        let mut handle = bare_handle(Some(join));
+        let diag = handle.wait().expect_err("exit request must surface");
+        let err = anyhow::Error::new(diag.clone());
+        assert_eq!(exit_code_of(&err), Some(7));
+        assert_eq!(exit_code_of_diag(&diag), Some(7));
+        assert_eq!(diag.key(), "dsl.eval.exit_requested");
+        assert_eq!(diag.fields().get("code"), Some(&"7".to_string()));
+        assert_eq!(format!("{err:#}"), "step 2: EXIT requested with code 7");
+    }
+}
+
+#[cfg(test)]
+mod step_error_tests {
+    use super::*;
+    use oxdock_parser::StepKind;
+
+    fn step_at(line: usize, col: usize) -> Step {
+        Step {
+            guard: None,
+            kind: StepKind::Break,
+            scope_enter: 0,
+            scope_exit: 0,
+            line,
+            col,
+        }
+    }
+
+    #[test]
+    fn coordinates_attach_span_and_keep_text_prefix() {
+        let leaf = step_diag::eval_async_cancelled();
+        assert!(leaf.span().is_none());
+        let err = step_error(&step_at(5, 3), 0, leaf);
+        let span = err.span().expect("coordinates attach natively");
+        assert_eq!(span.line, 5);
+        assert_eq!(span.col_start, Some(3));
+        assert!(
+            format!("{err:#}").starts_with("step 1, line 5, col 3: "),
+            "text prefix stays byte-identical: {err:#}"
+        );
+    }
+
+    #[test]
+    fn innermost_span_wins_on_nested_dispatch() {
+        let leaf = step_diag::eval_async_cancelled();
+        let inner = step_error(&step_at(5, 3), 1, leaf);
+        let outer = step_error(&step_at(9, 1), 0, inner);
+        let span = outer.span().expect("span survives");
+        assert_eq!((span.line, span.col_start), (5, Some(3)));
+        assert!(
+            format!("{outer:#}").starts_with("step 1, line 9, col 1: step 2, line 5, col 3: "),
+            "both text frames chain like a call path: {outer:#}"
+        );
+    }
+
+    #[test]
+    fn unknown_position_keeps_bare_prefix_without_span() {
+        let leaf = step_diag::eval_async_cancelled();
+        let err = step_error(&step_at(0, 0), 0, leaf);
+        assert!(err.span().is_none());
+        assert_eq!(format!("{err:#}"), "step 1: ASYNC task cancelled");
+    }
+
+    #[test]
+    fn prespanned_outermost_diagnostic_keeps_its_span() {
+        // Innermost wins: a prespanned head keeps its span, the outer
+        // step only prepends its text frame.
+        let leaf = step_diag::eval_async_cancelled().with_span(Span::line_col(2, 4));
+        let err = step_error(&step_at(9, 1), 0, leaf);
+        let span = err.span().expect("span survives");
+        assert_eq!((span.line, span.col_start), (2, Some(4)));
+    }
+
+    #[test]
+    fn synthetic_inner_yields_to_parsed_outer_coordinates() {
+        // The inner step carries no coordinates, so its wrap leaves the
+        // diagnostic span-less; the outer parsed step still attaches
+        // natively.
+        let leaf = step_diag::eval_async_cancelled();
+        let inner = step_error(&step_at(0, 0), 1, leaf);
+        let outer = step_error(&step_at(9, 1), 0, inner);
+        let span = outer.span().expect("outer coordinates attach");
+        assert_eq!((span.line, span.col_start), (9, Some(1)));
+        assert!(
+            format!("{outer:#}").starts_with("step 1, line 9, col 1: step 2: "),
+            "inner text frame replays under the outer prefix: {outer:#}"
+        );
+    }
+
+    #[test]
+    fn line_without_column_attaches_line_only_span() {
+        let leaf = step_diag::eval_async_cancelled();
+        let err = step_error(&step_at(7, 0), 0, leaf);
+        let span = err.span().expect("line-only span attaches");
+        assert_eq!(span.line, 7);
+        assert_eq!(span.col_start, None);
+        assert!(
+            format!("{err:#}").starts_with("step 1, line 7: "),
+            "prefix names the line with no column: {err:#}"
+        );
     }
 }

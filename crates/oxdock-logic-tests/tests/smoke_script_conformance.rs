@@ -20,7 +20,7 @@ fn load_workflow() -> Result<String> {
     let workflow_path = resolver
         .root()
         .join(".github/workflows/install-smoke.yml")?;
-    resolver.read_to_string(&workflow_path)
+    Ok(resolver.read_to_string(&workflow_path)?)
 }
 
 /// Extract `run:` literal blocks belonging to `shell: oxdock*` steps.

@@ -27,8 +27,8 @@ pub fn load_or_create_host_key<P: ProcessManager>(
     };
     let root = cx.cwd().root();
     let guarded = anchor_key_path(root, raw, func)?;
-    let resolver =
-        PathResolver::new(root, root).map_err(|e| ssh_diag::host_key_resolver_failed(func, &e))?;
+    let resolver = PathResolver::new(root, root)
+        .map_err(|e| ssh_diag::host_key_resolver_failed(func, &anyhow::Error::from(e)))?;
     if !resolver.exists(&guarded) {
         let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
             .map_err(ssh_diag::host_key_generate_failed)?;
@@ -37,7 +37,12 @@ pub fn load_or_create_host_key<P: ProcessManager>(
             .map_err(ssh_diag::host_key_encode_failed)?;
         match resolver.write_private_file(&guarded, pem.as_bytes()) {
             Ok(()) => return Ok(Some(key)),
-            Err(err) if is_io_kind(&err, std::io::ErrorKind::AlreadyExists) => {
+            Err(err)
+                if is_io_kind(
+                    &anyhow::Error::from(err.clone()),
+                    std::io::ErrorKind::AlreadyExists,
+                ) =>
+            {
                 // Lost the first-start race: the winner creates the file
                 // empty (`create_new`) and fills it after, so a first
                 // read here can catch a partial PEM. Retry briefly; a
@@ -51,7 +56,7 @@ pub fn load_or_create_host_key<P: ProcessManager>(
                 // partial so the next boot regenerates instead of
                 // tripping the parse gate on our own rubbish.
                 let _ = resolver.remove_file(&guarded);
-                return Err(ssh_diag::host_key_write_failed(&err));
+                return Err(ssh_diag::host_key_write_failed(&anyhow::Error::new(err)));
             }
         }
     }
@@ -79,14 +84,14 @@ fn anchor_key_path(root: &std::path::Path, raw: &str, func: &str) -> DiagnosticR
             return Err(ssh_diag::key_path_escapes(func, raw));
         };
         return GuardedPath::new_root(root)
-            .map_err(|e| ssh_diag::key_guard_failed(func, &e))?
+            .map_err(|e| ssh_diag::key_guard_failed(func, &anyhow::Error::from(e)))?
             .join(rel_str)
-            .map_err(|e| ssh_diag::key_path_join_failed(func, raw, &e));
+            .map_err(|e| ssh_diag::key_path_join_failed(func, raw, &anyhow::Error::from(e)));
     }
     GuardedPath::new_root(root)
-        .map_err(|e| ssh_diag::key_guard_failed(func, &e))?
+        .map_err(|e| ssh_diag::key_guard_failed(func, &anyhow::Error::from(e)))?
         .join(&normalized)
-        .map_err(|e| ssh_diag::key_path_join_failed(func, raw, &e))
+        .map_err(|e| ssh_diag::key_path_join_failed(func, raw, &anyhow::Error::from(e)))
 }
 
 /// Bounded re-read for every host-key load: the winner's PEM bytes land
@@ -101,9 +106,9 @@ fn read_existing_key_retry(
     guarded: &GuardedPath,
     func: &str,
 ) -> DiagnosticResult<Option<PrivateKey>> {
-    let meta = resolver
-        .metadata(guarded)
-        .map_err(|e| ssh_diag::host_key_stat_failed(&guarded.display().to_string(), &e))?;
+    let meta = resolver.metadata(guarded).map_err(|e| {
+        ssh_diag::host_key_stat_failed(&guarded.display().to_string(), &anyhow::Error::new(e))
+    })?;
     assert_safe_mode(guarded, &meta, func)?;
     let mut attempts = 0;
     loop {
@@ -134,9 +139,9 @@ fn read_and_parse_key(
     guarded: &GuardedPath,
     func: &str,
 ) -> DiagnosticResult<PrivateKey> {
-    let bytes = resolver
-        .read_file(guarded)
-        .map_err(|e| ssh_diag::host_key_read_failed(func, &guarded.display().to_string(), &e))?;
+    let bytes = resolver.read_file(guarded).map_err(|e| {
+        ssh_diag::host_key_read_failed(func, &guarded.display().to_string(), &anyhow::Error::new(e))
+    })?;
     PrivateKey::from_openssh(&bytes)
         .map_err(|e| ssh_diag::host_key_parse_failed(func, &guarded.display().to_string(), e))
 }

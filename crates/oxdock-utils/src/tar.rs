@@ -118,12 +118,13 @@ pub fn sanitize_rel(raw: &str) -> DiagnosticResult<String> {
 
 /// Pack entries to gzip bytes on `dest`, streaming file content straight
 /// from readers with O(chunk) memory. Returns the entry count; hashing
-/// rides on the caller wrapping `dest` in [`HashingWriter`].
+/// rides on the caller wrapping `dest` in [`HashingWriter`]. Driver and
+/// reader I/O failures surface through the `tar.pack.failed` owner.
 pub fn pack_to<W: Write>(
     dest: W,
     files: &mut [(String, u64, Box<dyn Read + Send>)],
     dirs: &[String],
-) -> Result<u64> {
+) -> DiagnosticResult<u64> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
     let encoder = GzEncoder::new(dest, Compression::default());
@@ -137,7 +138,9 @@ pub fn pack_to<W: Write>(
         header.set_entry_type(tar::EntryType::Directory);
         header.set_size(0);
         header.set_cksum();
-        builder.append_data(&mut header, &rel, std::io::empty())?;
+        builder
+            .append_data(&mut header, &rel, std::io::empty())
+            .map_err(|e| tar_diag::pack_from_anyhow(e.into()))?;
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
     for (rel, len, reader) in files.iter_mut() {
@@ -147,9 +150,15 @@ pub fn pack_to<W: Write>(
         header.set_mode(0o644);
         header.set_size(*len);
         header.set_cksum();
-        builder.append_data(&mut header, &sanitized, reader.as_mut())?;
+        builder
+            .append_data(&mut header, &sanitized, reader.as_mut())
+            .map_err(|e| tar_diag::pack_from_anyhow(e.into()))?;
     }
-    builder.into_inner()?.try_finish()?;
+    builder
+        .into_inner()
+        .map_err(|e| tar_diag::pack_from_anyhow(e.into()))?
+        .try_finish()
+        .map_err(|e| tar_diag::pack_from_anyhow(e.into()))?;
     Ok((files.len() + sorted_dirs.len()) as u64)
 }
 
@@ -166,11 +175,13 @@ pub fn verify_sha256(bytes: &[u8], expected: &str) -> DiagnosticResult<()> {
 /// Unpack a gzip archive from `src`, invoking `apply` per entry as bytes
 /// arrive. File readers borrow the archive driver: consume each fully
 /// inside the callback. Malformed archives fail the session with an
-/// error, never a panic.
+/// error, never a panic. The `apply` callback stays `anyhow` (callers
+/// span permanent-carrier crates), lifted losslessly via
+/// [`tar_diag::from_anyhow`].
 pub fn unpack_from<R: Read>(
     src: R,
     apply: &mut dyn FnMut(StreamedEntry) -> Result<()>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     use flate2::read::GzDecoder;
     let decoder = GzDecoder::new(src);
     drain_entries(&mut tar::Archive::new(decoder), apply)
@@ -193,18 +204,18 @@ const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 pub fn unpack_auto_from<R: Read>(
     mut src: R,
     apply: &mut dyn FnMut(StreamedEntry) -> Result<()>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut head = [0u8; 2];
     let mut filled = 0usize;
     while filled < 2 {
         match src.read(&mut head[filled..]) {
             Ok(0) => break,
             Ok(n) => filled += n,
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(tar_diag::from_anyhow(e.into())),
         }
     }
     if filled == 0 {
-        return Err(anyhow::Error::new(tar_diag::archive_empty()));
+        return Err(tar_diag::archive_empty());
     }
     let chained = std::io::Cursor::new(head[..filled].to_vec()).chain(src);
     if filled == 2 && head == GZIP_MAGIC {
@@ -219,18 +230,18 @@ pub fn unpack_auto_from<R: Read>(
 fn unpack_raw_checked<R: Read>(
     mut src: R,
     apply: &mut dyn FnMut(StreamedEntry) -> Result<()>,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let mut first = vec![0u8; 512];
     let mut filled = 0usize;
     while filled < first.len() {
         match src.read(&mut first[filled..]) {
             Ok(0) => break,
             Ok(n) => filled += n,
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(tar_diag::from_anyhow(e.into())),
         }
     }
     if filled < first.len() {
-        return Err(anyhow::Error::new(tar_diag::archive_truncated(filled)));
+        return Err(tar_diag::archive_truncated(filled));
     }
     let chained = std::io::Cursor::new(first).chain(src);
     drain_entries(&mut tar::Archive::new(chained), apply)
@@ -242,30 +253,42 @@ fn unpack_raw_checked<R: Read>(
 fn drain_entries<R: Read>(
     archive: &mut tar::Archive<R>,
     apply: &mut dyn FnMut(StreamedEntry) -> Result<()>,
-) -> Result<()> {
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let raw = entry.path()?.to_string_lossy().to_string();
+) -> DiagnosticResult<()> {
+    for entry in archive
+        .entries()
+        .map_err(|e| tar_diag::from_anyhow(e.into()))?
+    {
+        let mut entry = entry.map_err(|e| tar_diag::from_anyhow(e.into()))?;
+        let raw = entry
+            .path()
+            .map_err(|e| tar_diag::from_anyhow(e.into()))?
+            .to_string_lossy()
+            .to_string();
         let rel = sanitize_rel(&raw)?;
         let mode = entry.header().mode().unwrap_or(0);
         match entry.header().entry_type() {
-            t if t.is_dir() => apply(StreamedEntry::Dir { path: rel, mode })?,
+            t if t.is_dir() => {
+                apply(StreamedEntry::Dir { path: rel, mode }).map_err(tar_diag::from_anyhow)?
+            }
             t if t.is_symlink() || t.is_hard_link() => {
                 let target = entry
-                    .link_name()?
+                    .link_name()
+                    .map_err(|e| tar_diag::from_anyhow(e.into()))?
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
-                apply(StreamedEntry::Symlink { path: rel, target })?;
+                apply(StreamedEntry::Symlink { path: rel, target })
+                    .map_err(tar_diag::from_anyhow)?;
             }
             t if t.is_file() => {
                 apply(StreamedEntry::File {
                     path: rel,
                     mode,
                     reader: &mut entry,
-                })?;
+                })
+                .map_err(tar_diag::from_anyhow)?;
             }
             other => {
-                return Err(anyhow::Error::new(tar_diag::unsupported_type(&other, &raw)));
+                return Err(tar_diag::unsupported_type(&other, &raw));
             }
         }
     }

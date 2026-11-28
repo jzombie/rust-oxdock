@@ -8,7 +8,9 @@
 //! path is ignored; `warn_on_shadowed_dist` names it so repos
 //! carrying stale copies from older releases know to delete them.
 
-use anyhow::{Context, Result};
+use oxdock_diagnostics::DiagnosticResult;
+
+use crate::diagnostics as render_diag;
 #[allow(clippy::disallowed_types)]
 use oxdock_fs::UnguardedPath;
 use oxdock_fs::{
@@ -133,17 +135,17 @@ pub(crate) fn warn_on_shadowed_dist(resolver: &PathResolver, root: &GuardedPath)
 }
 
 impl WorkspaceFs for EmbeddedFiles {
-    fn canonicalize(&self, path: &GuardedPath) -> Result<GuardedPath> {
+    fn canonicalize(&self, path: &GuardedPath) -> DiagnosticResult<GuardedPath> {
         self.inner.canonicalize(path)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata> {
+    fn metadata(&self, path: &GuardedPath) -> DiagnosticResult<std::fs::Metadata> {
         self.inner.metadata(path)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn metadata_unguarded(&self, path: &UnguardedPath) -> Result<std::fs::Metadata> {
+    fn metadata_unguarded(&self, path: &UnguardedPath) -> DiagnosticResult<std::fs::Metadata> {
         self.inner.metadata_unguarded(path)
     }
 
@@ -195,7 +197,7 @@ impl WorkspaceFs for EmbeddedFiles {
         self.inner.concretize_cwd(cwd)
     }
 
-    fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>> {
+    fn read_file(&self, path: &GuardedPath) -> DiagnosticResult<Vec<u8>> {
         if let Some(bytes) = embedded_for(path) {
             return Ok(bytes.to_vec());
         }
@@ -203,22 +205,22 @@ impl WorkspaceFs for EmbeddedFiles {
     }
 
     #[allow(clippy::disallowed_types)]
-    fn read_file_unguarded(&self, path: &UnguardedPath) -> Result<Vec<u8>> {
+    fn read_file_unguarded(&self, path: &UnguardedPath) -> DiagnosticResult<Vec<u8>> {
         self.inner.read_file_unguarded(path)
     }
 
-    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
+    fn open_read(&self, path: &GuardedPath) -> DiagnosticResult<Box<dyn std::io::Read + Send>> {
         if let Some(bytes) = embedded_for(path) {
             return Ok(Box::new(std::io::Cursor::new(bytes)));
         }
         self.inner.open_read(path)
     }
 
-    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
+    fn open_write(&self, path: &GuardedPath) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         self.inner.open_write(path)
     }
 
-    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
+    fn open_append(&self, path: &GuardedPath) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         self.inner.open_append(path)
     }
 
@@ -226,7 +228,7 @@ impl WorkspaceFs for EmbeddedFiles {
         &self,
         path: &GuardedPath,
         expected_root: &GuardedPath,
-    ) -> Result<Box<dyn std::io::Read + Send>> {
+    ) -> DiagnosticResult<Box<dyn std::io::Read + Send>> {
         if let Some(bytes) = embedded_for(path) {
             return Ok(Box::new(std::io::Cursor::new(bytes)));
         }
@@ -237,155 +239,184 @@ impl WorkspaceFs for EmbeddedFiles {
         &self,
         path: &GuardedPath,
         expected_root: &GuardedPath,
-    ) -> Result<Box<dyn std::io::Write + Send>> {
+    ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         self.inner.open_write_nofollow(path, expected_root)
     }
 
-    fn read_to_string(&self, path: &GuardedPath) -> Result<String> {
+    fn read_to_string(&self, path: &GuardedPath) -> DiagnosticResult<String> {
         if let Some(bytes) = embedded_for(path) {
-            return String::from_utf8(bytes.to_vec()).context("embedded pipeline is not UTF-8");
+            return String::from_utf8(bytes.to_vec()).map_err(|_| render_diag::embedded_not_utf8());
         }
         self.inner.read_to_string(path)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn read_to_string_unguarded(&self, path: &UnguardedPath) -> Result<String> {
+    fn read_to_string_unguarded(&self, path: &UnguardedPath) -> DiagnosticResult<String> {
         self.inner.read_to_string_unguarded(path)
     }
 
-    fn read_dir_entries(&self, path: &GuardedPath) -> Result<Vec<DirEntry>> {
+    fn read_dir_entries(&self, path: &GuardedPath) -> DiagnosticResult<Vec<DirEntry>> {
         self.inner.read_dir_entries(path)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn read_dir_entries_unguarded(&self, path: &UnguardedPath) -> Result<Vec<DirEntry>> {
+    fn read_dir_entries_unguarded(&self, path: &UnguardedPath) -> DiagnosticResult<Vec<DirEntry>> {
         self.inner.read_dir_entries_unguarded(path)
     }
 
-    fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+    fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         self.inner.write_file(path, contents)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn write_file_unguarded(&self, path: &UnguardedPath, contents: &[u8]) -> Result<()> {
+    fn write_file_unguarded(&self, path: &UnguardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         self.inner.write_file_unguarded(path, contents)
     }
 
-    fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+    fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         self.inner.append_file(path, contents)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn append_file_unguarded(&self, path: &UnguardedPath, contents: &[u8]) -> Result<()> {
+    fn append_file_unguarded(&self, path: &UnguardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         self.inner.append_file_unguarded(path, contents)
     }
 
-    fn create_dir_all(&self, path: &GuardedPath) -> Result<()> {
+    fn create_dir_all(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         self.inner.create_dir_all(path)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn create_dir_all_unguarded(&self, path: &UnguardedPath) -> Result<()> {
+    fn create_dir_all_unguarded(&self, path: &UnguardedPath) -> DiagnosticResult<()> {
         self.inner.create_dir_all_unguarded(path)
     }
 
-    fn ensure_parent_dir(&self, path: &GuardedPath) -> Result<()> {
+    fn ensure_parent_dir(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         self.inner.ensure_parent_dir(path)
     }
 
-    fn remove_file(&self, path: &GuardedPath) -> Result<()> {
+    fn remove_file(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         self.inner.remove_file(path)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn remove_file_unguarded(&self, path: &UnguardedPath) -> Result<()> {
+    fn remove_file_unguarded(&self, path: &UnguardedPath) -> DiagnosticResult<()> {
         self.inner.remove_file_unguarded(path)
     }
 
-    fn remove_dir_all(&self, path: &GuardedPath) -> Result<()> {
+    fn remove_dir_all(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         self.inner.remove_dir_all(path)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn remove_dir_all_unguarded(&self, path: &UnguardedPath) -> Result<()> {
+    fn remove_dir_all_unguarded(&self, path: &UnguardedPath) -> DiagnosticResult<()> {
         self.inner.remove_dir_all_unguarded(path)
     }
 
-    fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()> {
+    fn remove_empty_dir(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         self.inner.remove_empty_dir(path)
     }
 
-    fn remove_link_if_symlink(&self, cwd: &GuardedPath, rel: &str) -> Result<bool> {
+    fn remove_link_if_symlink(&self, cwd: &GuardedPath, rel: &str) -> DiagnosticResult<bool> {
         self.inner.remove_link_if_symlink(cwd, rel)
     }
 
-    fn copy_file(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<u64> {
+    fn copy_file(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<u64> {
         self.inner.copy_file(src, dst)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn copy_file_unguarded(&self, src: &UnguardedPath, dst: &UnguardedPath) -> Result<u64> {
+    fn copy_file_unguarded(
+        &self,
+        src: &UnguardedPath,
+        dst: &UnguardedPath,
+    ) -> DiagnosticResult<u64> {
         self.inner.copy_file_unguarded(src, dst)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn copy_file_from_unguarded(&self, src: &UnguardedPath, dst: &GuardedPath) -> Result<u64> {
+    fn copy_file_from_unguarded(
+        &self,
+        src: &UnguardedPath,
+        dst: &GuardedPath,
+    ) -> DiagnosticResult<u64> {
         self.inner.copy_file_from_unguarded(src, dst)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn copy_file_to_unguarded(&self, src: &GuardedPath, dst: &UnguardedPath) -> Result<u64> {
+    fn copy_file_to_unguarded(
+        &self,
+        src: &GuardedPath,
+        dst: &UnguardedPath,
+    ) -> DiagnosticResult<u64> {
         self.inner.copy_file_to_unguarded(src, dst)
     }
 
-    fn copy_dir_recursive(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
+    fn copy_dir_recursive(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<()> {
         self.inner.copy_dir_recursive(src, dst)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn copy_dir_from_unguarded(&self, src: &UnguardedPath, dst: &GuardedPath) -> Result<()> {
+    fn copy_dir_from_unguarded(
+        &self,
+        src: &UnguardedPath,
+        dst: &GuardedPath,
+    ) -> DiagnosticResult<()> {
         self.inner.copy_dir_from_unguarded(src, dst)
     }
 
-    fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
+    fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<()> {
         self.inner.symlink(src, dst)
     }
 
-    fn install_file_atomic(&self, src: &GuardedPath, dst: &GuardedPath, mode: u32) -> Result<()> {
+    fn install_file_atomic(
+        &self,
+        src: &GuardedPath,
+        dst: &GuardedPath,
+        mode: u32,
+    ) -> DiagnosticResult<()> {
         self.inner.install_file_atomic(src, dst, mode)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn open_file_unguarded(&self, path: &UnguardedPath) -> Result<std::fs::File> {
+    fn open_file_unguarded(&self, path: &UnguardedPath) -> DiagnosticResult<std::fs::File> {
         self.inner.open_file_unguarded(path)
     }
 
-    fn set_permissions_mode_unix(&self, path: &GuardedPath, mode: u32) -> Result<()> {
+    fn set_permissions_mode_unix(&self, path: &GuardedPath, mode: u32) -> DiagnosticResult<()> {
         self.inner.set_permissions_mode_unix(path, mode)
     }
 
     #[allow(clippy::disallowed_types)]
-    fn set_permissions_mode_unix_unguarded(&self, path: &UnguardedPath, mode: u32) -> Result<()> {
+    fn set_permissions_mode_unix_unguarded(
+        &self,
+        path: &UnguardedPath,
+        mode: u32,
+    ) -> DiagnosticResult<()> {
         self.inner.set_permissions_mode_unix_unguarded(path, mode)
     }
 
-    fn resolve_workdir(&self, current: &GuardedPath, new_dir: &str) -> Result<GuardedPath> {
+    fn resolve_workdir(
+        &self,
+        current: &GuardedPath,
+        new_dir: &str,
+    ) -> DiagnosticResult<GuardedPath> {
         self.inner.resolve_workdir(current, new_dir)
     }
 
-    fn resolve_read(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath> {
+    fn resolve_read(&self, cwd: &GuardedPath, rel: &str) -> DiagnosticResult<GuardedPath> {
         self.inner.resolve_read(cwd, rel)
     }
 
-    fn resolve_write(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath> {
+    fn resolve_write(&self, cwd: &GuardedPath, rel: &str) -> DiagnosticResult<GuardedPath> {
         self.inner.resolve_write(cwd, rel)
     }
 
-    fn resolve_copy_source(&self, from: &str) -> Result<GuardedPath> {
+    fn resolve_copy_source(&self, from: &str) -> DiagnosticResult<GuardedPath> {
         self.inner.resolve_copy_source(from)
     }
 
-    fn resolve_copy_source_from_workspace(&self, from: &str) -> Result<GuardedPath> {
+    fn resolve_copy_source_from_workspace(&self, from: &str) -> DiagnosticResult<GuardedPath> {
         self.inner.resolve_copy_source_from_workspace(from)
     }
 
@@ -393,11 +424,11 @@ impl WorkspaceFs for EmbeddedFiles {
         &self,
         root: CopySourceRoot,
         from: &str,
-    ) -> Result<GuardedPath> {
+    ) -> DiagnosticResult<GuardedPath> {
         self.inner.resolve_copy_source_from_target(root, from)
     }
 
-    fn entry_kind(&self, path: &GuardedPath) -> Result<EntryKind> {
+    fn entry_kind(&self, path: &GuardedPath) -> DiagnosticResult<EntryKind> {
         if embedded_for(path).is_some() {
             return Ok(EntryKind::File);
         }
@@ -405,11 +436,11 @@ impl WorkspaceFs for EmbeddedFiles {
     }
 
     #[allow(clippy::disallowed_types)]
-    fn entry_kind_unguarded(&self, path: &UnguardedPath) -> Result<EntryKind> {
+    fn entry_kind_unguarded(&self, path: &UnguardedPath) -> DiagnosticResult<EntryKind> {
         self.inner.entry_kind_unguarded(path)
     }
 
-    fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<EntryKind> {
+    fn entry_kind_no_follow(&self, path: &GuardedPath) -> DiagnosticResult<EntryKind> {
         if embedded_for(path).is_some() {
             return Ok(EntryKind::File);
         }
@@ -422,7 +453,7 @@ impl WorkspaceFs for EmbeddedFiles {
         from: &str,
         to: &GuardedPath,
         include_dirty: bool,
-    ) -> Result<()> {
+    ) -> DiagnosticResult<()> {
         self.inner.copy_from_git(rev, from, to, include_dirty)
     }
 
