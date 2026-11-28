@@ -230,11 +230,13 @@ pub fn try_embed_assets(spec: &EmbedSpec) -> DiagnosticResult<Vec<String>> {
     let resolver = PathResolver::from_manifest_env()?;
     let module_path = module_guarded_path(&out_dir, &module_file_name(&spec.name))?;
     let asset_root = out_dir.join(&spec.subdir_name())?;
-    let assets =
-        gather_assets(&resolver, &asset_root).map_err(|e| build_diag::collect_assets_failed(&e))?;
+    let assets = gather_assets(&resolver, &asset_root).map_err(|e| {
+        let inner = build_diag::from_anyhow(e);
+        build_diag::collect_assets_failed(&inner)
+    })?;
     let name_ident = syn::Ident::new(&spec.name, proc_macro2::Span::call_site());
-    let module = emit_embed_module(&name_ident, &assets)
-        .map_err(|e| build_diag::from_anyhow(anyhow::Error::new(e)))?;
+    let module =
+        emit_embed_module(&name_ident, &assets).map_err(|e| build_diag::from_anyhow(e.into()))?;
     resolver.write_file(&module_path, module.to_string().as_bytes())?;
     Ok(directives)
 }
@@ -270,14 +272,13 @@ fn init() {
 fn out_dir_root() -> DiagnosticResult<GuardedPath> {
     let out = std::env::var(oxdock_env::cargo::build::OUT_DIR)
         .map_err(|err| build_diag::out_dir_missing(&err))?;
-    GuardedPath::new_root_from_str(&out)
-        .map_err(|e| build_diag::invalid_out_dir(&out, &anyhow::Error::from(e)))
+    GuardedPath::new_root_from_str(&out).map_err(|e| build_diag::invalid_out_dir(&out, &e))
 }
 
 fn module_guarded_path(out_dir: &GuardedPath, rel: &str) -> DiagnosticResult<GuardedPath> {
     out_dir
         .join(rel)
-        .map_err(|e| build_diag::module_path_rejected(&anyhow::Error::from(e)))
+        .map_err(|e| build_diag::module_path_rejected(&e))
 }
 
 impl EmbedSpec {
@@ -292,16 +293,15 @@ fn script_text(source: DslSource) -> DiagnosticResult<(String, Option<String>)> 
     match source {
         DslSource::Inline(text) => Ok((text.to_string(), None)),
         DslSource::File(rel) => {
-            let resolver = PathResolver::from_manifest_env().map_err(|err| {
-                build_diag::manifest_dir_missing_for_dsl_resolution(&anyhow::Error::from(err))
-            })?;
+            let resolver = PathResolver::from_manifest_env()
+                .map_err(|err| build_diag::manifest_dir_missing_for_dsl_resolution(&err))?;
             let guarded = resolver
                 .root()
                 .join(rel)
-                .map_err(|e| build_diag::dsl_path_escapes_manifest(rel, &anyhow::Error::from(e)))?;
+                .map_err(|e| build_diag::dsl_path_escapes_manifest(rel, &e))?;
             let text = resolver
                 .read_to_string(&guarded)
-                .map_err(|err| build_diag::dsl_script_read_failed(rel, &anyhow::Error::new(err)))?;
+                .map_err(|err| build_diag::dsl_script_read_failed(rel, &err))?;
             Ok((text, Some(rel.to_string())))
         }
     }
@@ -317,8 +317,10 @@ fn run_spec(
 
     // Directives are computed even on the skip path callers may inspect them,
     // but only the non-skip path returns them for emission.
-    let steps =
-        oxdock_core::parse_script(&text).map_err(|e| build_diag::script_parse_failed(&e))?;
+    let steps = oxdock_core::parse_script(&text).map_err(|e| {
+        let inner = build_diag::from_anyhow(e);
+        build_diag::script_parse_failed(&inner)
+    })?;
     let (changed, env_changed) = plan_input_directives(&steps);
 
     let mut directives: Vec<String> = Vec::new();
@@ -392,19 +394,17 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> DiagnosticRe
     let debug = debug_enabled_from(std::env::var(oxdock_env::oxdock::EMBED_DEBUG).ok());
 
     // Parse first so LOCAL-only scripts never create a snapshot directory.
-    let steps =
-        oxdock_core::parse_script(script).map_err(|e| build_diag::script_parse_failed(&e))?;
-    let resolver = PathResolver::from_manifest_env()
-        .map_err(|err| build_diag::manifest_dir_missing(&anyhow::Error::from(err)))?;
+    let steps = oxdock_core::parse_script(script).map_err(|e| {
+        let inner = build_diag::from_anyhow(e);
+        build_diag::script_parse_failed(&inner)
+    })?;
+    let resolver =
+        PathResolver::from_manifest_env().map_err(|err| build_diag::manifest_dir_missing(&err))?;
     let workspace_root = oxdock_fs::discover_workspace_root()
-        .map_err(|err| build_diag::workspace_root_discover_failed(&anyhow::Error::from(err)))?;
+        .map_err(|err| build_diag::workspace_root_discover_failed(&err))?;
 
-    let output =
-        run_steps_with_lazy_snapshot(&workspace_root, &steps, ExecIo::new()).map_err(|e| {
-            // Alternate formatting keeps the full chain + filesystem snapshot.
-            let reason = anyhow::Error::from(e);
-            build_diag::script_execution_failed(&reason)
-        })?;
+    let output = run_steps_with_lazy_snapshot(&workspace_root, &steps, ExecIo::new())
+        .map_err(|e| build_diag::script_execution_failed(&e))?;
     let final_cwd = output.final_cwd;
 
     if debug {
@@ -426,12 +426,9 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> DiagnosticRe
         // unguarded escape hatch, exactly as in the historical proc-macro flow.
         #[allow(clippy::disallowed_types)]
         let final_external = UnguardedPath::external(final_cwd.as_path().to_path_buf());
-        let meta = resolver.metadata_unguarded(&final_external).map_err(|e| {
-            build_diag::final_workdir_missing(
-                &final_cwd.display().to_string(),
-                &anyhow::Error::new(e),
-            )
-        })?;
+        let meta = resolver
+            .metadata_unguarded(&final_external)
+            .map_err(|e| build_diag::final_workdir_missing(&final_cwd.display().to_string(), &e))?;
         if !meta.is_dir() {
             return Err(build_diag::final_workdir_not_dir(
                 &final_cwd.display().to_string(),
@@ -488,9 +485,9 @@ fn ensure_materialize_dir(resolver: &PathResolver, target: &GuardedPath) -> Diag
         }
         return Ok(());
     }
-    resolver.create_dir_all(target).map_err(|e| {
-        build_diag::out_dir_create_failed(&target.display().to_string(), &anyhow::Error::new(e))
-    })
+    resolver
+        .create_dir_all(target)
+        .map_err(|e| build_diag::out_dir_create_failed(&target.display().to_string(), &e))
 }
 
 /// Typed placeholder used when IDE-skip predicates short-circuit the build:
@@ -624,7 +621,7 @@ pub fn stage_materialize(
 
     resolver
         .copy_dir_from_unguarded(final_external, &stage)
-        .map_err(|e| build_diag::stage_copy_failed(&anyhow::Error::from(e)))?;
+        .map_err(|e| build_diag::stage_copy_failed(&e))?;
     for marker in SANDBOX_MARKERS {
         let marker_path = stage.join(marker)?;
         if resolver.entry_kind(&marker_path).is_ok() {

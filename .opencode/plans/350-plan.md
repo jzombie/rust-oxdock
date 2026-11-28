@@ -1804,3 +1804,40 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   B4 checked above leaves B: 1 open (B3); the §E AMEND-entry
   count (B: 2) is that entry's point-in-time record and stays
   untouched.
+
+- C3 (2026-11-28): build ctor flip (second ctor-flip bulk).
+  All 14 `oxdock-build/src/diagnostics.rs` ctors
+  `reason: &anyhow::Error` to `&Diagnostic`; new verbatim
+  `operation_failed_fallback(&str)` owner for the lift fallback
+  (`operation_failed(&Diagnostic)` delegates via `flatten_chain`,
+  same shape as `eval_dispatch_failed`/`eval_dispatch_fallback`);
+  `reason_sample` test helper; `flatten_chain` reused from
+  `oxdock_core::exec::diagnostics` (single ownership, never
+  restated). All 14 inlining wrappers stay sourceless with
+  `flatten_chain` text (byte-identical to the old `{anyhow:#}`
+  flattening); `from_anyhow` gains the transport-echo skip
+  (`cause.to_string() != found.message()`) so
+  `anyhow::Error::from(diag)` round-trips do not duplicate
+  frames. Adapters: 9 native `Diagnostic` sites unwrapped to
+  `&e` (invalid_out_dir, module_path_rejected,
+  manifest_for_dsl_resolution, dsl_escapes, dsl_read,
+  manifest_missing, workspace_root, final_workdir_missing,
+  out_dir_create, stage_copy, script_execution direct);
+  3 anyhow sites lift-then-wrap via `from_anyhow` +
+  outer ctor (collect_assets over `gather_assets`,
+  script_parse x2 over `parse_script`; inner fallback text
+  is verbatim so the outer `parse error:`/`failed to collect:`
+  bytes match); `emit_embed_module` (`syn::Error`) and
+  `sync_tree` (`io::Error`) go direct via `e.into()` transport
+  into `from_anyhow`. Zero banned constructs remain in build
+  prod code (no `Error::new`, no `bail!`, no `.context` /
+  `.with_context`, no `&anyhow::Error` params; only
+  `from_anyhow` owner, `e.into()` transports, and test-only
+  `anyhow::Result` scaffolding). Gates: `cargo test -p
+  oxdock-build` green (27 passed), full `cargo test
+  --workspace` green (93 targets, all `test result: ok`,
+  zero failures; the two `error: unexpected argument
+  '--invalid-oxdock-flag-xyz'` lines are expected fixture
+  stderr), `cargo clippy --workspace --all-targets` clean
+  (zero warnings), `rustfmt --edition 2024 --check` clean on
+  both touched files.
