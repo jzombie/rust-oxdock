@@ -1625,3 +1625,42 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   `cargo clippy --workspace --all-targets` clean (zero
   warnings), `rustfmt --edition 2024 --check` clean on both
   touched files (`lib.rs`, `path.rs`).
+
+- B4i (2026-11-28): fs resolver-core cluster (eighth B4
+  conversion bulk). `PathResolver::new`,
+  `new_guarded`, `from_eager_roots`, `new_lazy`,
+  `from_manifest_env`, `snapshot_concrete`,
+  `rebased_cwd`, `ensure_cache` plus
+  `CargoScratch::target/tmp/ensure_materialized` return
+  `DiagnosticResult`. `Backend::new` was already native
+  (passthrough); `virtual_snapshot_anchor` infallible.
+  Already-keyed `cwd_outside_snapshot_root` returns the
+  diagnostic directly; bare `create_dir_all` in `tmp`
+  lifts through a new private `lift_io_err` in `mod.rs`;
+  `ensure()`/`join()` chains pass through (clippy
+  `needless_question_mark` cleanup on `target`). Two new
+  typed ctors (not debt): `manifest_dir_missing`
+  (`fs.path.manifest_missing`, takes `&VarError`,
+  message names the `MANIFEST_DIR` constant) and
+  `cache_guard_no_parent` (`fs.cache.guard_no_parent`,
+  takes the guard, mirrors `install_no_parent`). Zero
+  `anyhow::Error::new`, `.with_context`, `use anyhow`
+  remain in `mod.rs`. Zero-bridge deletions this bulk
+  turns up: 5 `from_anyhow` bridges dropped in
+  `resolve.rs` (`ensure_cache`/`rebased_cwd` now native),
+  `new_guarded` bridge dropped in `path.rs`,
+  `from_manifest_env` lifts dropped in `assets.rs` (2)
+  and `mod.rs` (3 `lift_dispatch_error`); `target` loses
+  its `Ok(...?)`. Adapters where still-anyhow ctors take
+  `&anyhow::Error`: `assets.rs` (2:
+  `manifest_dir_missing`, `manifest_dir_missing_for_dsl_
+  resolution`), `oxdock-core` (`state.rs`/`steps.rs`
+  scratch, `mcp` 2 session guards), `ssh` `keys.rs`
+  (host_key_resolver). `oxdock-mcp` `read_guarded` already
+  carried the `&anyhow::Error::new(err)` adapter, now
+  correct. Gates: `cargo test -p oxdock-fs` green
+  (72 + 8 + 4 + 1), full `cargo test --workspace` green
+  (93 targets, 2715 passed, 0 failed), `cargo clippy
+  --workspace --all-targets` clean (zero warnings),
+  `rustfmt --edition 2024 --check` clean on all 10
+  touched files.

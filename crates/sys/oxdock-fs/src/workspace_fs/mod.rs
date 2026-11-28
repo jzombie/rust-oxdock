@@ -1,10 +1,8 @@
 // Workspace-scoped path resolver with guarded file operations.
 // Methods are split across submodules by concern (access checks, IO, copy, git, resolve helpers).
 
-use anyhow::{Context, Result};
-
 use crate::diagnostics as fs_diag;
-use oxdock_diagnostics::DiagnosticResult;
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 
 use backend::Backend;
 use std::sync::{Arc, OnceLock};
@@ -13,6 +11,12 @@ use std::sync::{Arc, OnceLock};
 pub type DirEntry = std::fs::DirEntry;
 #[cfg(not(miri))]
 pub type FileType = std::fs::FileType;
+
+/// Lift a bare `std::io::Error` into the single `from_anyhow` owner
+/// (transport via `anyhow::Error::from`, key reclaimed inside).
+fn lift_io_err(err: std::io::Error) -> Diagnostic {
+    fs_diag::from_anyhow(anyhow::Error::from(err))
+}
 
 #[cfg(miri)]
 #[allow(clippy::disallowed_types)]
@@ -148,15 +152,15 @@ impl std::fmt::Debug for CargoScratch {
 
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 impl CargoScratch {
-    fn target(&self) -> Result<GuardedPath> {
-        Ok(self.root.ensure()?.join("target")?)
+    fn target(&self) -> DiagnosticResult<GuardedPath> {
+        self.root.ensure()?.join("target")
     }
 
-    fn tmp(&self) -> Result<GuardedPath> {
+    fn tmp(&self) -> DiagnosticResult<GuardedPath> {
         let tmp = self.root.ensure()?.join("tmp")?;
         #[cfg(not(miri))]
         {
-            std::fs::create_dir_all(tmp.as_path())?;
+            std::fs::create_dir_all(tmp.as_path()).map_err(lift_io_err)?;
         }
         Ok(tmp)
     }
@@ -165,7 +169,7 @@ impl CargoScratch {
     /// (native; flag flip under Miri). Called in `command_ctx`, the
     /// choke point every real spawn flows through, so seeded
     /// `HOME`/`TMPDIR` paths exist when children write them.
-    pub fn ensure_materialized(&self) -> Result<()> {
+    pub fn ensure_materialized(&self) -> DiagnosticResult<()> {
         self.root.ensure().map(|_| ())?;
         self.tmp().map(|_| ())?;
         Ok(())
@@ -319,28 +323,28 @@ impl PathResolver {
     /// directory as the build context. This centralizes env lookup and path
     /// creation so callers avoid ad-hoc path construction.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    pub fn from_manifest_env() -> Result<Self> {
+    pub fn from_manifest_env() -> DiagnosticResult<Self> {
         let manifest_dir = std::env::var(crate::env::cargo::MANIFEST_DIR)
-            .with_context(|| format!("{} missing", crate::env::cargo::MANIFEST_DIR))?;
+            .map_err(|e| fs_diag::manifest_dir_missing(&e))?;
         let path = Path::new(&manifest_dir);
         Self::new(path, path)
     }
 
     #[allow(clippy::disallowed_types)]
-    pub fn new(root: &Path, build_context: &Path) -> Result<Self> {
+    pub fn new(root: &Path, build_context: &Path) -> DiagnosticResult<Self> {
         let root_guard = GuardedPath::new_root(root)?;
         let build_guard = GuardedPath::new_root(build_context)?;
         Self::from_eager_roots(root_guard, build_guard)
     }
 
-    pub fn new_guarded(root: GuardedPath, build_context: GuardedPath) -> Result<Self> {
+    pub fn new_guarded(root: GuardedPath, build_context: GuardedPath) -> DiagnosticResult<Self> {
         Self::from_eager_roots(root, build_context)
     }
 
     /// Shared eager-constructor core: the given root is already a real
     /// directory, so it is published as the concrete snapshot root up front
     /// and resolution never triggers lazy creation (legacy behavior kept).
-    fn from_eager_roots(root: GuardedPath, build_context: GuardedPath) -> Result<Self> {
+    fn from_eager_roots(root: GuardedPath, build_context: GuardedPath) -> DiagnosticResult<Self> {
         let backend = Backend::new(&root, &build_context)?;
         let shared = Arc::new(SharedSnapshot::new());
         let _ = shared.concrete.set(root.clone());
@@ -361,7 +365,7 @@ impl PathResolver {
     /// Build a resolver whose snapshot root starts pending: no directory is
     /// created until the first snapshot-targeted resolution (issue #131).
     /// The build context (local root) is used as-is.
-    pub fn new_lazy(build_context: GuardedPath) -> Result<Self> {
+    pub fn new_lazy(build_context: GuardedPath) -> DiagnosticResult<Self> {
         let shared = Arc::new(SharedSnapshot::new());
         #[cfg(not(miri))]
         let root = virtual_snapshot_anchor();
@@ -468,7 +472,7 @@ impl PathResolver {
     /// snapshot path. Returns the cross-clone shared concrete root,
     /// materializing exactly once on first call. Callers must invoke this
     /// before any join/guard/I/O when snapshot-targeted.
-    pub(crate) fn snapshot_concrete(&self) -> Result<&GuardedPath> {
+    pub(crate) fn snapshot_concrete(&self) -> DiagnosticResult<&GuardedPath> {
         if let Some(concrete) = self.shared.concrete.get() {
             return Ok(concrete);
         }
@@ -486,7 +490,7 @@ impl PathResolver {
     /// materializes when needed, passes through already-concrete paths, and
     /// performs purely lexical prefix surgery otherwise (no creation).
     /// Local callers pass through untouched.
-    fn rebased_cwd(&self, cwd: &GuardedPath) -> Result<GuardedPath> {
+    fn rebased_cwd(&self, cwd: &GuardedPath) -> DiagnosticResult<GuardedPath> {
         if !matches!(self.current, CurrentRoot::Snapshot) {
             return Ok(cwd.clone());
         }
@@ -497,11 +501,8 @@ impl PathResolver {
         let rel = cwd
             .as_path()
             .strip_prefix(self.root.as_path())
-            .map_err(|_| anyhow::Error::new(fs_diag::cwd_outside_snapshot_root(cwd)))?;
-        Ok(GuardedPath::new(
-            concrete.root(),
-            &concrete.as_path().join(rel),
-        )?)
+            .map_err(|_| fs_diag::cwd_outside_snapshot_root(cwd))?;
+        GuardedPath::new(concrete.root(), &concrete.as_path().join(rel))
     }
 
     /// Select the snapshot root without touching the disk (`WORKSPACE
@@ -576,10 +577,12 @@ impl PathResolver {
     /// and returns its guard. Idempotent; safe to call on every resolve.
     /// Ensures the project root, not the guard itself: `ensure_cache_dir`
     /// appends the group segment, and the guard already carries it.
-    pub(crate) fn ensure_cache(&self) -> Result<GuardedPath> {
-        let root = self.cache_guard.as_path().parent().with_context(|| {
-            format!("cache guard has no parent: {}", self.cache_guard.display())
-        })?;
+    pub(crate) fn ensure_cache(&self) -> DiagnosticResult<GuardedPath> {
+        let root = self
+            .cache_guard
+            .as_path()
+            .parent()
+            .ok_or_else(|| fs_diag::cache_guard_no_parent(&self.cache_guard))?;
         cache::ensure_cache_dir(root)?;
         Ok(self.cache_guard.clone())
     }

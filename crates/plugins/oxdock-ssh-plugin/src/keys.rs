@@ -27,8 +27,8 @@ pub fn load_or_create_host_key<P: ProcessManager>(
     };
     let root = cx.cwd().root();
     let guarded = anchor_key_path(root, raw, func)?;
-    let resolver =
-        PathResolver::new(root, root).map_err(|e| ssh_diag::host_key_resolver_failed(func, &e))?;
+    let resolver = PathResolver::new(root, root)
+        .map_err(|e| ssh_diag::host_key_resolver_failed(func, &anyhow::Error::from(e)))?;
     if !resolver.exists(&guarded) {
         let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
             .map_err(ssh_diag::host_key_generate_failed)?;

@@ -208,7 +208,7 @@ pub fn try_embed_assets(spec: &EmbedSpec) -> DiagnosticResult<Vec<String>> {
     if execution_is_skipped() {
         init();
         let out_dir = out_dir_root()?;
-        let resolver = PathResolver::from_manifest_env().map_err(build_diag::from_anyhow)?;
+        let resolver = PathResolver::from_manifest_env()?;
         let module_path = module_guarded_path(&out_dir, &module_file_name(&spec.name))?;
         // Placeholder keeps symbol resolution intact; no directives means
         // cargo's conservative default invalidation still applies.
@@ -227,7 +227,7 @@ pub fn try_embed_assets(spec: &EmbedSpec) -> DiagnosticResult<Vec<String>> {
     )?;
 
     let out_dir = out_dir_root()?;
-    let resolver = PathResolver::from_manifest_env().map_err(build_diag::from_anyhow)?;
+    let resolver = PathResolver::from_manifest_env()?;
     let module_path = module_guarded_path(&out_dir, &module_file_name(&spec.name))?;
     let asset_root = out_dir.join(&spec.subdir_name())?;
     let assets =
@@ -292,8 +292,9 @@ fn script_text(source: DslSource) -> DiagnosticResult<(String, Option<String>)> 
     match source {
         DslSource::Inline(text) => Ok((text.to_string(), None)),
         DslSource::File(rel) => {
-            let resolver = PathResolver::from_manifest_env()
-                .map_err(|err| build_diag::manifest_dir_missing_for_dsl_resolution(&err))?;
+            let resolver = PathResolver::from_manifest_env().map_err(|err| {
+                build_diag::manifest_dir_missing_for_dsl_resolution(&anyhow::Error::from(err))
+            })?;
             let guarded = resolver
                 .root()
                 .join(rel)
@@ -393,8 +394,8 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> DiagnosticRe
     // Parse first so LOCAL-only scripts never create a snapshot directory.
     let steps =
         oxdock_core::parse_script(script).map_err(|e| build_diag::script_parse_failed(&e))?;
-    let resolver =
-        PathResolver::from_manifest_env().map_err(|err| build_diag::manifest_dir_missing(&err))?;
+    let resolver = PathResolver::from_manifest_env()
+        .map_err(|err| build_diag::manifest_dir_missing(&anyhow::Error::from(err)))?;
     let workspace_root = oxdock_fs::discover_workspace_root()
         .map_err(|err| build_diag::workspace_root_discover_failed(&err))?;
 

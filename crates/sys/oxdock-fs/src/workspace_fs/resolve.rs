@@ -45,7 +45,7 @@ impl PathResolver {
             return self.resolve_workdir_system(current, new_dir);
         }
         if self.is_cache() {
-            self.ensure_cache().map_err(fs_diag::from_anyhow)?;
+            self.ensure_cache()?;
         }
         if new_dir == "/" {
             // Reset to the resolver root when WORKDIR is set to '/'. Pure
@@ -56,7 +56,7 @@ impl PathResolver {
         // Choke point (issue #131): snapshot-targeted resolution materializes
         // first, so every join/guard below operates on a concrete root.
         // Local callers pass through untouched.
-        let current = self.rebased_cwd(current).map_err(fs_diag::from_anyhow)?;
+        let current = self.rebased_cwd(current)?;
         let new_dir_path = Path::new(new_dir);
         if Self::is_absolute_or_rooted(new_dir_path) {
             if let Ok(resolved) = self.check_access(new_dir_path, AccessMode::Write) {
@@ -244,7 +244,7 @@ impl PathResolver {
                 self.resolve_copy_source_from_root(concrete, from)
             }
             CopySourceRoot::Cache => {
-                let guard = self.ensure_cache().map_err(fs_diag::from_anyhow)?;
+                let guard = self.ensure_cache()?;
                 self.resolve_copy_source_from_root(&guard, from)
             }
             CopySourceRoot::System => {
@@ -310,7 +310,7 @@ impl PathResolver {
         // CACHE choke point (issue #163): ensure the persistent directory
         // exists before the confined flow below operates on it.
         if self.is_cache() {
-            self.ensure_cache().map_err(fs_diag::from_anyhow)?;
+            self.ensure_cache()?;
         }
         // Normalize backslashes to forward slashes before path construction
         let normalized = to_forward_slashes(rel);
@@ -318,7 +318,7 @@ impl PathResolver {
         // first, so every join/guard below operates on a concrete root.
         // Local callers (and COPY sources, which never reach here) pass
         // through untouched.
-        let cwd = self.rebased_cwd(cwd).map_err(fs_diag::from_anyhow)?;
+        let cwd = self.rebased_cwd(cwd)?;
         let rel_path = Path::new(&normalized);
         if Self::is_absolute_or_rooted(rel_path) {
             if let Ok(guarded) = self.check_access(rel_path, mode) {

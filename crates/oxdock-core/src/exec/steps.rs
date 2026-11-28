@@ -555,7 +555,9 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
         self.state
             .cargo_scratch
             .ensure_materialized()
-            .map_err(|err| super::diagnostics::eval_scratch_materialize_failed(&err))
+            .map_err(|err| {
+                super::diagnostics::eval_scratch_materialize_failed(&anyhow::Error::from(err))
+            })
     }
 
     /// Current working directory (guarded; stays inside the workspace).

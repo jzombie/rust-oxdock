@@ -149,8 +149,7 @@ pub fn run_steps_with_context_result_with_io(
     match run_steps_inner(fs_root, build_context, steps, io) {
         Ok(final_cwd) => Ok(final_cwd),
         Err(err) => {
-            let fs = PathResolver::new(fs_root.as_path(), build_context.as_path())
-                .map_err(args::lift_dispatch_error)?;
+            let fs = PathResolver::new(fs_root.as_path(), build_context.as_path())?;
             let tree = describe_dir(&fs, fs_root, 2, 24);
             let snapshot = format!(
                 "filesystem snapshot (root {}):\n{}",
@@ -184,8 +183,7 @@ fn run_steps_inner(
     steps: &[Step],
     io: ExecIo,
 ) -> DiagnosticResult<GuardedPath> {
-    let mut resolver = PathResolver::new_guarded(fs_root.clone(), build_context.clone())
-        .map_err(args::lift_dispatch_error)?;
+    let mut resolver = PathResolver::new_guarded(fs_root.clone(), build_context.clone())?;
     resolver.set_workspace_root(build_context.clone());
     run_steps_with_fs_with_io(Box::new(resolver), steps, io)
 }
@@ -248,8 +246,7 @@ pub fn run_steps_with_lazy_snapshot_and_modules_and_entry(
     types: Vec<&'static TypeDescriptor>,
     entry_file: Option<GuardedPath>,
 ) -> DiagnosticResult<LazyRunOutput> {
-    let mut resolver =
-        PathResolver::new_lazy(build_context.clone()).map_err(args::lift_dispatch_error)?;
+    let mut resolver = PathResolver::new_lazy(build_context.clone())?;
     resolver.set_workspace_root(build_context.clone());
     let snapshot = resolver.snapshot_handle();
     let fs: Box<dyn WorkspaceFs> = Box::new(resolver);

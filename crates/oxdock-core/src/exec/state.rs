@@ -817,9 +817,9 @@ impl<P: ProcessManager> ExecState<P> {
             .fs
             .resolve_write(&self.cwd, ".")
             .map_err(|err| state_diag::eval_workdir_resolve_failed(&err))?;
-        self.cargo_scratch
-            .ensure_materialized()
-            .map_err(|err| state_diag::eval_scratch_materialize_failed(&err))?;
+        self.cargo_scratch.ensure_materialized().map_err(|err| {
+            state_diag::eval_scratch_materialize_failed(&anyhow::Error::from(err))
+        })?;
         Ok(CommandContext::new(
             &cwd.into(),
             Arc::clone(&self.envs),

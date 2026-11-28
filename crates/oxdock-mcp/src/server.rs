@@ -339,7 +339,7 @@ pub fn session_fs(
     root: &GuardedPath,
 ) -> DiagnosticResult<(Box<dyn WorkspaceFs>, Arc<LazyGuardedTempDir>)> {
     let mut resolver = PathResolver::new_lazy(root.clone())
-        .map_err(|err| mcp_diag::session_guard_workspace_root(&err))?;
+        .map_err(|err| mcp_diag::session_guard_workspace_root(&anyhow::Error::from(err)))?;
     resolver.set_workspace_root(root.clone());
     let hold = resolver.snapshot_handle();
     Ok((Box::new(resolver), hold))
@@ -352,7 +352,7 @@ pub fn session_fs(
 fn read_guarded(path: &GuardedPath) -> DiagnosticResult<String> {
     let anchor = path.root();
     let resolver = PathResolver::new(anchor, anchor)
-        .map_err(|err| mcp_diag::session_guard_script_root(&err))?;
+        .map_err(|err| mcp_diag::session_guard_script_root(&anyhow::Error::from(err)))?;
     resolver
         .read_to_string(path)
         .map_err(|err| mcp_diag::session_script_read_failed(&anyhow::Error::new(err)))

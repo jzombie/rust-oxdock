@@ -917,8 +917,7 @@ pub fn embed_path(path: &GuardedPath) -> String {
 #[cfg_attr(miri, allow(dead_code))]
 #[cfg(not(miri))]
 fn write_temp_marker(guard: &GuardedPath) -> DiagnosticResult<()> {
-    let resolver =
-        PathResolver::new_guarded(guard.clone(), guard.clone()).map_err(fs_diag::from_anyhow)?;
+    let resolver = PathResolver::new_guarded(guard.clone(), guard.clone())?;
     let marker = guard.join(OXDOCK_TEMP_MARKER)?;
     resolver.write_file(&marker, b"oxdock-tempdir")?;
     Ok(())

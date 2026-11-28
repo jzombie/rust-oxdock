@@ -592,6 +592,22 @@ pub fn scratch_collided(path: &std::path::Path) -> Diagnostic {
     )
 }
 
+/// Manifest dir env failure. Takes the concrete env failure;
+/// rendering lives here. The message names the constant, never a
+/// call-site literal.
+pub fn manifest_dir_missing(err: &std::env::VarError) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("{} missing", crate::env::cargo::MANIFEST_DIR);
+    Diagnostic::new(
+        "fs.path.manifest_missing",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_TEXT, crate::env::cargo::MANIFEST_DIR),
+            (FIELD_ERR, err_text.as_str()),
+        ]),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Cache (`fs.cache.*`, `cache.rs`)
 // ---------------------------------------------------------------------------
@@ -609,6 +625,18 @@ pub fn cache_ensure_failed(dir: &std::path::Path, err: &std::io::Error) -> Diagn
             (FIELD_PATH, &dir.display().to_string()),
             (FIELD_ERR, err_text.as_str()),
         ]),
+    )
+}
+
+/// Cache guard with no parent segment. Takes the guard; rendering
+/// lives here. Mirrors [`install_no_parent`]: one key per surface,
+/// wording owned here.
+pub fn cache_guard_no_parent(guard: &GuardedPath) -> Diagnostic {
+    let message = format!("cache guard has no parent: {}", guard.display());
+    Diagnostic::new(
+        "fs.cache.guard_no_parent",
+        message,
+        Diagnostic::make_fields(&[(FIELD_PATH, &guard.display().to_string())]),
     )
 }
 
@@ -1085,7 +1113,9 @@ mod tests {
             path_rel_mixed("a", "/b").key(),
             path_rel_not_prefix("a", "b").key(),
             scratch_collided(plain).key(),
+            manifest_dir_missing(&std::env::VarError::NotPresent).key(),
             cache_ensure_failed(plain, &err).key(),
+            cache_guard_no_parent(&dir).key(),
             install_stage_failed(plain, &err).key(),
             install_set_mode_failed(plain, &err).key(),
             install_place_failed(plain, plain, &err).key(),
@@ -1347,8 +1377,16 @@ mod tests {
             "scratch candidate collided (clock reuse?): a/b.txt"
         );
         assert_eq!(
+            manifest_dir_missing(&std::env::VarError::NotPresent).message(),
+            "CARGO_MANIFEST_DIR missing"
+        );
+        assert_eq!(
             cache_ensure_failed(plain, &err).message(),
             "failed to ensure cache dir a/b.txt: boom"
+        );
+        assert_eq!(
+            cache_guard_no_parent(&dir).message(),
+            format!("cache guard has no parent: {}", dir.display())
         );
         assert_eq!(
             install_stage_failed(plain, &err).message(),
