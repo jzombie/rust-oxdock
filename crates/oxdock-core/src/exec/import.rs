@@ -41,7 +41,7 @@ fn read_import_bytes(fs: &dyn WorkspaceFs, resolved: &GuardedPath) -> Result<Vec
             #[cfg(miri)]
             {
                 let _ = resolved;
-                Err(first)
+                Err(anyhow::Error::from(first))
             }
             #[cfg(not(miri))]
             {
@@ -54,15 +54,15 @@ fn read_import_bytes(fs: &dyn WorkspaceFs, resolved: &GuardedPath) -> Result<Vec
                 // Missing files fail here too; return the original
                 // workspace error to preserve the containment message.
                 if !fs.is_host_backed() {
-                    return Err(first);
+                    return Err(anyhow::Error::from(first));
                 }
                 let root = resolved.root();
                 match oxdock_fs::PathResolver::new(root, root) {
                     Ok(fallback) => match fallback.read_file(resolved) {
                         Ok(bytes) => Ok(bytes),
-                        Err(_) => Err(first),
+                        Err(_) => Err(anyhow::Error::from(first)),
                     },
-                    Err(_) => Err(first),
+                    Err(_) => Err(anyhow::Error::from(first)),
                 }
             }
         }

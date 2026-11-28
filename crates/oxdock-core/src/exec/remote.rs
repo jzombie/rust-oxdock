@@ -520,7 +520,10 @@ fn resolve_one_fetch<P: ProcessManager>(
         }
         Err(err) => {
             return Err(anyhow::Error::new(
-                super::diagnostics::eval_remote_fetch_missing(&decl.host_rel, Some(&err)),
+                super::diagnostics::eval_remote_fetch_missing(
+                    &decl.host_rel,
+                    Some(&anyhow::Error::from(err)),
+                ),
             ));
         }
     }

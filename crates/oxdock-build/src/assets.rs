@@ -397,7 +397,7 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> DiagnosticRe
     let resolver = PathResolver::from_manifest_env()
         .map_err(|err| build_diag::manifest_dir_missing(&anyhow::Error::from(err)))?;
     let workspace_root = oxdock_fs::discover_workspace_root()
-        .map_err(|err| build_diag::workspace_root_discover_failed(&err))?;
+        .map_err(|err| build_diag::workspace_root_discover_failed(&anyhow::Error::from(err)))?;
 
     let output =
         run_steps_with_lazy_snapshot(&workspace_root, &steps, ExecIo::new()).map_err(|e| {

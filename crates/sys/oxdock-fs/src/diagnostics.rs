@@ -732,6 +732,19 @@ pub fn install_failed(reason: &str) -> Diagnostic {
 /// reason verbatim (like `build.operation.failed`);
 /// already-keyed payloads are reclaimed by [`from_anyhow`], so
 /// this only names genuinely unkeyed fallout.
+/// Current-directory probe failure. Takes the I/O failure;
+/// rendering lives here.
+#[allow(clippy::disallowed_types)]
+pub fn cwd_determine_failed(err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("failed to determine current directory: {err_text}");
+    Diagnostic::new(
+        "fs.cwd.determine_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+}
+
 pub fn operation_failed(reason: &str) -> Diagnostic {
     Diagnostic::new(
         "fs.operation.failed",
@@ -801,8 +814,8 @@ pub fn unguarded_read_dir_miri() -> Diagnostic {
 
 /// Mock path join failure. Takes the wrapped failure; the chain
 /// renders inline.
-pub fn mock_join_failed(err: &anyhow::Error) -> Diagnostic {
-    let err_text = format!("{err:#}");
+pub fn mock_join_failed(err: &Diagnostic) -> Diagnostic {
+    let err_text = format!("{err}");
     Diagnostic::new(
         "fs.mock.join_failed",
         err_text.clone(),
@@ -954,6 +967,19 @@ pub fn git_identity_miri() -> Diagnostic {
     )
 }
 
+/// Failed to spawn `git config --get`. Takes the key plus the I/O
+/// failure; rendering lives here.
+#[allow(clippy::disallowed_types)]
+pub fn git_config_query_failed(key: &str, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("failed to query git config for {key}: {err_text}");
+    Diagnostic::new(
+        "fs.git.config_query_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_KEY, key), (FIELD_ERR, err_text.as_str())]),
+    )
+}
+
 /// Failed `git config --get`. Takes the key plus the exit status;
 /// rendering lives here (never hardcoded: `ExitStatus` display is
 /// platform-specific).
@@ -963,6 +989,19 @@ pub fn git_config_get_failed(key: &str, status: std::process::ExitStatus) -> Dia
         "fs.git.config_get_failed",
         message,
         Diagnostic::make_fields(&[(FIELD_KEY, key), (FIELD_STATUS, &status.to_string())]),
+    )
+}
+
+/// Failed to spawn `git config --local`. Takes the key plus the I/O
+/// failure; rendering lives here.
+#[allow(clippy::disallowed_types)]
+pub fn git_config_write_failed(key: &str, err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("failed to set git config {key}: {err_text}");
+    Diagnostic::new(
+        "fs.git.config_write_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_KEY, key), (FIELD_ERR, err_text.as_str())]),
     )
 }
 
@@ -1044,10 +1083,6 @@ mod tests {
         std::io::Error::other(msg.to_string())
     }
 
-    fn anyhow_err(msg: &str) -> anyhow::Error {
-        anyhow::Error::msg(msg.to_string())
-    }
-
     fn utf8_err() -> std::string::FromUtf8Error {
         String::from_utf8(vec![0xff]).unwrap_err()
     }
@@ -1063,7 +1098,6 @@ mod tests {
     #[test]
     fn each_failure_has_a_distinct_key() {
         let err = io_err("boom");
-        let chain = anyhow_err("boom");
         let decode_err = utf8_err();
         let status = oxdock_sys_test_utils::exit_status_from_code(1);
         let file = guarded("a.txt");
@@ -1116,6 +1150,8 @@ mod tests {
             manifest_dir_missing(&std::env::VarError::NotPresent).key(),
             cache_ensure_failed(plain, &err).key(),
             cache_guard_no_parent(&dir).key(),
+            git_config_query_failed("user.name", &err).key(),
+            git_config_write_failed("user.name", &err).key(),
             install_stage_failed(plain, &err).key(),
             install_set_mode_failed(plain, &err).key(),
             install_place_failed(plain, plain, &err).key(),
@@ -1124,7 +1160,8 @@ mod tests {
             operation_failed("boom").key(),
             cwd_outside_snapshot_root(&dir).key(),
             unguarded_read_dir_miri().key(),
-            mock_join_failed(&chain).key(),
+            mock_join_failed(&operation_failed("boom")).key(),
+            cwd_determine_failed(&err).key(),
             mock_metadata_unsupported().key(),
             mock_unguarded_unsupported().key(),
             mock_read_not_utf8(&decode_err).key(),
@@ -1185,7 +1222,6 @@ mod tests {
     #[test]
     fn messages_match_canonical_wording() {
         let err = io_err("boom");
-        let chain = anyhow_err("boom");
         let decode_err = utf8_err();
         let status = oxdock_sys_test_utils::exit_status_from_code(1);
         let file = guarded("a.txt");
@@ -1414,7 +1450,14 @@ mod tests {
             unguarded_read_dir_miri().message(),
             "Unguarded read_dir not supported on Miri"
         );
-        assert_eq!(mock_join_failed(&chain).message(), "boom");
+        assert_eq!(
+            mock_join_failed(&operation_failed("boom")).message(),
+            "boom"
+        );
+        assert_eq!(
+            cwd_determine_failed(&err).message(),
+            "failed to determine current directory: boom"
+        );
         assert_eq!(
             mock_metadata_unsupported().message(),
             "metadata not supported in mock fs"
@@ -1458,6 +1501,14 @@ mod tests {
         assert_eq!(
             git_identity_miri().message(),
             "git identity helpers are not supported under Miri"
+        );
+        assert_eq!(
+            git_config_query_failed("user.name", &err).message(),
+            "failed to query git config for user.name: boom"
+        );
+        assert_eq!(
+            git_config_write_failed("user.name", &err).message(),
+            "failed to set git config user.name: boom"
         );
         assert_eq!(
             git_config_get_failed("user.name", status).message(),

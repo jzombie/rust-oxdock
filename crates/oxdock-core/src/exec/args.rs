@@ -647,7 +647,7 @@ pub(crate) fn path_type_from_value<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, &path_str)
-        .map_err(|err| args_diag::eval_path_resolve_failed(&path_str, &err))?;
+        .map_err(|err| args_diag::eval_path_resolve_failed(&path_str, &anyhow::Error::from(err)))?;
     let kind = match cx.state.fs.entry_kind_no_follow(&target) {
         Ok(EntryKind::Symlink) => "symlink",
         Ok(EntryKind::File) => "file",
@@ -868,7 +868,7 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, &path_str)
-        .map_err(|err| args_diag::eval_path_resolve_failed(&path_str, &err))?;
+        .map_err(|err| args_diag::eval_path_resolve_failed(&path_str, &anyhow::Error::from(err)))?;
     let mut current = target;
     loop {
         match cx.state.fs.entry_kind_no_follow(&current) {
@@ -884,11 +884,9 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
                 };
                 if parent.as_path().as_os_str().is_empty() {
                     let cwd = cx.state.cwd.clone();
-                    let anchor = cx
-                        .state
-                        .fs
-                        .resolve_write(&cwd, ".")
-                        .map_err(|err| args_diag::eval_workdir_resolve_failed(&err))?;
+                    let anchor = cx.state.fs.resolve_write(&cwd, ".").map_err(|err| {
+                        args_diag::eval_workdir_resolve_failed(&anyhow::Error::from(err))
+                    })?;
                     return Ok(Value::bool(probe_dir_writable(cx, &anchor)));
                 }
                 current = parent;
@@ -1484,7 +1482,7 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
         .state
         .fs
         .resolve_read(&cx.state.cwd, ".")
-        .map_err(|err| args_diag::std_glob_resolve_failed(&err))?;
+        .map_err(|err| args_diag::std_glob_resolve_failed(&anyhow::Error::from(err)))?;
     let root = cx.state.fs.root().clone();
     let root_path = root.as_path().to_path_buf();
     let mut entries: Vec<Value> = root
@@ -1518,12 +1516,12 @@ pub(crate) fn load_toml_from_value<P: ProcessManager>(
         .state
         .fs
         .resolve_read(&cx.state.cwd, &path_str)
-        .map_err(|err| args_diag::std_load_toml_resolve_failed(&path_str, &err))?;
-    let content = cx
-        .state
-        .fs
-        .read_file(&target)
-        .map_err(|err| args_diag::std_load_toml_read_failed(&path_str, &err))?;
+        .map_err(|err| {
+            args_diag::std_load_toml_resolve_failed(&path_str, &anyhow::Error::from(err))
+        })?;
+    let content = cx.state.fs.read_file(&target).map_err(|err| {
+        args_diag::std_load_toml_read_failed(&path_str, &anyhow::Error::from(err))
+    })?;
     let content_str = std::str::from_utf8(&content)
         .map_err(|err| args_diag::std_load_toml_not_utf8(&path_str, &err))?;
     load_toml_value(content_str)
@@ -1545,12 +1543,12 @@ pub(crate) fn load_json_from_value<P: ProcessManager>(
         .state
         .fs
         .resolve_read(&cx.state.cwd, &path_str)
-        .map_err(|err| args_diag::std_load_json_resolve_failed(&path_str, &err))?;
-    let content = cx
-        .state
-        .fs
-        .read_file(&target)
-        .map_err(|err| args_diag::std_load_json_read_failed(&path_str, &err))?;
+        .map_err(|err| {
+            args_diag::std_load_json_resolve_failed(&path_str, &anyhow::Error::from(err))
+        })?;
+    let content = cx.state.fs.read_file(&target).map_err(|err| {
+        args_diag::std_load_json_read_failed(&path_str, &anyhow::Error::from(err))
+    })?;
     let content_str = std::str::from_utf8(&content)
         .map_err(|err| args_diag::std_load_json_not_utf8(&path_str, &err))?;
     load_json_value(content_str)

@@ -15,6 +15,7 @@
 pub mod cli;
 pub mod config;
 pub mod defer;
+pub mod diagnostics;
 pub mod dispatcher;
 pub mod embedded;
 pub mod engine;

@@ -299,7 +299,8 @@ fn print_dry_run(
 
 pub fn run() -> Result<()> {
     init_temp_gc();
-    let workspace_root = discover_workspace_root().map_err(|e| errors::guard_workspace_root(&e))?;
+    let workspace_root = discover_workspace_root()
+        .map_err(|e| errors::guard_workspace_root(&anyhow::Error::from(e)))?;
 
     let mut args = std::env::args().skip(1);
     // `--help`/`-h` and `--version`/`-V` surface as text in the parse

@@ -1,4 +1,7 @@
-use anyhow::{Context, Result};
+#[cfg(miri)]
+use oxdock_diagnostics::DiagnosticResult;
+#[cfg(not(miri))]
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 #[cfg(not(miri))]
 use std::ffi::OsStr;
 #[cfg(not(miri))]
@@ -27,7 +30,7 @@ pub fn git_root_from_path(start: &std::path::Path) -> Option<std::path::PathBuf>
     None
 }
 
-pub fn current_head_commit(root: &GuardedPath) -> Result<Option<String>> {
+pub fn current_head_commit(root: &GuardedPath) -> DiagnosticResult<Option<String>> {
     #[cfg(miri)]
     {
         let _ = root;
@@ -62,7 +65,7 @@ impl PathResolver {
     }
 
     /// Detect whether a .git directory exists at or above the resolver root.
-    pub fn has_git_dir(&self) -> Result<bool> {
+    pub fn has_git_dir(&self) -> DiagnosticResult<bool> {
         // GuardedPath::parent() cannot traverse above the configured root, which
         // prevents nested crates from seeing a workspace-level .git directory
         // (common for fixtures that live under tests/fixtures/*). Walk the
@@ -84,11 +87,10 @@ impl PathResolver {
         from: &str,
         to: &GuardedPath,
         include_dirty: bool,
-    ) -> Result<()> {
-        let source = self
-            .resolve_copy_source(from)
-            .map_err(anyhow::Error::from)
-            .with_context(|| format!("COPY_GIT failed to resolve source {}", from))?;
+    ) -> DiagnosticResult<()> {
+        let source = self.resolve_copy_source(from).map_err(|diag| {
+            diag.with_contexts(vec![format!("COPY_GIT failed to resolve source {from}")])
+        })?;
 
         #[cfg(miri)]
         {
@@ -96,9 +98,9 @@ impl PathResolver {
             let _ = include_dirty;
             if let Some(parent) = to.as_path().parent() {
                 let parent_guard = GuardedPath::new(to.root(), parent)?;
-                self.create_dir_all(&parent_guard)
-                    .map_err(anyhow::Error::from)
-                    .with_context(|| format!("creating parent {}", parent.display()))?;
+                self.create_dir_all(&parent_guard).map_err(|diag| {
+                    diag.with_contexts(vec![format!("creating parent {}", parent.display())])
+                })?;
             }
             match self.entry_kind(&source)? {
                 super::EntryKind::Dir => self.copy_dir_recursive(&source, to)?,
@@ -116,17 +118,17 @@ impl PathResolver {
         #[cfg(not(miri))]
         {
             if source.root() != self.build_context.as_path() {
-                return Err(anyhow::Error::new(fs_diag::git_copy_outside_build_context()));
+                return Err(fs_diag::git_copy_outside_build_context());
             }
             let rel = source
                 .as_path()
                 .strip_prefix(self.build_context.as_path())
-                .with_context(|| {
-                    format!(
+                .map_err(|_| {
+                    fs_diag::git_copy_outside_build_context().with_contexts(vec![format!(
                         "COPY_GIT source {} is not under build context {}",
                         source.display(),
                         self.build_context.display()
-                    )
+                    )])
                 })?;
             let rel = if rel.as_os_str().is_empty() {
                 ".".to_string()
@@ -136,17 +138,20 @@ impl PathResolver {
 
             let _ = self
                 .check_access_with_root(self.effective_root(), to.as_path(), AccessMode::Write)
-                .map_err(anyhow::Error::from)
-                .with_context(|| format!("destination {} escapes allowed root", to.display()))?;
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
+                        "destination {} escapes allowed root",
+                        to.display()
+                    )])
+                })?;
 
             let _ = self
                 .check_access(self.build_context.as_path(), AccessMode::Read)
-                .map_err(anyhow::Error::from)
-                .with_context(|| {
-                    format!(
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
                         "build context {} not under root",
                         self.build_context.display()
-                    )
+                    )])
                 })?;
 
             let cat_type = {
@@ -164,28 +169,35 @@ impl PathResolver {
                 if typ == "blob" {
                     let mut show_cmd = self.git_command();
                     show_cmd.arg("show").arg(format!("{}:{}", rev, rel));
-                    let show = show_cmd
-                        .output()
-                        .with_context(|| format!("failed to run git show for {}:{}", rev, rel))?;
+                    let show = show_cmd.output().map_err(|diag| {
+                        diag.with_contexts(vec![format!("failed to run git show for {rev}:{rel}")])
+                    })?;
 
                     if show.status.success() {
                         if let Some(parent) = to.as_path().parent() {
                             let parent_guard = GuardedPath::new(to.root(), parent)?;
-                            self.create_dir_all(&parent_guard)
-                                .map_err(anyhow::Error::from)
-                                .with_context(|| format!("creating parent {}", parent.display()))?;
+                            self.create_dir_all(&parent_guard).map_err(|diag| {
+                                diag.with_contexts(vec![format!(
+                                    "creating parent {}",
+                                    parent.display()
+                                )])
+                            })?;
                         }
-                        self.write_file(to, &show.stdout)
-                            .map_err(anyhow::Error::from)
-                            .with_context(|| format!("writing git blob to {}", to.display()))?;
+                        self.write_file(to, &show.stdout).map_err(|diag| {
+                            diag.with_contexts(vec![format!(
+                                "writing git blob to {}",
+                                to.display()
+                            )])
+                        })?;
                         if include_dirty {
                             if let Some(parent) = to.as_path().parent() {
                                 let parent_guard = GuardedPath::new(to.root(), parent)?;
-                                self.create_dir_all(&parent_guard)
-                                    .map_err(anyhow::Error::from)
-                                    .with_context(|| {
-                                        format!("creating parent {}", parent.display())
-                                    })?;
+                                self.create_dir_all(&parent_guard).map_err(|diag| {
+                                    diag.with_contexts(vec![format!(
+                                        "creating parent {}",
+                                        parent.display()
+                                    )])
+                                })?;
                             }
                             match self.entry_kind(&source)? {
                                 super::EntryKind::Dir => self.copy_dir_recursive(&source, to)?,
@@ -211,17 +223,17 @@ impl PathResolver {
                 .arg(rev)
                 .arg("--")
                 .arg(&rel);
-            let ls = ls_cmd
-                .output()
-                .with_context(|| format!("failed to run git ls-tree for {}:{}", rev, rel))?;
+            let ls = ls_cmd.output().map_err(|diag| {
+                diag.with_contexts(vec![format!("failed to run git ls-tree for {rev}:{rel}")])
+            })?;
 
             if !ls.status.success() {
-                return Err(anyhow::Error::new(fs_diag::git_ls_tree_failed(rev, &rel)));
+                return Err(fs_diag::git_ls_tree_failed(rev, &rel));
             }
 
             let out = ls.stdout;
             if out.is_empty() {
-                return Err(anyhow::Error::new(fs_diag::git_path_not_in_rev(&rel, rev)));
+                return Err(fs_diag::git_path_not_in_rev(&rel, rev));
             }
 
             for chunk in out.split(|b| *b == 0) {
@@ -254,22 +266,25 @@ impl PathResolver {
 
                     if let Some(parent) = dest.as_path().parent() {
                         let parent_guard = GuardedPath::new(dest.root(), parent)?;
-                        self.create_dir_all(&parent_guard)
-                            .map_err(anyhow::Error::from)
-                            .with_context(|| format!("creating parent {}", parent.display()))?;
+                        self.create_dir_all(&parent_guard).map_err(|diag| {
+                            diag.with_contexts(vec![format!(
+                                "creating parent {}",
+                                parent.display()
+                            )])
+                        })?;
                     }
 
                     match typ {
                         "blob" => {
                             let mut blob_cmd = self.git_command();
                             blob_cmd.arg("show").arg(format!("{}:{}", rev, path_str));
-                            let blob = blob_cmd.output().with_context(|| {
-                                format!("failed to run git show for {}:{}", rev, path_str)
+                            let blob = blob_cmd.output().map_err(|diag| {
+                                diag.with_contexts(vec![format!(
+                                    "failed to run git show for {rev}:{path_str}"
+                                )])
                             })?;
                             if !blob.status.success() {
-                                return Err(anyhow::Error::new(fs_diag::git_show_failed(
-                                    rev, &path_str,
-                                )));
+                                return Err(fs_diag::git_show_failed(rev, &path_str));
                             }
 
                             // Git uses filemode `120000` to represent symbolic links.
@@ -285,12 +300,12 @@ impl PathResolver {
                                 {
                                     use std::os::unix::fs::symlink;
                                     symlink(target.trim_end_matches('\n'), dest.as_path())
-                                        .with_context(|| {
-                                            format!(
+                                        .map_err(|err| {
+                                            lift_spawn_err(err).with_contexts(vec![format!(
                                                 "creating symlink {} -> {}",
                                                 dest.display(),
                                                 target
-                                            )
+                                            )])
                                         })?;
                                 }
                                 #[cfg(windows)]
@@ -303,27 +318,25 @@ impl PathResolver {
                                         &dest,
                                         target.trim_end_matches('\n').as_bytes(),
                                     )
-                                    .map_err(anyhow::Error::from)
-                                    .with_context(|| {
-                                        format!(
+                                    .map_err(|diag| {
+                                        diag.with_contexts(vec![format!(
                                             "writing symlink placeholder {} -> {}",
                                             dest.display(),
                                             target
-                                        )
+                                        )])
                                     })?;
                                 }
                             } else {
-                                self.write_file(&dest, &blob.stdout)
-                                    .map_err(anyhow::Error::from)
-                                    .with_context(|| {
-                                        format!("writing blob to {}", dest.display())
-                                    })?;
+                                self.write_file(&dest, &blob.stdout).map_err(|diag| {
+                                    diag.with_contexts(vec![format!(
+                                        "writing blob to {}",
+                                        dest.display()
+                                    )])
+                                })?;
                             }
                         }
                         "commit" => {
-                            return Err(anyhow::Error::new(fs_diag::git_submodule_unsupported(
-                                &path_str,
-                            )));
+                            return Err(fs_diag::git_submodule_unsupported(&path_str));
                         }
                         _ => {}
                     }
@@ -333,9 +346,9 @@ impl PathResolver {
             if include_dirty {
                 if let Some(parent) = to.as_path().parent() {
                     let parent_guard = GuardedPath::new(to.root(), parent)?;
-                    self.create_dir_all(&parent_guard)
-                        .map_err(anyhow::Error::from)
-                        .with_context(|| format!("creating parent {}", parent.display()))?;
+                    self.create_dir_all(&parent_guard).map_err(|diag| {
+                        diag.with_contexts(vec![format!("creating parent {}", parent.display())])
+                    })?;
                 }
                 match self.entry_kind(&source)? {
                     super::EntryKind::Dir => self.copy_dir_recursive(&source, to)?,
@@ -354,6 +367,17 @@ impl PathResolver {
         #[allow(unreachable_code)]
         Ok(())
     }
+}
+
+/// Transitional lift for bare `std::io` spawn failures (B4j):
+/// `anyhow` is only the transport into the single owner
+/// `from_anyhow`, with the historic context string replayed natively
+/// via `with_contexts`. Mirrors the `backend.rs`/`copy.rs` helpers;
+/// confined here so the eventual typed-ctor migration touches one
+/// place, not every call site.
+#[cfg(not(miri))]
+fn lift_spawn_err(err: std::io::Error) -> Diagnostic {
+    fs_diag::from_anyhow(anyhow::Error::from(err))
 }
 
 #[cfg(not(miri))]
@@ -376,12 +400,11 @@ impl GitCommand {
         self
     }
 
-    fn output(&mut self) -> Result<Output> {
+    fn output(&mut self) -> DiagnosticResult<Output> {
         let desc = format!("{:?}", self.inner);
-        let out = self
-            .inner
-            .output()
-            .with_context(|| format!("failed to run {desc}"))?;
+        let out = self.inner.output().map_err(|err| {
+            lift_spawn_err(err).with_contexts(vec![format!("failed to run {desc}")])
+        })?;
         Ok(out)
     }
 }

@@ -1664,3 +1664,83 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   --workspace --all-targets` clean (zero warnings),
   `rustfmt --edition 2024 --check` clean on all 10
   touched files.
+
+- B4j (2026-11-28): fs git cluster (ninth B4
+  conversion bulk). `ensure_git_identity`,
+  `read_config`/`write_config` (`config.rs`: 4
+  sigs), `current_head_commit`, `has_git_dir`,
+  `copy_from_git`, `GitCommand::output`
+  (`mod.rs`: 4 sigs) return `DiagnosticResult`.
+  Already-keyed `git_identity_miri`,
+  `git_config_get/set_failed`,
+  `git_copy_outside_build_context`,
+  `git_ls_tree_failed`, `git_path_not_in_rev`,
+  `git_show_failed`, `git_submodule_unsupported`
+  return directly. Two new typed ctors (not
+  debt): `git_config_query_failed`
+  (`fs.git.config_query_failed`, takes key +
+  `&io::Error`) and `git_config_write_failed`
+  (`fs.git.config_write_failed`) for the two
+  bare spawn sites. Bare `strip_prefix` maps to
+  the keyed `git_copy_outside_build_context`
+  owner with its historic frame replayed
+  natively; bare unix `symlink` lifts through a
+  new private `lift_spawn_err` in `mod.rs`;
+  `GitCommand::output` keeps its inner
+  `failed to run {desc}` frame natively. All
+  8 obsolete `map_err(anyhow::Error::from)`
+  bridges deleted (every callee was already
+  native); all 15 anyhow `.with_context`
+  contexts replayed byte-identical via native
+  `.with_contexts` (17 frame sites incl. the 2
+  `GitCommand`/symlink lifts, recorded as
+  FRAME-DEBT). Cascade: `lib.rs` trait impl and
+  `oxdock-render` `EmbeddedFiles` gain the
+  required `Ok(...?)` transport bridge (trait
+  still anyhow); `handlers.rs` `copy_from_git`
+  untouched (trait-object call, still anyhow).
+  `use anyhow` gone from both git files. Gates:
+  `cargo test -p oxdock-fs` green
+  (72 + 8 + 4 + 1), full `cargo test --workspace`
+  green (93 targets, 2715 passed, 0 failed),
+  `cargo clippy --workspace --all-targets` clean
+  (zero warnings), `rustfmt --edition 2024
+  --check` clean on all 5 touched files.
+
+- B4k (2026-11-28): fs trait + impls cluster (tenth B4
+  conversion bulk, largest so far). `discover_workspace_root`,
+  the 100-sig `WorkspaceFs` trait (decl + defaulted bodies),
+  the `PathResolver` trait impl, the 50-sig `MockFs` impl,
+  and the 47-sig `EmbeddedFiles` impl return
+  `DiagnosticResult`. `use anyhow` gone from `lib.rs`,
+  `mock.rs`, `embedded.rs`; `fs_diag` import in `lib.rs`
+  unconditional. `discover_workspace_root` gains one new
+  typed ctor `cwd_determine_failed`
+  (`fs.cwd.determine_failed`, takes `&io::Error`) and
+  replays 4 historic frames natively (FRAME-DEBT).
+  `mock_join_failed` now takes `&Diagnostic` (compliance:
+  last `&anyhow::Error` ctor param on the fs surface
+  eliminated); dead `anyhow_err` test helper removed.
+  Bare-std unguarded bodies lift through a new private
+  `lift_io_err` in `lib.rs` (no historic contexts existed,
+  bytes identical). New `oxdock-render/src/diagnostics.rs`
+  with `embedded_not_utf8`
+  (`render.embedded.not_utf8`, byte-identical message)
+  for the one banned `.context` inside the trait impl
+  (`engine.rs` host-fn `.context` sites stay: D-scope
+  func-macro item, not fs cascade). Zero-bridge order
+  applied: 48 `Ok(...?)` stripped in the `PathResolver`
+  impl, 4 in `MockFs`, 35 in `EmbeddedFiles` (direct
+  delegation; `install_file_atomic` normalized to the
+  imported `DiagnosticResult`). Cascade adapters
+  (`&anyhow::Error::from(...)`) at 72 trait-object call
+  sites across `handlers.rs` (59), `args.rs` (8),
+  `import.rs` (4 `Err(first)` transports), `remote.rs`,
+  `state.rs`, `assets.rs`, `cli`, `net-plugin`
+  (still-anyhow ctors). `import.rs` `Err(first) =>` match
+  arm untouched. Gates: `cargo test -p oxdock-fs` green
+  (72 + 8 + 4 + 1), full `cargo test --workspace` green
+  (93 targets, 2717 passed, 0 failed; +2 new render
+  diagnostics tests), `cargo clippy --workspace
+  --all-targets` clean (zero warnings), `rustfmt
+  --edition 2024 --check` clean on all 16 touched files.

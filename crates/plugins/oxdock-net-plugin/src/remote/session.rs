@@ -429,7 +429,7 @@ impl MuxioSession {
             let len = fs.metadata(host_path).map(|m| m.len()).map_err(|err| {
                 anyhow::Error::new(net_diag::remote_fetch_source_unreadable(
                     &host_path.display(),
-                    &err,
+                    &anyhow::Error::from(err),
                 ))
             })?;
             entries.push((
