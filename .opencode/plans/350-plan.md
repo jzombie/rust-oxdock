@@ -1871,3 +1871,31 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   `test result: ok`, zero failures), `cargo clippy
   --workspace --all-targets` clean, `rustfmt --edition 2024
   --check` clean on all 4 touched files.
+
+- C4b (2026-11-28): pty ctor flip (second C4 bulk). All 4
+  `oxdock-pty/src/diagnostics.rs` ctors (`pty_alloc_failed`,
+  `pty_master_reader_failed`, `pty_master_writer_failed`,
+  `pty_spawn_failed`) `reason: &anyhow::Error` to
+  `&Diagnostic` via leaf `flatten_chain` (pty already depends
+  only on `oxdock-diagnostics`, no new dep, no cycle); all 4
+  inlining wrappers stay sourceless with `flatten_chain` text
+  (byte-identical to the old `{reason:#}` flattening). New
+  verbatim `operation_failed_fallback` owner
+  (`pty.operation.failed`) plus `from_anyhow` reclaim lift
+  with transport-echo skip (same shape as C3 build and C4a
+  utils); `operation_failed(&Diagnostic)` delegates via
+  `flatten_chain`. `run.rs`: all 4 portable-pty sites
+  (`openpty`, `try_clone_reader`, `take_writer`,
+  `spawn_command`, each `anyhow::Error`) lift-then-wrap
+  (`let inner = from_anyhow(e); pty_*_failed(func, &inner)`,
+  same shape as C3 `collect_assets_failed`) so the
+  func-prefixed outer keeps its distinct key while call sites
+  stay `format!`-free. Zero banned constructs in pty prod
+  (no `Error::new`, no `bail!`, no `.context`/`.with_context`,
+  no `&anyhow::Error` params; remaining `Error::new` hits are
+  inside `mod tests`). Gates: `cargo test -p oxdock-pty`
+  green (19 passed plus integration target), full `cargo test
+  --workspace` green (93 targets, all `test result: ok`,
+  zero failures), `cargo clippy --workspace --all-targets`
+  clean (zero warnings), `rustfmt --edition 2024 --check`
+  clean on both touched files.

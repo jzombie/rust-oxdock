@@ -424,18 +424,20 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> DiagnosticResult<PtyOutcome> 
             req.initial_size.rows,
             req.initial_size.cols,
         ))
-        .map_err(|e| pty_diag::pty_alloc_failed(func, &e))?;
-    let mut master_reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| pty_diag::pty_master_reader_failed(func, &e))?;
+        .map_err(|e| {
+            let inner = pty_diag::from_anyhow(e);
+            pty_diag::pty_alloc_failed(func, &inner)
+        })?;
+    let mut master_reader = pair.master.try_clone_reader().map_err(|e| {
+        let inner = pty_diag::from_anyhow(e);
+        pty_diag::pty_master_reader_failed(func, &inner)
+    })?;
     // Shared with the output worker, which answers ConPTY setup
     // queries through it while the input worker pumps pipe bytes.
-    let master_writer = Arc::new(Mutex::new(
-        pair.master
-            .take_writer()
-            .map_err(|e| pty_diag::pty_master_writer_failed(func, &e))?,
-    ));
+    let master_writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| {
+        let inner = pty_diag::from_anyhow(e);
+        pty_diag::pty_master_writer_failed(func, &inner)
+    })?));
     // Console teardown handle. Released once the drain is due: ConPTY
     // holds the output pipe open until close, which lives in this
     // handle, so holding it to function end strands the output worker
@@ -451,10 +453,10 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> DiagnosticResult<PtyOutcome> 
     for (key, value) in &req.env {
         builder.env(key, value);
     }
-    let child = pair
-        .slave
-        .spawn_command(builder)
-        .map_err(|e| pty_diag::pty_spawn_failed(func, &e))?;
+    let child = pair.slave.spawn_command(builder).map_err(|e| {
+        let inner = pty_diag::from_anyhow(e);
+        pty_diag::pty_spawn_failed(func, &inner)
+    })?;
     drop(pair.slave);
 
     let mut killer = child.clone_killer();
