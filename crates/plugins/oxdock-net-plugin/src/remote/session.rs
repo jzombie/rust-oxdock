@@ -727,7 +727,9 @@ struct TransferScratch {
 impl TransferScratch {
     fn new() -> Result<Self> {
         let tempdir = GuardedPath::tempdir().map_err(|err| {
-            anyhow::Error::new(net_diag::remote_transfer_scratch_tempdir_failed(&err))
+            anyhow::Error::new(net_diag::remote_transfer_scratch_tempdir_failed(
+                &anyhow::Error::from(err),
+            ))
         })?;
         let root = tempdir.as_guarded_path().clone();
         let resolver = PathResolver::new(root.root(), root.root())?;

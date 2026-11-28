@@ -1089,7 +1089,7 @@ pub mod harness {
         // PathResolver::new creates a missing root (see Backend::new), so
         // this both creates and guards in one step.
         let _resolver = PathResolver::new(path, path)?;
-        GuardedPath::new_root(path)
+        Ok(GuardedPath::new_root(path)?)
     }
 
     fn ensure_target_dir_guarded(path: &GuardedPath) -> Result<GuardedPath> {

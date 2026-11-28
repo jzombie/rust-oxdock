@@ -761,7 +761,8 @@ pub fn apply_push_symlink(
 ) -> Result<()> {
     let dst = root.join(rel).map_err(|err| {
         anyhow::Error::new(super::diagnostics::eval_remote_push_destination_escapes(
-            rel, &err,
+            rel,
+            &anyhow::Error::from(err),
         ))
     })?;
     // Join-then-guard is the whole verdict: `GuardedPath::join`
@@ -771,20 +772,23 @@ pub fn apply_push_symlink(
     let src = if target.starts_with('/') {
         root.join(target).map_err(|err| {
             anyhow::Error::new(super::diagnostics::eval_remote_push_target_outside(
-                rel, &err,
+                rel,
+                &anyhow::Error::from(err),
             ))
         })?
     } else if let Some(parent) = rel.rfind('/') {
         root.join(&format!("{}/{target}", &rel[..parent]))
             .map_err(|err| {
                 anyhow::Error::new(super::diagnostics::eval_remote_push_target_outside(
-                    rel, &err,
+                    rel,
+                    &anyhow::Error::from(err),
                 ))
             })?
     } else {
         root.join(target).map_err(|err| {
             anyhow::Error::new(super::diagnostics::eval_remote_push_target_outside(
-                rel, &err,
+                rel,
+                &anyhow::Error::from(err),
             ))
         })?
     };

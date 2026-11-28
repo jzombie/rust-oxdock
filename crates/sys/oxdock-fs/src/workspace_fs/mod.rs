@@ -149,7 +149,7 @@ impl std::fmt::Debug for CargoScratch {
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 impl CargoScratch {
     fn target(&self) -> Result<GuardedPath> {
-        self.root.ensure()?.join("target")
+        Ok(self.root.ensure()?.join("target")?)
     }
 
     fn tmp(&self) -> Result<GuardedPath> {
@@ -498,7 +498,10 @@ impl PathResolver {
             .as_path()
             .strip_prefix(self.root.as_path())
             .map_err(|_| anyhow::Error::new(fs_diag::cwd_outside_snapshot_root(cwd)))?;
-        GuardedPath::new(concrete.root(), &concrete.as_path().join(rel))
+        Ok(GuardedPath::new(
+            concrete.root(),
+            &concrete.as_path().join(rel),
+        )?)
     }
 
     /// Select the snapshot root without touching the disk (`WORKSPACE

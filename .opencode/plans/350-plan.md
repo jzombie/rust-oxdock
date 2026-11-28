@@ -1545,3 +1545,53 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   `mock.rs`, `policy.rs`, `lib.rs` top-level) continue with
   the transitional pattern; the centralization pass stays
   scheduled debt, not a silent accept.
+
+- B4g (2026-11-28): fs path cluster (seventh B4 conversion
+  bulk). `GuardedPath::new`, `new_from_str`, `new_root`,
+  `new_root_from_str`, `tempdir`, `tempdir_with` (both cfg),
+  `cleanup_stale_tempdirs` (both cfg), `join`,
+  `join_script`, `try_candidate`, `ensure`, `materialize`,
+  `path_base`, `path_rel`, `write_temp_marker` (both cfg),
+  `write_temp_lock` (both cfg), `cleanup_marked_tempdirs`,
+  `cleanup_marked_tempdirs_in` (both cfg) return
+  `DiagnosticResult`. Already-keyed ctors
+  (`script_not_found`, `scratch_collided`,
+  `path_base_empty`, `path_rel_*`, `temp_lock_miri`) return
+  the diagnostic directly, no `anyhow::Error::new` wrapper;
+  bare `std::io` sites (`Builder::tempdir`, `create_dir`
+  other-errors, `OpenOptions::open`, `writeln`, `sync_all`,
+  `read_dir`, entry) lift through one private `lift_io_err`
+  helper (`anyhow::Error::from` transport into the single
+  owner `from_anyhow`); still-anyhow
+  `PathResolver::new_guarded` bridges via `from_anyhow`.
+  Zero `anyhow::Error::new`, `.with_context`, `use anyhow`
+  remain in `path.rs`. One new typed ctor (not debt):
+  `script_no_parent` (`fs.path.script_no_parent`, takes the
+  raw text) replaces the lone unkeyed
+  `.with_context(|| format!("script has no parent..."))`
+  frame, so this bulk adds zero new `with_contexts`
+  `format!` sites. `PathLike` trait stays anyhow (A1
+  pattern): `GuardedPath` impls bridge via `Ok(...?)`,
+  `UnguardedPath` impls qualify `anyhow::Result`
+  (infallible). Cascade: `mod.rs` (`target`,
+  `rebased_cwd`) and `copy.rs` (unguarded-child guard)
+  drop obsolete `.map_err(from_anyhow)` / wrap tail calls
+  in `Ok(...?)`; still-anyhow `mock.rs` (`guard_from_rel`
+  adapter via `&anyhow::Error::from(e)`, 4 resolve tail
+  `Ok(...?)` bridges), `oxdock-build` `assets.rs` (8
+  obsolete `from_anyhow` on `join` dropped, 4
+  `&anyhow::Error::from` adapters, 2 restored
+  `from_manifest_env` lifts), `oxdock-core`
+  (`handlers`/`import`/`native`/`remote`: 13
+  `&anyhow::Error::from` adapters on join/tempdir/base/rel
+  sites; 2 over-eager `resolve_read` adapters reverted,
+  `cx.state.fs` is the still-anyhow `WorkspaceFs` trait
+  object), `oxdock-fixture`, `oxdock-logic-tests`,
+  `net-plugin`, `ssh-plugin` (2 each), `oxdock-cli`
+  (`lib.rs` 4, `serve.rs` 7). Gates: `cargo test -p
+  oxdock-fs` green (72 + 8 + 4 + 1), full `cargo test
+  --workspace` green (93 targets, 2715 passed, 0 failed),
+  `cargo clippy --workspace --all-targets` clean (zero
+  warnings, incl. revert of 2 `useless_conversion`
+  adapters), `rustfmt --edition 2024 --check` clean on all
+  16 touched files.

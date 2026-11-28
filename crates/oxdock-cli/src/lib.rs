@@ -473,9 +473,9 @@ impl Options {
                     } else {
                         reject_url_script(&path)?;
                         script = Some(ScriptSource::Path(
-                            workspace_root
-                                .join_script(&path)
-                                .map_err(|e| errors::guard_script_path(&path, &e))?,
+                            workspace_root.join_script(&path).map_err(|e| {
+                                errors::guard_script_path(&path, &anyhow::Error::from(e))
+                            })?,
                         ));
                     }
                     // After the script, stop option parsing entirely:
@@ -589,9 +589,9 @@ impl Options {
                     }
                     reject_url_script(&text)?;
                     script = Some(ScriptSource::Path(
-                        workspace_root
-                            .join_script(&text)
-                            .map_err(|e| errors::guard_script_path(&text, &e))?,
+                        workspace_root.join_script(&text).map_err(|e| {
+                            errors::guard_script_path(&text, &anyhow::Error::from(e))
+                        })?,
                     ));
                     script_args = drain_tail(&mut parser, true)?;
                     break;
@@ -990,14 +990,14 @@ where
                 if fs.is_snapshot_pending() {
                     snapshot
                         .materialize()
-                        .map_err(|e| errors::create_shell_temp_dir(&e))?;
+                        .map_err(|e| errors::create_shell_temp_dir(&anyhow::Error::from(e)))?;
                 }
                 final_cwd = fs.concretize_cwd(&final_cwd);
             }
             None => {
                 snapshot
                     .materialize()
-                    .map_err(|e| errors::create_shell_temp_dir(&e))?;
+                    .map_err(|e| errors::create_shell_temp_dir(&anyhow::Error::from(e)))?;
                 final_cwd = snapshot
                     .get()
                     .cloned()

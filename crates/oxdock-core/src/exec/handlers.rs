@@ -804,7 +804,7 @@ fn place_file_in_dir(
     let to_display = to_abs.display().to_string();
     to_abs
         .join(&base)
-        .map_err(|e| diag::eval_copy_destination_escapes(&to_display, &e))
+        .map_err(|e| diag::eval_copy_destination_escapes(&to_display, &anyhow::Error::from(e)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -897,7 +897,7 @@ fn resolve_archive_src<P: ProcessManager>(
     }
     parent_abs
         .join(&name)
-        .map_err(|e| diag::eval_archive_failed(src, dst, &e))
+        .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)))
 }
 
 /// Collected packable tree: `(rel, guard)` files plus `(rel, guard)`
@@ -960,9 +960,9 @@ fn collect_archive_tree(
                     if is_link {
                         return Err(diag::eval_archive_refuses_symlink(src, dst, &child_rel));
                     }
-                    let child = dir_abs
-                        .join(&name)
-                        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
+                    let child = dir_abs.join(&name).map_err(|e| {
+                        diag::eval_archive_failed(src, dst, &anyhow::Error::from(e))
+                    })?;
                     match fs
                         .entry_kind(&child)
                         .map_err(|e| diag::eval_archive_failed(src, dst, &e))?
@@ -1172,7 +1172,11 @@ pub(super) fn unarchive<P: ProcessManager>(
                     ))
                 })?;
                 let dir = dst_abs.join(&rel).map_err(|e| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(
+                        src,
+                        dst,
+                        &anyhow::Error::from(e),
+                    ))
                 })?;
                 fs.create_dir_all(&dir).map_err(|e| {
                     anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
@@ -1195,7 +1199,11 @@ pub(super) fn unarchive<P: ProcessManager>(
                     ))
                 })?;
                 let file = dst_abs.join(&rel).map_err(|e| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(
+                        src,
+                        dst,
+                        &anyhow::Error::from(e),
+                    ))
                 })?;
                 fs.ensure_parent_dir(&file).map_err(|e| {
                     anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
@@ -1334,12 +1342,12 @@ pub(super) fn symlink<P: ProcessManager>(
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &anyhow::Error::from(e)))?
     } else if matches!(cx.state.fs.entry_kind(&to_abs), Ok(EntryKind::Dir)) {
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &anyhow::Error::from(e)))?
     } else {
         to_abs
     };

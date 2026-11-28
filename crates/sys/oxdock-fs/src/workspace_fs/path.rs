@@ -3,7 +3,7 @@ use super::PathResolver;
 use super::guard_path;
 use crate::PathLike;
 use crate::diagnostics as fs_diag;
-use anyhow::{Context, Result};
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 use std::borrow::Cow;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::fs::File;
@@ -24,6 +24,12 @@ use tracing::warn;
 
 #[cfg(miri)]
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Lift a bare `std::io::Error` into the single `from_anyhow` owner
+/// (transport via `anyhow::Error::from`, key reclaimed inside).
+fn lift_io_err(err: std::io::Error) -> Diagnostic {
+    fs_diag::from_anyhow(anyhow::Error::from(err))
+}
 
 /// Process-local counter for pre-computed scratch candidates: the leaf
 /// is unique within this process, the PID namespaces it across live
@@ -51,7 +57,7 @@ pub struct GuardedPath {
 
 impl GuardedPath {
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    pub fn new(root: &Path, candidate: &Path) -> Result<Self> {
+    pub fn new(root: &Path, candidate: &Path) -> DiagnosticResult<Self> {
         let guarded = guard_path(root, candidate, AccessMode::Read)?;
         Ok(Self {
             root: root.to_path_buf(),
@@ -61,13 +67,13 @@ impl GuardedPath {
 
     /// Build a guard from string paths without requiring callers to reference `std::path` types.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    pub fn new_from_str(root: &str, candidate: &str) -> Result<Self> {
+    pub fn new_from_str(root: &str, candidate: &str) -> DiagnosticResult<Self> {
         Self::new(Path::new(root), Path::new(candidate))
     }
 
     /// Create a guard where the root is the path itself.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    pub fn new_root(root: &Path) -> Result<Self> {
+    pub fn new_root(root: &Path) -> DiagnosticResult<Self> {
         let guarded = guard_path(root, root, AccessMode::Read)?;
         Ok(Self {
             root: guarded.clone(),
@@ -77,13 +83,13 @@ impl GuardedPath {
 
     /// Build a root guard from a string path without exposing `std::path` types to callers.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    pub fn new_root_from_str(root: &str) -> Result<Self> {
+    pub fn new_root_from_str(root: &str) -> DiagnosticResult<Self> {
         Self::new_root(Path::new(root))
     }
 
     /// Create a guarded temporary directory using `tempfile::Builder`.
     #[cfg(not(miri))]
-    pub fn tempdir() -> Result<GuardedTempDir> {
+    pub fn tempdir() -> DiagnosticResult<GuardedTempDir> {
         Self::tempdir_with(|_| {})
     }
 
@@ -92,14 +98,14 @@ impl GuardedPath {
     /// the returned `GuardedTempDir` is dropped unless it is persisted.
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    pub fn tempdir_with<F>(configure: F) -> Result<GuardedTempDir>
+    pub fn tempdir_with<F>(configure: F) -> DiagnosticResult<GuardedTempDir>
     where
         F: FnOnce(&mut Builder),
     {
         let mut builder = Builder::new();
         builder.prefix(OXDOCK_TEMP_PREFIX);
         configure(&mut builder);
-        let tempdir = builder.tempdir()?;
+        let tempdir = builder.tempdir().map_err(lift_io_err)?;
         let guard = GuardedPath::new_root(tempdir.path())?;
         // Write the PID lock BEFORE the marker: cleanup scans on marker
         // existence and reclaims marker-without-lock dirs, so publishing the
@@ -115,7 +121,7 @@ impl GuardedPath {
     /// Create a synthetic temporary directory when running under Miri.
     /// No host filesystem operations are performed to keep isolation intact.
     #[cfg(miri)]
-    pub fn tempdir() -> Result<GuardedTempDir> {
+    pub fn tempdir() -> DiagnosticResult<GuardedTempDir> {
         Self::tempdir_with(|_| {})
     }
 
@@ -123,7 +129,7 @@ impl GuardedPath {
     /// without touching the host filesystem.
     #[cfg(miri)]
     #[allow(clippy::disallowed_types)]
-    pub fn tempdir_with<F>(_configure: F) -> Result<GuardedTempDir>
+    pub fn tempdir_with<F>(_configure: F) -> DiagnosticResult<GuardedTempDir>
     where
         F: FnOnce(&mut Builder),
     {
@@ -139,13 +145,13 @@ impl GuardedPath {
     /// Remove any stale tempdirs created by OxDock in the system temp dir. This helps
     /// recover space when a process was terminated with SIGKILL and drops did not run.
     #[cfg(not(miri))]
-    pub fn cleanup_stale_tempdirs() -> Result<()> {
+    pub fn cleanup_stale_tempdirs() -> DiagnosticResult<()> {
         cleanup_marked_tempdirs()
     }
 
     /// No-op placeholder under Miri where no host tempdirs are created.
     #[cfg(miri)]
-    pub fn cleanup_stale_tempdirs() -> Result<()> {
+    pub fn cleanup_stale_tempdirs() -> DiagnosticResult<()> {
         Ok(())
     }
 
@@ -184,7 +190,7 @@ impl GuardedPath {
         command_path(self).display().to_string()
     }
 
-    pub fn join(&self, rel: &str) -> Result<Self> {
+    pub fn join(&self, rel: &str) -> DiagnosticResult<Self> {
         GuardedPath::new(&self.root, &self.path.join(rel))
     }
 
@@ -197,7 +203,7 @@ impl GuardedPath {
     /// directories: a missing parent fails instead of materializing
     /// (unlike `new_root`, which ensures its root).
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    pub fn join_script(&self, text: &str) -> Result<Self> {
+    pub fn join_script(&self, text: &str) -> DiagnosticResult<Self> {
         let raw = Path::new(text);
         if !raw.is_absolute() {
             return self.join(text);
@@ -219,12 +225,12 @@ impl GuardedPath {
         }
         let parent = raw
             .parent()
-            .with_context(|| format!("script has no parent: {text}"))?;
+            .ok_or_else(|| fs_diag::script_no_parent(text))?;
         // Host check only: under Miri the guard below is pure and
         // creates nothing, so there is nothing to pre-empt.
         #[cfg(not(miri))]
         if !parent.exists() {
-            return Err(anyhow::Error::new(fs_diag::script_not_found(text)));
+            return Err(fs_diag::script_not_found(text));
         }
         Self::new(parent, raw)
     }
@@ -365,21 +371,21 @@ impl PathLike for GuardedPath {
         self.to_path_buf()
     }
 
-    fn join(&self, rel: &str) -> Result<Self> {
-        self.join(rel)
+    fn join(&self, rel: &str) -> anyhow::Result<Self> {
+        Ok(self.join(rel)?)
     }
 
     fn parent(&self) -> Option<Self> {
         self.parent()
     }
 
-    fn new_from_str(root: &str, candidate: &str) -> Result<Self> {
-        GuardedPath::new(Path::new(root), Path::new(candidate))
+    fn new_from_str(root: &str, candidate: &str) -> anyhow::Result<Self> {
+        Ok(GuardedPath::new(Path::new(root), Path::new(candidate))?)
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn new_root(root: &Path) -> Result<Self> {
-        GuardedPath::new_root(root)
+    fn new_root(root: &Path) -> anyhow::Result<Self> {
+        Ok(GuardedPath::new_root(root)?)
     }
 }
 
@@ -431,13 +437,13 @@ impl GuardedTempDir {
     /// fast so the baked seed map can never desynchronize from disk.
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn try_candidate(path: &Path) -> Result<Self> {
+    fn try_candidate(path: &Path) -> DiagnosticResult<Self> {
         match std::fs::create_dir(path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(anyhow::Error::new(fs_diag::scratch_collided(path)));
+                return Err(fs_diag::scratch_collided(path));
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(lift_io_err(e)),
         }
         let guard = GuardedPath::new_root(path)?;
         let lock = write_temp_lock(&guard)?;
@@ -616,7 +622,7 @@ impl LazyGuardedTempDir {
     /// init lock while steady-state reads stay lock-free. Crate-internal by
     /// design. Product code reaches this only through the `PathResolver`
     /// choke points (`resolve_read`/`resolve_write`/`resolve_workdir`).
-    pub(crate) fn ensure(&self) -> Result<&GuardedPath> {
+    pub(crate) fn ensure(&self) -> DiagnosticResult<&GuardedPath> {
         if let Some(path) = self.get() {
             return Ok(path);
         }
@@ -666,7 +672,7 @@ impl LazyGuardedTempDir {
     /// only (e.g. interactive shell entry, which must hand a concrete
     /// directory to an external consumer). Step handlers must resolve through
     /// `PathResolver` instead of calling this.
-    pub fn materialize(&self) -> Result<()> {
+    pub fn materialize(&self) -> DiagnosticResult<()> {
         self.ensure().map(|_| ())
     }
 }
@@ -724,7 +730,7 @@ impl PathLike for UnguardedPath {
         self.to_path_buf()
     }
 
-    fn join(&self, rel: &str) -> Result<Self> {
+    fn join(&self, rel: &str) -> anyhow::Result<Self> {
         // Preserve forward-slash style when the original path or the
         // incoming relative fragment uses `/`. On Windows `Path::join`
         // will format with backslashes which breaks tests that expect
@@ -749,12 +755,12 @@ impl PathLike for UnguardedPath {
             .map(|p| UnguardedPath::external(p.to_path_buf()))
     }
 
-    fn new_from_str(_root: &str, candidate: &str) -> Result<Self> {
+    fn new_from_str(_root: &str, candidate: &str) -> anyhow::Result<Self> {
         Ok(UnguardedPath::external(Path::new(candidate).to_path_buf()))
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn new_root(root: &Path) -> Result<Self> {
+    fn new_root(root: &Path) -> anyhow::Result<Self> {
         Ok(UnguardedPath::external(root.to_path_buf()))
     }
 }
@@ -805,9 +811,9 @@ pub fn to_forward_slashes(s: &str) -> String {
 /// Pure string surgery with no filesystem access: backslashes normalize
 /// to slashes, trailing slashes trim (root stays `/`), then the text
 /// after the last slash binds. Empty input fails closed.
-pub fn path_base(path: &str) -> Result<String> {
+pub fn path_base(path: &str) -> DiagnosticResult<String> {
     if path.is_empty() {
-        return Err(anyhow::Error::new(fs_diag::path_base_empty()));
+        return Err(fs_diag::path_base_empty());
     }
     let normalized = to_forward_slashes(path);
     let trimmed = normalized.trim_end_matches('/');
@@ -815,7 +821,7 @@ pub fn path_base(path: &str) -> Result<String> {
         if normalized.starts_with('/') {
             return Ok("/".to_string());
         }
-        return Err(anyhow::Error::new(fs_diag::path_base_empty()));
+        return Err(fs_diag::path_base_empty());
     }
     match trimmed.rfind('/') {
         Some(idx) => Ok(trimmed[idx + 1..].to_string()),
@@ -830,9 +836,9 @@ pub fn path_base(path: &str) -> Result<String> {
 /// segments prefix `path` segments on a segment boundary. Equal paths bind
 /// `.`; non-prefix inputs fail closed naming both sides. Absolute and
 /// relative shapes never mix.
-pub fn path_rel(base: &str, path: &str) -> Result<String> {
+pub fn path_rel(base: &str, path: &str) -> DiagnosticResult<String> {
     if base.is_empty() || path.is_empty() {
-        return Err(anyhow::Error::new(fs_diag::path_rel_empty()));
+        return Err(fs_diag::path_rel_empty());
     }
     let norm_base = to_forward_slashes(base);
     let norm_path = to_forward_slashes(path);
@@ -846,7 +852,7 @@ pub fn path_rel(base: &str, path: &str) -> Result<String> {
     };
     let clean_base = trim_root(&norm_base);
     let clean_path = trim_root(&norm_path);
-    let split = |s: &str| -> Result<(bool, Vec<String>)> {
+    let split = |s: &str| -> DiagnosticResult<(bool, Vec<String>)> {
         let absolute = s.starts_with('/');
         let mut segs = Vec::new();
         for seg in s.split('/') {
@@ -856,7 +862,7 @@ pub fn path_rel(base: &str, path: &str) -> Result<String> {
             // `..` never relativizes: it escapes the base lexically, so
             // fail closed naming both sides instead of emitting `../`.
             if seg == ".." {
-                return Err(anyhow::Error::new(fs_diag::path_rel_dotdot(base, path)));
+                return Err(fs_diag::path_rel_dotdot(base, path));
             }
             segs.push(seg.to_string());
         }
@@ -865,12 +871,12 @@ pub fn path_rel(base: &str, path: &str) -> Result<String> {
     let (base_abs, base_segs) = split(&clean_base)?;
     let (path_abs, path_segs) = split(&clean_path)?;
     if base_abs != path_abs {
-        return Err(anyhow::Error::new(fs_diag::path_rel_mixed(base, path)));
+        return Err(fs_diag::path_rel_mixed(base, path));
     }
     if base_segs.len() > path_segs.len()
         || base_segs.iter().zip(path_segs.iter()).any(|(b, p)| b != p)
     {
-        return Err(anyhow::Error::new(fs_diag::path_rel_not_prefix(base, path)));
+        return Err(fs_diag::path_rel_not_prefix(base, path));
     }
     let rest = &path_segs[base_segs.len()..];
     if rest.is_empty() {
@@ -910,8 +916,9 @@ pub fn embed_path(path: &GuardedPath) -> String {
 
 #[cfg_attr(miri, allow(dead_code))]
 #[cfg(not(miri))]
-fn write_temp_marker(guard: &GuardedPath) -> Result<()> {
-    let resolver = PathResolver::new_guarded(guard.clone(), guard.clone())?;
+fn write_temp_marker(guard: &GuardedPath) -> DiagnosticResult<()> {
+    let resolver =
+        PathResolver::new_guarded(guard.clone(), guard.clone()).map_err(fs_diag::from_anyhow)?;
     let marker = guard.join(OXDOCK_TEMP_MARKER)?;
     resolver.write_file(&marker, b"oxdock-tempdir")?;
     Ok(())
@@ -919,13 +926,13 @@ fn write_temp_marker(guard: &GuardedPath) -> Result<()> {
 
 #[cfg_attr(miri, allow(dead_code))]
 #[cfg(miri)]
-fn write_temp_marker(_guard: &GuardedPath) -> Result<()> {
+fn write_temp_marker(_guard: &GuardedPath) -> DiagnosticResult<()> {
     Ok(())
 }
 
 #[cfg_attr(miri, allow(dead_code))]
 #[cfg(not(miri))]
-fn write_temp_lock(guard: &GuardedPath) -> Result<File> {
+fn write_temp_lock(guard: &GuardedPath) -> DiagnosticResult<File> {
     #[allow(clippy::disallowed_methods)]
     let pid = std::process::id();
     let lock_path = guard.join(OXDOCK_TEMP_LOCK)?;
@@ -934,18 +941,19 @@ fn write_temp_lock(guard: &GuardedPath) -> Result<File> {
         .create(true)
         .write(true)
         .truncate(true)
-        .open(lock_path.as_path())?;
+        .open(lock_path.as_path())
+        .map_err(lift_io_err)?;
     use std::io::Write;
-    writeln!(file, "{pid}")?;
+    writeln!(file, "{pid}").map_err(lift_io_err)?;
     #[allow(clippy::disallowed_methods)]
-    file.sync_all()?;
+    file.sync_all().map_err(lift_io_err)?;
     Ok(file)
 }
 
 #[cfg_attr(miri, allow(dead_code))]
 #[cfg(miri)]
-fn write_temp_lock(_guard: &GuardedPath) -> Result<File> {
-    Err(anyhow::Error::new(fs_diag::temp_lock_miri()))
+fn write_temp_lock(_guard: &GuardedPath) -> DiagnosticResult<File> {
+    Err(fs_diag::temp_lock_miri())
 }
 
 /// Best-effort synchronous tree removal with Windows teardown retries:
@@ -998,7 +1006,7 @@ fn fresh_candidate() -> PathBuf {
 }
 
 #[cfg(not(miri))]
-fn cleanup_marked_tempdirs() -> Result<()> {
+fn cleanup_marked_tempdirs() -> DiagnosticResult<()> {
     cleanup_marked_tempdirs_in(std::env::temp_dir())
 }
 
@@ -1021,10 +1029,10 @@ pub(crate) fn run_temp_cleanup_once() {}
     clippy::disallowed_methods,
     clippy::collapsible_if
 )]
-fn cleanup_marked_tempdirs_in(base: std::path::PathBuf) -> Result<()> {
+fn cleanup_marked_tempdirs_in(base: std::path::PathBuf) -> DiagnosticResult<()> {
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    for entry in std::fs::read_dir(&base)? {
-        let entry = entry?;
+    for entry in std::fs::read_dir(&base).map_err(lift_io_err)? {
+        let entry = entry.map_err(lift_io_err)?;
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
         if !name.starts_with(OXDOCK_TEMP_PREFIX) {
@@ -1059,7 +1067,7 @@ fn cleanup_marked_tempdirs_in(base: std::path::PathBuf) -> Result<()> {
 
 #[cfg(miri)]
 #[allow(dead_code, clippy::disallowed_types)]
-fn cleanup_marked_tempdirs_in(_base: std::path::PathBuf) -> Result<()> {
+fn cleanup_marked_tempdirs_in(_base: std::path::PathBuf) -> DiagnosticResult<()> {
     Ok(())
 }
 

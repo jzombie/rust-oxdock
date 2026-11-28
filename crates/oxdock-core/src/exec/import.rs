@@ -263,7 +263,7 @@ fn resolve_top_level_with(
         return Ok(candidate);
     }
     dir.join(path)
-        .map_err(|e| import_diag::import_cannot_resolve(path, &e))
+        .map_err(|e| import_diag::import_cannot_resolve(path, &anyhow::Error::from(e)))
 }
 
 /// Preview-phase entry point: no entry handle here, so the workspace

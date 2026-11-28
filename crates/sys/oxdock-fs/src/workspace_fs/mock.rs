@@ -134,7 +134,7 @@ impl MockFs {
         };
         self.root
             .join(native.as_str())
-            .map_err(|e| anyhow::Error::new(fs_diag::mock_join_failed(&e)))
+            .map_err(|e| anyhow::Error::new(fs_diag::mock_join_failed(&anyhow::Error::from(e))))
     }
 
     fn relative_path(&self, path: &GuardedPath) -> String {
@@ -577,7 +577,7 @@ impl WorkspaceFs for MockFs {
             // absolute candidate escapes the allowed root. Previously we silently
             // remapped absolute paths into the mock root which allowed Windows
             // drive-prefixed paths (e.g. `C:\...`) to bypass the guard.
-            return GuardedPath::new(self.root.root(), candidate);
+            return Ok(GuardedPath::new(self.root.root(), candidate)?);
         }
         if new_dir == "/" {
             if self.current == MockCurrent::System {
@@ -596,7 +596,7 @@ impl WorkspaceFs for MockFs {
             if self.current == MockCurrent::System {
                 return Ok(system_guarded(candidate));
             }
-            return GuardedPath::new(self.root.root(), candidate);
+            return Ok(GuardedPath::new(self.root.root(), candidate)?);
         }
         let target = self.normalize_rel(cwd, rel)?;
         self.guard_from_rel(target)
@@ -609,7 +609,7 @@ impl WorkspaceFs for MockFs {
             if self.current == MockCurrent::System {
                 return Ok(system_guarded(candidate));
             }
-            return GuardedPath::new(self.root.root(), candidate);
+            return Ok(GuardedPath::new(self.root.root(), candidate)?);
         }
         let target = self.normalize_rel(cwd, rel)?;
         self.guard_from_rel(target)
@@ -622,7 +622,7 @@ impl WorkspaceFs for MockFs {
             if self.current == MockCurrent::System {
                 return Ok(system_guarded(candidate));
             }
-            return GuardedPath::new(self.build_context.root(), candidate);
+            return Ok(GuardedPath::new(self.build_context.root(), candidate)?);
         }
         let rel = self.split_components(from).join("/");
         self.guard_from_rel(rel)

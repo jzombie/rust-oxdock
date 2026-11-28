@@ -509,6 +509,18 @@ pub fn script_not_found(text: &str) -> Diagnostic {
     )
 }
 
+/// Script path with no parent segment. Takes the raw text; rendering
+/// lives here. Distinct from [`script_not_found`]: the parent is
+/// absent lexically (e.g. a bare root), not merely missing on disk.
+pub fn script_no_parent(text: &str) -> Diagnostic {
+    let message = format!("script has no parent: {text}");
+    Diagnostic::new(
+        "fs.path.script_no_parent",
+        message,
+        Diagnostic::make_fields(&[(FIELD_TEXT, text)]),
+    )
+}
+
 /// Empty `PATH_BASE` input. Parameterless: the wording is fixed.
 /// Shared by the empty and slashes-only modes: one key, one mode.
 pub fn path_base_empty() -> Diagnostic {
@@ -1066,6 +1078,7 @@ mod tests {
             synthetic_remove_dir_not_empty("sub").key(),
             synthetic_metadata_unsupported().key(),
             script_not_found("step.ox").key(),
+            script_no_parent("step.ox").key(),
             path_base_empty().key(),
             path_rel_empty().key(),
             path_rel_dotdot("a", "a/b").key(),
@@ -1304,6 +1317,10 @@ mod tests {
         assert_eq!(
             script_not_found("step.ox").message(),
             "script not found: step.ox"
+        );
+        assert_eq!(
+            script_no_parent("step.ox").message(),
+            "script has no parent: step.ox"
         );
         assert_eq!(
             path_base_empty().message(),

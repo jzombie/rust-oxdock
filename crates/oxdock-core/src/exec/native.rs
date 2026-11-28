@@ -4371,7 +4371,7 @@ fn path_base(
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&path)?;
     let base = oxdock_fs::path_base(&text)
-        .map_err(|e| anyhow::Error::new(std_diag::std_path_base_failed(&e)))?;
+        .map_err(|e| anyhow::Error::new(std_diag::std_path_base_failed(&anyhow::Error::from(e))))?;
     Ok(Value::string(base))
 }
 
@@ -4409,7 +4409,7 @@ fn path_rel(
     let b = super::args::string_or_path_text(&base)?;
     let p = super::args::string_or_path_text(&path)?;
     let rel = oxdock_fs::path_rel(&b, &p)
-        .map_err(|e| anyhow::Error::new(std_diag::std_path_rel_failed(&e)))?;
+        .map_err(|e| anyhow::Error::new(std_diag::std_path_rel_failed(&anyhow::Error::from(e))))?;
     Ok(Value::string(rel))
 }
 

@@ -229,9 +229,7 @@ pub fn try_embed_assets(spec: &EmbedSpec) -> DiagnosticResult<Vec<String>> {
     let out_dir = out_dir_root()?;
     let resolver = PathResolver::from_manifest_env().map_err(build_diag::from_anyhow)?;
     let module_path = module_guarded_path(&out_dir, &module_file_name(&spec.name))?;
-    let asset_root = out_dir
-        .join(&spec.subdir_name())
-        .map_err(build_diag::from_anyhow)?;
+    let asset_root = out_dir.join(&spec.subdir_name())?;
     let assets =
         gather_assets(&resolver, &asset_root).map_err(|e| build_diag::collect_assets_failed(&e))?;
     let name_ident = syn::Ident::new(&spec.name, proc_macro2::Span::call_site());
@@ -272,13 +270,14 @@ fn init() {
 fn out_dir_root() -> DiagnosticResult<GuardedPath> {
     let out = std::env::var(oxdock_env::cargo::build::OUT_DIR)
         .map_err(|err| build_diag::out_dir_missing(&err))?;
-    GuardedPath::new_root_from_str(&out).map_err(|e| build_diag::invalid_out_dir(&out, &e))
+    GuardedPath::new_root_from_str(&out)
+        .map_err(|e| build_diag::invalid_out_dir(&out, &anyhow::Error::from(e)))
 }
 
 fn module_guarded_path(out_dir: &GuardedPath, rel: &str) -> DiagnosticResult<GuardedPath> {
     out_dir
         .join(rel)
-        .map_err(|e| build_diag::module_path_rejected(&e))
+        .map_err(|e| build_diag::module_path_rejected(&anyhow::Error::from(e)))
 }
 
 impl EmbedSpec {
@@ -298,7 +297,7 @@ fn script_text(source: DslSource) -> DiagnosticResult<(String, Option<String>)> 
             let guarded = resolver
                 .root()
                 .join(rel)
-                .map_err(|e| build_diag::dsl_path_escapes_manifest(rel, &e))?;
+                .map_err(|e| build_diag::dsl_path_escapes_manifest(rel, &anyhow::Error::from(e)))?;
             let text = resolver
                 .read_to_string(&guarded)
                 .map_err(|err| build_diag::dsl_script_read_failed(rel, &anyhow::Error::new(err)))?;
@@ -415,7 +414,7 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> DiagnosticRe
     let target = if subdir.is_empty() {
         out_dir.clone()
     } else {
-        out_dir.join(subdir).map_err(build_diag::from_anyhow)?
+        out_dir.join(subdir)?
     };
 
     ensure_materialize_dir(&resolver, &target)?;
@@ -464,7 +463,7 @@ pub fn clear_materialize_dir(
         if name == ".oxdock_hash" {
             continue;
         }
-        let child = target.join(&name).map_err(build_diag::from_anyhow)?;
+        let child = target.join(&name)?;
         match resolver.entry_kind(&child) {
             Ok(EntryKind::Dir) => {
                 let _ = resolver.remove_dir_all(&child);
@@ -567,7 +566,7 @@ fn hash_input_path(
     rel: &str,
     hasher: &mut Sha256,
 ) -> DiagnosticResult<()> {
-    let guarded = root.join(rel).map_err(build_diag::from_anyhow)?;
+    let guarded = root.join(rel)?;
     match resolver.entry_kind(&guarded) {
         // Following inspection resolves links to their targets, so a
         // symlink hashes exactly like the file it points at.
@@ -616,9 +615,7 @@ pub fn stage_materialize(
     final_external: &UnguardedPath,
     target: &GuardedPath,
 ) -> DiagnosticResult<()> {
-    let stage = target
-        .join(".oxdock-staging")
-        .map_err(build_diag::from_anyhow)?;
+    let stage = target.join(".oxdock-staging")?;
     if resolver.entry_kind(&stage).is_ok() {
         resolver.remove_dir_all(&stage)?;
     }
@@ -628,7 +625,7 @@ pub fn stage_materialize(
         .copy_dir_from_unguarded(final_external, &stage)
         .map_err(|e| build_diag::stage_copy_failed(&anyhow::Error::from(e)))?;
     for marker in SANDBOX_MARKERS {
-        let marker_path = stage.join(marker).map_err(build_diag::from_anyhow)?;
+        let marker_path = stage.join(marker)?;
         if resolver.entry_kind(&marker_path).is_ok() {
             resolver.remove_file(&marker_path)?;
         }
@@ -663,8 +660,8 @@ pub fn sync_tree(
 
     for entry in &src_entries {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let src_child = src.join(&name).map_err(build_diag::from_anyhow)?;
-        let dst_child = dst.join(&name).map_err(build_diag::from_anyhow)?;
+        let src_child = src.join(&name)?;
+        let dst_child = dst.join(&name)?;
         match entry
             .file_type()
             .map_err(|e| build_diag::from_anyhow(e.into()))?
@@ -685,7 +682,7 @@ pub fn sync_tree(
         if src_names.contains(&name) || name == ".oxdock_hash" {
             continue;
         }
-        let dst_child = dst.join(&name).map_err(build_diag::from_anyhow)?;
+        let dst_child = dst.join(&name)?;
         match resolver.entry_kind(&dst_child) {
             Ok(EntryKind::Dir) => {
                 let _ = resolver.remove_dir_all(&dst_child);

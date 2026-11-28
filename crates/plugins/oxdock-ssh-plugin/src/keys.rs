@@ -84,14 +84,14 @@ fn anchor_key_path(root: &std::path::Path, raw: &str, func: &str) -> DiagnosticR
             return Err(ssh_diag::key_path_escapes(func, raw));
         };
         return GuardedPath::new_root(root)
-            .map_err(|e| ssh_diag::key_guard_failed(func, &e))?
+            .map_err(|e| ssh_diag::key_guard_failed(func, &anyhow::Error::from(e)))?
             .join(rel_str)
-            .map_err(|e| ssh_diag::key_path_join_failed(func, raw, &e));
+            .map_err(|e| ssh_diag::key_path_join_failed(func, raw, &anyhow::Error::from(e)));
     }
     GuardedPath::new_root(root)
-        .map_err(|e| ssh_diag::key_guard_failed(func, &e))?
+        .map_err(|e| ssh_diag::key_guard_failed(func, &anyhow::Error::from(e)))?
         .join(&normalized)
-        .map_err(|e| ssh_diag::key_path_join_failed(func, raw, &e))
+        .map_err(|e| ssh_diag::key_path_join_failed(func, raw, &anyhow::Error::from(e)))
 }
 
 /// Bounded re-read for every host-key load: the winner's PEM bytes land

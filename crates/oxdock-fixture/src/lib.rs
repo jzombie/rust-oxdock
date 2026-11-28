@@ -125,7 +125,7 @@ impl FixtureInstance {
 
     /// Guarded path to `Cargo.toml` inside the copied fixture.
     pub fn manifest_path(&self) -> Result<GuardedPath> {
-        self.root.join("Cargo.toml")
+        Ok(self.root.join("Cargo.toml")?)
     }
 
     /// Build a `CommandBuilder` scoped to the fixture root.

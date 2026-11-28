@@ -312,8 +312,7 @@ impl PathResolver {
                     })?;
                     self.copy_dir_from_unguarded(
                         &UnguardedPath::external(src_path),
-                        &GuardedPath::new(guarded_dst_root.root(), &dst_path)
-                            .map_err(fs_diag::from_anyhow)?,
+                        &GuardedPath::new(guarded_dst_root.root(), &dst_path)?,
                     )?;
                 }
                 CopyEntryKind::File => {
