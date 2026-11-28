@@ -371,21 +371,21 @@ impl PathLike for GuardedPath {
         self.to_path_buf()
     }
 
-    fn join(&self, rel: &str) -> anyhow::Result<Self> {
-        Ok(self.join(rel)?)
+    fn join(&self, rel: &str) -> DiagnosticResult<Self> {
+        self.join(rel)
     }
 
     fn parent(&self) -> Option<Self> {
         self.parent()
     }
 
-    fn new_from_str(root: &str, candidate: &str) -> anyhow::Result<Self> {
-        Ok(GuardedPath::new(Path::new(root), Path::new(candidate))?)
+    fn new_from_str(root: &str, candidate: &str) -> DiagnosticResult<Self> {
+        GuardedPath::new(Path::new(root), Path::new(candidate))
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn new_root(root: &Path) -> anyhow::Result<Self> {
-        Ok(GuardedPath::new_root(root)?)
+    fn new_root(root: &Path) -> DiagnosticResult<Self> {
+        GuardedPath::new_root(root)
     }
 }
 
@@ -730,7 +730,7 @@ impl PathLike for UnguardedPath {
         self.to_path_buf()
     }
 
-    fn join(&self, rel: &str) -> anyhow::Result<Self> {
+    fn join(&self, rel: &str) -> DiagnosticResult<Self> {
         // Preserve forward-slash style when the original path or the
         // incoming relative fragment uses `/`. On Windows `Path::join`
         // will format with backslashes which breaks tests that expect
@@ -755,12 +755,12 @@ impl PathLike for UnguardedPath {
             .map(|p| UnguardedPath::external(p.to_path_buf()))
     }
 
-    fn new_from_str(_root: &str, candidate: &str) -> anyhow::Result<Self> {
+    fn new_from_str(_root: &str, candidate: &str) -> DiagnosticResult<Self> {
         Ok(UnguardedPath::external(Path::new(candidate).to_path_buf()))
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn new_root(root: &Path) -> anyhow::Result<Self> {
+    fn new_root(root: &Path) -> DiagnosticResult<Self> {
         Ok(UnguardedPath::external(root.to_path_buf()))
     }
 }

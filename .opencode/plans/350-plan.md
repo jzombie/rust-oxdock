@@ -1595,3 +1595,33 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   warnings, incl. revert of 2 `useless_conversion`
   adapters), `rustfmt --edition 2024 --check` clean on all
   16 touched files.
+
+- ZERO-BRIDGE END STATE (2026-11-28, per user order): when
+  B4 (and #350) is done, nothing bridged remains. No
+  `Ok(f(...)?)` trait bridges, no
+  `.map_err(anyhow::Error::from)` adapters, no
+  `.map_err(from_anyhow)` lifts on native callees.
+  `anyhow` survives only as transport *inside* still-migrating
+  files (`anyhow::Error::from` into a keyed owner). Every
+  bulk from here on removes bridges it touches; the final
+  bulk deletes the last one.
+
+- B4h (2026-11-28): `PathLike` trait flipped to
+  `DiagnosticResult` (`join`, `new_from_str`, `new_root`,
+  `new_root_from_str` default follows). Contained: 2
+  implementors (`GuardedPath`, `UnguardedPath`), zero
+  external users (only referenced in `lib.rs` def +
+  `path.rs` impls). `GuardedPath` impls are native
+  passthrough (bridges deleted); `UnguardedPath` impls
+  retyped (infallible `Ok(...)` bodies unchanged).
+  `lib.rs` gains the `DiagnosticResult` import; the
+  `WorkspaceFs` trait there stays anyhow (its own bulk
+  later). `path.rs` keeps exactly 2 transport mentions
+  (`anyhow::Error::from` inside `lift_io_err`,
+  `from_anyhow` for still-anyhow `new_guarded`): no
+  bridges, no `use anyhow`. Gates: `cargo test -p
+  oxdock-fs` green (72 + 8 + 4 + 1), full `cargo test
+  --workspace` green (93 targets, 2715 passed, 0 failed),
+  `cargo clippy --workspace --all-targets` clean (zero
+  warnings), `rustfmt --edition 2024 --check` clean on both
+  touched files (`lib.rs`, `path.rs`).

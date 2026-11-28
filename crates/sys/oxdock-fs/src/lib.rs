@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use oxdock_diagnostics::DiagnosticResult;
 
 #[cfg(miri)]
 use crate::diagnostics as fs_diag;
@@ -80,13 +81,13 @@ pub trait PathLike: Sized + std::fmt::Display {
     /// guarded operation that produced it.
     #[allow(clippy::disallowed_types)]
     fn to_path_buf(&self) -> std::path::PathBuf;
-    fn join(&self, rel: &str) -> Result<Self>;
+    fn join(&self, rel: &str) -> DiagnosticResult<Self>;
     fn parent(&self) -> Option<Self>;
     // Constructors analogous to those on `GuardedPath`.
-    fn new_from_str(root: &str, candidate: &str) -> Result<Self>;
+    fn new_from_str(root: &str, candidate: &str) -> DiagnosticResult<Self>;
     #[allow(clippy::disallowed_types)]
-    fn new_root(root: &std::path::Path) -> Result<Self>;
-    fn new_root_from_str(root: &str) -> Result<Self> {
+    fn new_root(root: &std::path::Path) -> DiagnosticResult<Self>;
+    fn new_root_from_str(root: &str) -> DiagnosticResult<Self> {
         #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
         Self::new_root(std::path::Path::new(root))
     }
