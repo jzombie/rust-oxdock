@@ -87,6 +87,7 @@ impl PathResolver {
     ) -> Result<()> {
         let source = self
             .resolve_copy_source(from)
+            .map_err(anyhow::Error::from)
             .with_context(|| format!("COPY_GIT failed to resolve source {}", from))?;
 
         #[cfg(miri)]
@@ -96,6 +97,7 @@ impl PathResolver {
             if let Some(parent) = to.as_path().parent() {
                 let parent_guard = GuardedPath::new(to.root(), parent)?;
                 self.create_dir_all(&parent_guard)
+                    .map_err(anyhow::Error::from)
                     .with_context(|| format!("creating parent {}", parent.display()))?;
             }
             match self.entry_kind(&source)? {
@@ -134,10 +136,12 @@ impl PathResolver {
 
             let _ = self
                 .check_access_with_root(self.effective_root(), to.as_path(), AccessMode::Write)
+                .map_err(anyhow::Error::from)
                 .with_context(|| format!("destination {} escapes allowed root", to.display()))?;
 
             let _ = self
                 .check_access(self.build_context.as_path(), AccessMode::Read)
+                .map_err(anyhow::Error::from)
                 .with_context(|| {
                     format!(
                         "build context {} not under root",
@@ -168,16 +172,20 @@ impl PathResolver {
                         if let Some(parent) = to.as_path().parent() {
                             let parent_guard = GuardedPath::new(to.root(), parent)?;
                             self.create_dir_all(&parent_guard)
+                                .map_err(anyhow::Error::from)
                                 .with_context(|| format!("creating parent {}", parent.display()))?;
                         }
                         self.write_file(to, &show.stdout)
+                            .map_err(anyhow::Error::from)
                             .with_context(|| format!("writing git blob to {}", to.display()))?;
                         if include_dirty {
                             if let Some(parent) = to.as_path().parent() {
                                 let parent_guard = GuardedPath::new(to.root(), parent)?;
-                                self.create_dir_all(&parent_guard).with_context(|| {
-                                    format!("creating parent {}", parent.display())
-                                })?;
+                                self.create_dir_all(&parent_guard)
+                                    .map_err(anyhow::Error::from)
+                                    .with_context(|| {
+                                        format!("creating parent {}", parent.display())
+                                    })?;
                             }
                             match self.entry_kind(&source)? {
                                 super::EntryKind::Dir => self.copy_dir_recursive(&source, to)?,
@@ -247,6 +255,7 @@ impl PathResolver {
                     if let Some(parent) = dest.as_path().parent() {
                         let parent_guard = GuardedPath::new(dest.root(), parent)?;
                         self.create_dir_all(&parent_guard)
+                            .map_err(anyhow::Error::from)
                             .with_context(|| format!("creating parent {}", parent.display()))?;
                     }
 
@@ -294,6 +303,7 @@ impl PathResolver {
                                         &dest,
                                         target.trim_end_matches('\n').as_bytes(),
                                     )
+                                    .map_err(anyhow::Error::from)
                                     .with_context(|| {
                                         format!(
                                             "writing symlink placeholder {} -> {}",
@@ -303,9 +313,11 @@ impl PathResolver {
                                     })?;
                                 }
                             } else {
-                                self.write_file(&dest, &blob.stdout).with_context(|| {
-                                    format!("writing blob to {}", dest.display())
-                                })?;
+                                self.write_file(&dest, &blob.stdout)
+                                    .map_err(anyhow::Error::from)
+                                    .with_context(|| {
+                                        format!("writing blob to {}", dest.display())
+                                    })?;
                             }
                         }
                         "commit" => {
@@ -322,6 +334,7 @@ impl PathResolver {
                 if let Some(parent) = to.as_path().parent() {
                     let parent_guard = GuardedPath::new(to.root(), parent)?;
                     self.create_dir_all(&parent_guard)
+                        .map_err(anyhow::Error::from)
                         .with_context(|| format!("creating parent {}", parent.display()))?;
                 }
                 match self.entry_kind(&source)? {

@@ -612,23 +612,25 @@ impl WorkspaceFs for PathResolver {
     }
 
     fn resolve_workdir(&self, current: &GuardedPath, new_dir: &str) -> Result<GuardedPath> {
-        PathResolver::resolve_workdir(self, current, new_dir)
+        Ok(PathResolver::resolve_workdir(self, current, new_dir)?)
     }
 
     fn resolve_read(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath> {
-        PathResolver::resolve_read(self, cwd, rel)
+        Ok(PathResolver::resolve_read(self, cwd, rel)?)
     }
 
     fn resolve_write(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath> {
-        PathResolver::resolve_write(self, cwd, rel)
+        Ok(PathResolver::resolve_write(self, cwd, rel)?)
     }
 
     fn resolve_copy_source(&self, from: &str) -> Result<GuardedPath> {
-        PathResolver::resolve_copy_source(self, from)
+        Ok(PathResolver::resolve_copy_source(self, from)?)
     }
 
     fn resolve_copy_source_from_workspace(&self, from: &str) -> Result<GuardedPath> {
-        PathResolver::resolve_copy_source_from_workspace(self, from)
+        Ok(PathResolver::resolve_copy_source_from_workspace(
+            self, from,
+        )?)
     }
 
     fn resolve_copy_source_from_target(
@@ -636,7 +638,9 @@ impl WorkspaceFs for PathResolver {
         root: CopySourceRoot,
         from: &str,
     ) -> Result<GuardedPath> {
-        PathResolver::resolve_copy_source_from_target(self, root, from)
+        Ok(PathResolver::resolve_copy_source_from_target(
+            self, root, from,
+        )?)
     }
 
     fn entry_kind(&self, path: &GuardedPath) -> Result<EntryKind> {

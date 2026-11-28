@@ -499,10 +499,8 @@ impl PathResolver {
             .map(|p| p.to_string_lossy().into_owned())
             .filter(|p| !p.is_empty());
         let parent_guard = match parent_str {
-            Some(parent) => self
-                .resolve_write(cwd, &parent)
-                .map_err(fs_diag::from_anyhow)?,
-            None => self.resolve_write(cwd, ".").map_err(fs_diag::from_anyhow)?,
+            Some(parent) => self.resolve_write(cwd, &parent)?,
+            None => self.resolve_write(cwd, ".")?,
         };
         let link_path = parent_guard.as_path().join(&name);
         if !link_path.starts_with(parent_guard.as_path()) {

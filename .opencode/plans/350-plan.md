@@ -1491,3 +1491,57 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   clean (zero warnings), `rustfmt --edition 2024 --check`
   clean on all 6 touched files (`access.rs`, `cache.rs`,
   `io.rs`, `copy.rs`, `install.rs`, `resolve.rs`).
+
+- B4f (2026-11-28): fs resolve cluster (sixth B4 conversion
+  bulk). All 11 `PathResolver` resolution methods
+  (`resolve_workdir`, `resolve_workdir_system`,
+  `resolve_system`, `resolve_read`, `resolve_write`,
+  `resolve_copy_source`,
+  `resolve_copy_source_from_workspace`,
+  `resolve_copy_source_from_target`,
+  `resolve_copy_source_from_root`, `resolve`,
+  `parse_env_path`) return `DiagnosticResult`. Transitional
+  lift for the two still-anyhow callees (`ensure_cache`,
+  `rebased_cwd`) via the single owner `from_anyhow`;
+  already-keyed `copy_no_workspace_root` /
+  `copy_snapshot_not_materialized` return the diagnostic
+  directly via `ok_or_else` ctor; all 7 historic
+  `.with_context` strings (`WORKDIR {} escapes root` x2,
+  `failed to resolve COPY source {}` x5) replayed
+  byte-identical via native `with_contexts`; already-native
+  guard/backend callees pass through directly (no `Ok(...?)`
+  wrapping, per clippy `needless_question_mark`). Zero
+  `anyhow::Error::new`, `.with_context`, `use anyhow` remain
+  in `resolve.rs`. Cascade callers updated minimally: `io.rs`
+  drops 2 obsolete `.map_err(from_anyhow)` on
+  `resolve_write` (native passthrough); `lib.rs` `WorkspaceFs`
+  impls bridge via `Ok(...?)` (6 sites, A1 pattern); render
+  `embedded.rs` delegation bridges the same way (6 sites);
+  still-anyhow `git/mod.rs` `copy_from_git` bridges 9 native
+  call sites via `.map_err(anyhow::Error::from)` ahead of the
+  existing `with_context` frames. One regex over-strip caught
+  by `cargo check` and repaired: `resolve.rs` reverted and
+  redone with surgical replacements. Gates: `cargo test -p
+  oxdock-fs` green (72 + 8 + 4 + 1), full `cargo test
+  --workspace` green (93 targets, 2715 passed, 0 failed),
+  `cargo clippy --workspace --all-targets` clean (zero
+  warnings), `rustfmt --edition 2024 --check` clean on all 5
+  touched files (`resolve.rs`, `lib.rs`, `io.rs`,
+  `git/mod.rs`, `embedded.rs`).
+
+- FRAME-DEBT (2026-11-28, recorded not fixed per user
+  decision): the B4d-B4f transitional `with_contexts`
+  frames hardcode wording at call sites (~38 `format!`
+  sites across `io.rs`, `copy.rs`, `install.rs`,
+  `access.rs`, `resolve.rs`), violating the diagnostics
+  module contract (wording owned by `diagnostics.rs`, call
+  sites pass structured data only, never `format!`) and
+  duplicating wordings (`creating dir` x8, `denied for`
+  variants, `WORKDIR escapes root` x2, `COPY source` x5).
+  Direct replacement for each site is a typed frame ctor in
+  `diagnostics.rs` taking only structured data (e.g. the
+  path), with the call site passing the value through.
+  Remaining B4 flips (`path.rs`, `git/`, `mod.rs`,
+  `mock.rs`, `policy.rs`, `lib.rs` top-level) continue with
+  the transitional pattern; the centralization pass stays
+  scheduled debt, not a silent accept.

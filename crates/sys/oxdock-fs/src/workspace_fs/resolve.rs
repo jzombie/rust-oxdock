@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use oxdock_diagnostics::DiagnosticResult;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::path::{Path, PathBuf};
 
@@ -36,12 +36,16 @@ impl PathResolver {
             || (cfg!(windows) && path.components().next() == Some(std::path::Component::RootDir))
     }
 
-    pub fn resolve_workdir(&self, current: &GuardedPath, new_dir: &str) -> Result<GuardedPath> {
+    pub fn resolve_workdir(
+        &self,
+        current: &GuardedPath,
+        new_dir: &str,
+    ) -> DiagnosticResult<GuardedPath> {
         if self.is_system() {
             return self.resolve_workdir_system(current, new_dir);
         }
         if self.is_cache() {
-            self.ensure_cache()?;
+            self.ensure_cache().map_err(fs_diag::from_anyhow)?;
         }
         if new_dir == "/" {
             // Reset to the resolver root when WORKDIR is set to '/'. Pure
@@ -52,26 +56,36 @@ impl PathResolver {
         // Choke point (issue #131): snapshot-targeted resolution materializes
         // first, so every join/guard below operates on a concrete root.
         // Local callers pass through untouched.
-        let current = self.rebased_cwd(current)?;
+        let current = self.rebased_cwd(current).map_err(fs_diag::from_anyhow)?;
         let new_dir_path = Path::new(new_dir);
         if Self::is_absolute_or_rooted(new_dir_path) {
             if let Ok(resolved) = self.check_access(new_dir_path, AccessMode::Write) {
-                return Ok(self.backend.resolve_workdir(resolved)?);
+                return self.backend.resolve_workdir(resolved);
             }
 
             let rel = Self::root_relative_path(new_dir_path);
             let candidate = self.root().as_path().join(rel);
             let resolved = self
                 .check_access(&candidate, AccessMode::Write)
-                .with_context(|| format!("WORKDIR {} escapes root", candidate.display()))?;
-            return Ok(self.backend.resolve_workdir(resolved)?);
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
+                        "WORKDIR {} escapes root",
+                        candidate.display()
+                    )])
+                })?;
+            return self.backend.resolve_workdir(resolved);
         }
 
         let candidate = current.as_path().join(new_dir);
         let resolved = self
             .check_access(&candidate, AccessMode::Write)
-            .with_context(|| format!("WORKDIR {} escapes root", candidate.display()))?;
-        Ok(self.backend.resolve_workdir(resolved)?)
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "WORKDIR {} escapes root",
+                    candidate.display()
+                )])
+            })?;
+        self.backend.resolve_workdir(resolved)
     }
 
     /// Unconfined workdir resolution for `WORKSPACE SYSTEM` (issue #163).
@@ -81,9 +95,13 @@ impl PathResolver {
     /// share resolves. The backend still creates the directory when
     /// missing, as with confined roots.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn resolve_workdir_system(&self, current: &GuardedPath, new_dir: &str) -> Result<GuardedPath> {
+    fn resolve_workdir_system(
+        &self,
+        current: &GuardedPath,
+        new_dir: &str,
+    ) -> DiagnosticResult<GuardedPath> {
         if new_dir == "/" {
-            return Ok(self.backend.resolve_workdir(self.system_anchor.clone())?);
+            return self.backend.resolve_workdir(self.system_anchor.clone());
         }
         let normalized = to_forward_slashes(new_dir);
         let new_dir_path = Path::new(&normalized);
@@ -100,14 +118,14 @@ impl PathResolver {
             base.join(new_dir_path)
         };
         let wrapped = super::cache::system_wrap_absolute(&absolute);
-        Ok(self.backend.resolve_workdir(wrapped)?)
+        self.backend.resolve_workdir(wrapped)
     }
 
     /// Unconfined read/write resolution for `WORKSPACE SYSTEM` (issue #163).
     /// Purely lexical: no snapshot materialization, no root-prefix
     /// containment. Read/write mode imposes no distinction under SYSTEM.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn resolve_system(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath> {
+    fn resolve_system(&self, cwd: &GuardedPath, rel: &str) -> DiagnosticResult<GuardedPath> {
         let normalized = to_forward_slashes(rel);
         let rel_path = Path::new(&normalized);
         let base = if cwd.as_path().is_absolute() {
@@ -125,15 +143,15 @@ impl PathResolver {
         Ok(super::cache::system_wrap_absolute(&absolute))
     }
 
-    pub fn resolve_read(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath> {
+    pub fn resolve_read(&self, cwd: &GuardedPath, rel: &str) -> DiagnosticResult<GuardedPath> {
         self.resolve(cwd, rel, AccessMode::Read)
     }
 
-    pub fn resolve_write(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath> {
+    pub fn resolve_write(&self, cwd: &GuardedPath, rel: &str) -> DiagnosticResult<GuardedPath> {
         self.resolve(cwd, rel, AccessMode::Write)
     }
 
-    pub fn resolve_copy_source(&self, from: &str) -> Result<GuardedPath> {
+    pub fn resolve_copy_source(&self, from: &str) -> DiagnosticResult<GuardedPath> {
         let from_path = Path::new(from);
         if Self::is_absolute_or_rooted(from_path) {
             // SYSTEM bypass (issue #163): absolute sources on any drive or
@@ -141,18 +159,18 @@ impl PathResolver {
             // existing build-context chain below.
             if self.is_system() {
                 let wrapped = super::cache::system_wrap_absolute(from_path);
-                return Ok(self.backend.resolve_copy_source(wrapped)?);
+                return self.backend.resolve_copy_source(wrapped);
             }
             if let Some(workspace_root) = &self.workspace_root
                 && let Ok(guarded) =
                     self.check_access_with_root(workspace_root, from_path, AccessMode::Read)
             {
-                return Ok(self.backend.resolve_copy_source(guarded)?);
+                return self.backend.resolve_copy_source(guarded);
             }
             if let Ok(guarded) =
                 self.check_access_with_root(&self.build_context, from_path, AccessMode::Read)
             {
-                return Ok(self.backend.resolve_copy_source(guarded)?);
+                return self.backend.resolve_copy_source(guarded);
             }
 
             let rel = Self::root_relative_path(from_path);
@@ -160,16 +178,25 @@ impl PathResolver {
             let candidate = root.as_path().join(rel);
             return self
                 .check_access_with_root(root, &candidate, AccessMode::Read)
-                .with_context(|| format!("failed to resolve COPY source {}", candidate.display()))
-                .and_then(|guarded| Ok(self.backend.resolve_copy_source(guarded)?));
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
+                        "failed to resolve COPY source {}",
+                        candidate.display()
+                    )])
+                })
+                .and_then(|guarded| self.backend.resolve_copy_source(guarded));
         }
         let candidate = self.build_context.as_path().join(from);
 
         match self
             .check_access_with_root(&self.build_context, &candidate, AccessMode::Read)
-            .with_context(|| format!("failed to resolve COPY source {}", candidate.display()))
-        {
-            Ok(guarded) => Ok(self.backend.resolve_copy_source(guarded)?),
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "failed to resolve COPY source {}",
+                    candidate.display()
+                )])
+            }) {
+            Ok(guarded) => self.backend.resolve_copy_source(guarded),
             Err(primary) => {
                 if let Some(workspace_root) = &self.workspace_root {
                     let workspace_candidate = workspace_root.as_path().join(from);
@@ -178,7 +205,7 @@ impl PathResolver {
                         &workspace_candidate,
                         AccessMode::Read,
                     ) {
-                        return Ok(self.backend.resolve_copy_source(workspace_guarded)?);
+                        return self.backend.resolve_copy_source(workspace_guarded);
                     }
                 }
                 Err(primary)
@@ -186,11 +213,11 @@ impl PathResolver {
         }
     }
 
-    pub fn resolve_copy_source_from_workspace(&self, from: &str) -> Result<GuardedPath> {
+    pub fn resolve_copy_source_from_workspace(&self, from: &str) -> DiagnosticResult<GuardedPath> {
         let workspace_root = self
             .workspace_root
             .as_ref()
-            .ok_or_else(|| anyhow::Error::new(fs_diag::copy_no_workspace_root()))?;
+            .ok_or_else(fs_diag::copy_no_workspace_root)?;
         self.resolve_copy_source_from_root(workspace_root, from)
     }
 
@@ -205,32 +232,36 @@ impl PathResolver {
         &self,
         root: CopySourceRoot,
         from: &str,
-    ) -> Result<GuardedPath> {
+    ) -> DiagnosticResult<GuardedPath> {
         match root {
             CopySourceRoot::Local => self.resolve_copy_source_from_workspace(from),
             CopySourceRoot::Snapshot => {
-                let concrete =
-                    self.shared.concrete.get().ok_or_else(|| {
-                        anyhow::Error::new(fs_diag::copy_snapshot_not_materialized())
-                    })?;
+                let concrete = self
+                    .shared
+                    .concrete
+                    .get()
+                    .ok_or_else(fs_diag::copy_snapshot_not_materialized)?;
                 self.resolve_copy_source_from_root(concrete, from)
             }
             CopySourceRoot::Cache => {
-                let guard = self.ensure_cache()?;
+                let guard = self.ensure_cache().map_err(fs_diag::from_anyhow)?;
                 self.resolve_copy_source_from_root(&guard, from)
             }
             CopySourceRoot::System => {
                 let from_path = Path::new(from);
                 if Self::is_absolute_or_rooted(from_path) {
                     let wrapped = super::cache::system_wrap_absolute(from_path);
-                    return Ok(self.backend.resolve_copy_source(wrapped)?);
+                    return self.backend.resolve_copy_source(wrapped);
                 }
                 let candidate = self.build_context.as_path().join(from);
                 self.check_access_with_root(&self.build_context, &candidate, AccessMode::Read)
-                    .with_context(|| {
-                        format!("failed to resolve COPY source {}", candidate.display())
+                    .map_err(|diag| {
+                        diag.with_contexts(vec![format!(
+                            "failed to resolve COPY source {}",
+                            candidate.display()
+                        )])
                     })
-                    .and_then(|guarded| Ok(self.backend.resolve_copy_source(guarded)?))
+                    .and_then(|guarded| self.backend.resolve_copy_source(guarded))
             }
         }
     }
@@ -239,22 +270,37 @@ impl PathResolver {
         &self,
         source_root: &GuardedPath,
         from: &str,
-    ) -> Result<GuardedPath> {
+    ) -> DiagnosticResult<GuardedPath> {
         let from_path = Path::new(from);
         if Self::is_absolute_or_rooted(from_path) {
             return self
                 .check_access_with_root(source_root, from_path, AccessMode::Read)
-                .with_context(|| format!("failed to resolve COPY source {}", from_path.display()))
-                .and_then(|guarded| Ok(self.backend.resolve_copy_source(guarded)?));
+                .map_err(|diag| {
+                    diag.with_contexts(vec![format!(
+                        "failed to resolve COPY source {}",
+                        from_path.display()
+                    )])
+                })
+                .and_then(|guarded| self.backend.resolve_copy_source(guarded));
         }
 
         let candidate = source_root.as_path().join(from);
         self.check_access_with_root(source_root, &candidate, AccessMode::Read)
-            .with_context(|| format!("failed to resolve COPY source {}", candidate.display()))
-            .and_then(|guarded| Ok(self.backend.resolve_copy_source(guarded)?))
+            .map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "failed to resolve COPY source {}",
+                    candidate.display()
+                )])
+            })
+            .and_then(|guarded| self.backend.resolve_copy_source(guarded))
     }
 
-    fn resolve(&self, cwd: &GuardedPath, rel: &str, mode: AccessMode) -> Result<GuardedPath> {
+    fn resolve(
+        &self,
+        cwd: &GuardedPath,
+        rel: &str,
+        mode: AccessMode,
+    ) -> DiagnosticResult<GuardedPath> {
         // SYSTEM bypass (issue #163): no snapshot materialization, no
         // root-prefix containment. Each result anchors at its own
         // filesystem anchor so every drive and share resolves.
@@ -264,7 +310,7 @@ impl PathResolver {
         // CACHE choke point (issue #163): ensure the persistent directory
         // exists before the confined flow below operates on it.
         if self.is_cache() {
-            self.ensure_cache()?;
+            self.ensure_cache().map_err(fs_diag::from_anyhow)?;
         }
         // Normalize backslashes to forward slashes before path construction
         let normalized = to_forward_slashes(rel);
@@ -272,7 +318,7 @@ impl PathResolver {
         // first, so every join/guard below operates on a concrete root.
         // Local callers (and COPY sources, which never reach here) pass
         // through untouched.
-        let cwd = self.rebased_cwd(cwd)?;
+        let cwd = self.rebased_cwd(cwd).map_err(fs_diag::from_anyhow)?;
         let rel_path = Path::new(&normalized);
         if Self::is_absolute_or_rooted(rel_path) {
             if let Ok(guarded) = self.check_access(rel_path, mode) {
@@ -280,18 +326,18 @@ impl PathResolver {
             }
             let rel = Self::root_relative_path(rel_path);
             let candidate = self.root().as_path().join(rel);
-            return Ok(self.check_access(&candidate, mode)?);
+            return self.check_access(&candidate, mode);
         }
 
         let candidate = cwd.as_path().join(rel_path);
-        Ok(self.check_access(&candidate, mode)?)
+        self.check_access(&candidate, mode)
     }
 
     /// Parse a string that may originate from an environment variable or
     /// external input and resolve it to a guarded path. This normalizes common
     /// forms such as `file://` prefixes, surrounding quotes, and backslashes
     /// before delegating to the resolver's `resolve_read` logic.
-    pub fn parse_env_path(&self, cwd: &GuardedPath, input: &str) -> Result<GuardedPath> {
+    pub fn parse_env_path(&self, cwd: &GuardedPath, input: &str) -> DiagnosticResult<GuardedPath> {
         let mut s = input.trim();
         // Strip surrounding quotes if present
         if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {

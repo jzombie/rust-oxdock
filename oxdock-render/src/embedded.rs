@@ -376,23 +376,23 @@ impl WorkspaceFs for EmbeddedFiles {
     }
 
     fn resolve_workdir(&self, current: &GuardedPath, new_dir: &str) -> Result<GuardedPath> {
-        self.inner.resolve_workdir(current, new_dir)
+        Ok(self.inner.resolve_workdir(current, new_dir)?)
     }
 
     fn resolve_read(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath> {
-        self.inner.resolve_read(cwd, rel)
+        Ok(self.inner.resolve_read(cwd, rel)?)
     }
 
     fn resolve_write(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath> {
-        self.inner.resolve_write(cwd, rel)
+        Ok(self.inner.resolve_write(cwd, rel)?)
     }
 
     fn resolve_copy_source(&self, from: &str) -> Result<GuardedPath> {
-        self.inner.resolve_copy_source(from)
+        Ok(self.inner.resolve_copy_source(from)?)
     }
 
     fn resolve_copy_source_from_workspace(&self, from: &str) -> Result<GuardedPath> {
-        self.inner.resolve_copy_source_from_workspace(from)
+        Ok(self.inner.resolve_copy_source_from_workspace(from)?)
     }
 
     fn resolve_copy_source_from_target(
@@ -400,7 +400,7 @@ impl WorkspaceFs for EmbeddedFiles {
         root: CopySourceRoot,
         from: &str,
     ) -> Result<GuardedPath> {
-        self.inner.resolve_copy_source_from_target(root, from)
+        Ok(self.inner.resolve_copy_source_from_target(root, from)?)
     }
 
     fn entry_kind(&self, path: &GuardedPath) -> Result<EntryKind> {
