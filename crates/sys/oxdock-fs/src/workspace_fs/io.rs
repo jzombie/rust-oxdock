@@ -37,7 +37,6 @@ impl PathResolver {
     pub fn create_dir_all(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "create_dir_all denied for {}",
@@ -54,7 +53,6 @@ impl PathResolver {
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("read_dir denied for {}", path.display())])
             })?;
@@ -68,7 +66,6 @@ impl PathResolver {
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("read denied for {}", path.display())])
             })?;
@@ -82,7 +79,6 @@ impl PathResolver {
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("open_read denied for {}", path.display())])
             })?;
@@ -96,7 +92,6 @@ impl PathResolver {
     ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("open_write denied for {}", path.display())])
             })?;
@@ -110,7 +105,6 @@ impl PathResolver {
     ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("open_append denied for {}", path.display())])
             })?;
@@ -133,7 +127,6 @@ impl PathResolver {
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("open_read denied for {}", path.display())])
             })?;
@@ -150,7 +143,6 @@ impl PathResolver {
         expected_root: &GuardedPath,
     ) -> DiagnosticResult<Box<dyn std::io::Write + Send>> {
         self.check_access(path.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("open_write denied for {}", path.display())])
             })?;
@@ -209,7 +201,6 @@ impl PathResolver {
     pub fn read_to_string(&self, path: &GuardedPath) -> DiagnosticResult<String> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Read)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("read denied for {}", path.display())])
             })?;
@@ -236,7 +227,6 @@ impl PathResolver {
     pub fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("write denied for {}", path.display())])
             })?;
@@ -247,7 +237,6 @@ impl PathResolver {
     pub fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("append denied for {}", path.display())])
             })?;
@@ -261,7 +250,6 @@ impl PathResolver {
                 .or_else(|_| {
                     self.check_access_with_root(&self.build_context, parent, AccessMode::Write)
                 })
-                .map_err(fs_diag::from_anyhow)
                 .map_err(|diag| {
                     diag.with_contexts(vec![format!("parent {} escapes root", parent.display())])
                 })?;
@@ -278,7 +266,6 @@ impl PathResolver {
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("canonicalize denied for {}", path.display())])
             })?;
@@ -292,7 +279,6 @@ impl PathResolver {
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("metadata denied for {}", path.display())])
             })?;
@@ -309,7 +295,6 @@ impl PathResolver {
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
             })
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("metadata denied for {}", path.display())])
             })?;
@@ -360,7 +345,6 @@ impl PathResolver {
             use std::os::unix::fs::PermissionsExt;
             let guarded = self
                 .check_access(path.as_path(), AccessMode::Write)
-                .map_err(fs_diag::from_anyhow)
                 .map_err(|diag| {
                     diag.with_contexts(vec![format!(
                         "set_permissions denied for {}",
@@ -385,7 +369,6 @@ impl PathResolver {
             // everywhere with the same context.
             let guarded = self
                 .check_access(path.as_path(), AccessMode::Write)
-                .map_err(fs_diag::from_anyhow)
                 .map_err(|diag| {
                     diag.with_contexts(vec![format!(
                         "set_permissions denied for {}",
@@ -439,7 +422,6 @@ impl PathResolver {
     pub fn remove_file(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("remove_file denied for {}", path.display())])
             })?;
@@ -451,7 +433,6 @@ impl PathResolver {
     pub fn remove_dir_all(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "remove_dir_all denied for {}",
@@ -468,7 +449,6 @@ impl PathResolver {
     pub fn remove_empty_dir(&self, path: &GuardedPath) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "remove_empty_dir denied for {}",
@@ -569,7 +549,6 @@ impl PathResolver {
     pub fn create_spill_file(&self, path: &GuardedPath) -> DiagnosticResult<SpillFile> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("spill create denied for {}", path.display())])
             })?;
@@ -603,7 +582,6 @@ impl PathResolver {
     pub fn open_spill_file(&self, path: &GuardedPath) -> DiagnosticResult<SpillFile> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("spill open denied for {}", path.display())])
             })?;
@@ -625,7 +603,6 @@ impl PathResolver {
     pub fn truncate_spill_file(&self, path: &GuardedPath, len: u64) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "spill truncate denied for {}",
@@ -677,7 +654,6 @@ impl PathResolver {
     pub fn write_private_file(&self, path: &GuardedPath, contents: &[u8]) -> DiagnosticResult<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("private write denied for {}", path.display())])
             })?;
@@ -794,7 +770,6 @@ impl PathResolver {
         })?;
         let guarded_dst = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "symlink destination denied for {}",
@@ -872,7 +847,6 @@ impl PathResolver {
         })?;
         let guarded_dst = self
             .check_access_with_root(self.effective_root(), dst.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "symlink destination denied for {}",

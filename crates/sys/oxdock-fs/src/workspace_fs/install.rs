@@ -24,7 +24,6 @@ impl PathResolver {
         self.ensure_parent_dir(dst)?;
         let guarded_dst = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "install destination denied for {}",
@@ -36,13 +35,8 @@ impl PathResolver {
         })?;
         #[cfg(miri)]
         {
-            let data = self
-                .backend
-                .read_file(&guarded_src)
-                .map_err(fs_diag::from_anyhow)?;
-            self.backend
-                .write_file(&guarded_dst, &data)
-                .map_err(fs_diag::from_anyhow)?;
+            let data = self.backend.read_file(&guarded_src)?;
+            self.backend.write_file(&guarded_dst, &data)?;
             let _ = mode;
             Ok(())
         }

@@ -1457,3 +1457,37 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   `rustfmt --edition 2024 --check` clean on all 6 touched
   files (`copy.rs`, `lib.rs`, `io.rs`, `install.rs`,
   `assets.rs`, `embedded.rs`).
+
+- B4e (2026-11-28): fs guard + cache cluster (fifth B4
+  conversion bulk). `guard_path`, `normalize_candidate`,
+  `guard_path_miri`, `check_access_with_root`, `check_access`
+  (`access.rs`) and `ensure_cache_dir` (`cache.rs`) return
+  `DiagnosticResult`. Transitional lift throughout, one typed
+  ctor: bare `std::io` sites (`create_dir_all` root,
+  `canonicalize` root/ancestor) lift through two new private
+  helpers (`lift_io_err`/`lift_io_ctx`: `anyhow::Error::from`
+  transport into the single owner `from_anyhow`, historic
+  string replayed natively via `with_contexts`), mirroring
+  `backend.rs`/`copy.rs`; already-keyed
+  `guard_access_escapes`/`guard_snapshot_not_materialized`
+  sites return the diagnostic directly; `ensure_cache_dir`
+  uses the typed-source `cache_ensure_failed(dir, &e)` ctor, no
+  lift. Every historic context string stays byte-identical.
+  Cascade callers updated minimally: `io.rs` (28 sites),
+  `copy.rs` (10), `install.rs` drop the now-obsolete
+  `.map_err(from_anyhow)` on native guard callees (native `?`
+  passthrough); bare-io lifts
+  (`.map_err(anyhow::Error::from).map_err(from_anyhow)`) and
+  still-anyhow bridges (`GuardedPath::new`,
+  `resolve_write` match arms in `remove_link_if_symlink`)
+  kept. Still-anyhow `resolve.rs` `resolve` bridges via
+  `Ok(...?)` (A1 pattern). One script over-removal caught by
+  `cargo check` and repaired: the `remove_link_if_symlink`
+  `None` arm and `copy_dir_from_unguarded`
+  `GuardedPath::new` bridge restored.
+  Gates: `cargo test -p oxdock-fs` green (72 + 8 + 4 + 1),
+  full `cargo test --workspace` green (93 targets, 2715
+  passed, 0 failed), `cargo clippy --workspace --all-targets`
+  clean (zero warnings), `rustfmt --edition 2024 --check`
+  clean on all 6 touched files (`access.rs`, `cache.rs`,
+  `io.rs`, `copy.rs`, `install.rs`, `resolve.rs`).

@@ -83,7 +83,6 @@ impl PathResolver {
             .or_else(|_| {
                 self.check_access_with_root(&self.build_context, src.as_path(), AccessMode::Read)
             })
-            .map_err(fs_diag::from_anyhow)
     }
 
     #[cfg(not(miri))]
@@ -91,7 +90,6 @@ impl PathResolver {
     pub fn copy_file(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<u64> {
         let guarded_dst = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "copy destination denied for {}",
@@ -131,7 +129,6 @@ impl PathResolver {
     pub fn copy_file(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<u64> {
         let guarded_dst = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "copy destination denied for {}",
@@ -155,7 +152,6 @@ impl PathResolver {
     pub fn copy_dir_recursive(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<()> {
         let guarded_dst_root = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "copy destination denied for {}",
@@ -182,7 +178,6 @@ impl PathResolver {
             })?;
             let guarded_dst = self
                 .check_access(&dst_path, AccessMode::Write)
-                .map_err(fs_diag::from_anyhow)
                 .map_err(|diag| {
                     diag.with_contexts(vec![format!(
                         "copy destination denied for {}",
@@ -230,7 +225,6 @@ impl PathResolver {
     pub fn copy_dir_recursive(&self, src: &GuardedPath, dst: &GuardedPath) -> DiagnosticResult<()> {
         let guarded_dst_root = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "copy destination denied for {}",
@@ -257,7 +251,6 @@ impl PathResolver {
             })?;
             let guarded_dst = self
                 .check_access(&dst_path, AccessMode::Write)
-                .map_err(fs_diag::from_anyhow)
                 .map_err(|diag| {
                     diag.with_contexts(vec![format!(
                         "copy destination denied for {}",
@@ -297,7 +290,6 @@ impl PathResolver {
     ) -> DiagnosticResult<()> {
         let guarded_dst_root = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "copy destination denied for {}",
@@ -350,7 +342,6 @@ impl PathResolver {
     ) -> DiagnosticResult<u64> {
         let guarded_dst = self
             .check_access(dst.as_path(), AccessMode::Write)
-            .map_err(fs_diag::from_anyhow)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "copy destination denied for {}",

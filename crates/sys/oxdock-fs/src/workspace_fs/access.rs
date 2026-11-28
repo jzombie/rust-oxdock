@@ -1,6 +1,5 @@
-#[cfg(not(miri))]
-use anyhow::Context;
-use anyhow::Result;
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
+
 #[cfg(not(miri))]
 #[allow(clippy::disallowed_types)]
 use std::ffi::OsString;
@@ -16,13 +15,29 @@ use std::path::PathBuf;
 use super::{AccessMode, GuardedPath, PathResolver};
 use crate::diagnostics as fs_diag;
 
+/// Transitional lift for bare `std::io` failures (B4e): `anyhow` is
+/// only the transport into the single owner `from_anyhow`, with the
+/// historic context string replayed natively via `with_contexts`.
+/// Mirrors the `backend.rs`/`copy.rs` helpers; confined here so the
+/// eventual typed-ctor migration touches one place, not every call
+/// site.
+fn lift_io_err(err: std::io::Error) -> Diagnostic {
+    fs_diag::from_anyhow(anyhow::Error::from(err))
+}
+
+/// Context-carrying form of [`lift_io_err`]: the historic
+/// `.with_context(|| ...)` string lands as one native frame.
+fn lift_io_ctx(err: std::io::Error, ctx: String) -> Diagnostic {
+    lift_io_err(err).with_contexts(vec![ctx])
+}
+
 /// Ensure `candidate` stays within `root`, even if parts of the path do not yet exist.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub(crate) fn guard_path(
     root: &Path,
     candidate: &Path,
     mode: AccessMode,
-) -> Result<std::path::PathBuf> {
+) -> DiagnosticResult<std::path::PathBuf> {
     #[cfg(miri)]
     {
         guard_path_miri(root, candidate, mode)
@@ -32,18 +47,19 @@ pub(crate) fn guard_path(
     {
         if !root.exists() {
             std::fs::create_dir_all(root)
-                .with_context(|| format!("failed to create root {}", root.display()))?;
+                .map_err(|e| lift_io_ctx(e, format!("failed to create root {}", root.display())))?;
         }
-        let root_abs = std::fs::canonicalize(root)
-            .with_context(|| format!("failed to canonicalize root {}", root.display()))?;
+        let root_abs = std::fs::canonicalize(root).map_err(|e| {
+            lift_io_ctx(e, format!("failed to canonicalize root {}", root.display()))
+        })?;
 
         let cand_abs = normalize_candidate(&root_abs, candidate)?;
         if !cand_abs.starts_with(&root_abs) {
-            return Err(anyhow::Error::new(fs_diag::guard_access_escapes(
+            return Err(fs_diag::guard_access_escapes(
                 mode.name(),
                 &cand_abs,
                 &root_abs,
-            )));
+            ));
         }
 
         Ok(cand_abs)
@@ -52,7 +68,7 @@ pub(crate) fn guard_path(
 
 #[cfg(not(miri))]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-fn normalize_candidate(root_abs: &Path, candidate: &Path) -> Result<PathBuf> {
+fn normalize_candidate(root_abs: &Path, candidate: &Path) -> DiagnosticResult<PathBuf> {
     if let Ok(cand_abs) = std::fs::canonicalize(candidate) {
         return Ok(cand_abs);
     }
@@ -67,8 +83,12 @@ fn normalize_candidate(root_abs: &Path, candidate: &Path) -> Result<PathBuf> {
         }
     }
 
-    let ancestor_abs = std::fs::canonicalize(ancestor)
-        .with_context(|| format!("failed to canonicalize ancestor {}", ancestor.display()))?;
+    let ancestor_abs = std::fs::canonicalize(ancestor).map_err(|e| {
+        lift_io_ctx(
+            e,
+            format!("failed to canonicalize ancestor {}", ancestor.display()),
+        )
+    })?;
 
     let mut rem_components: Vec<OsString> = Vec::new();
     {
@@ -111,7 +131,7 @@ fn normalize_candidate(root_abs: &Path, candidate: &Path) -> Result<PathBuf> {
 
 #[cfg(miri)]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-fn guard_path_miri(root: &Path, candidate: &Path, mode: AccessMode) -> Result<PathBuf> {
+fn guard_path_miri(root: &Path, candidate: &Path, mode: AccessMode) -> DiagnosticResult<PathBuf> {
     // Avoid host filesystem syscalls under Miri by normalizing paths purely in memory.
     let root_abs = if root.is_absolute() {
         normalize_no_fs(root)
@@ -126,11 +146,11 @@ fn guard_path_miri(root: &Path, candidate: &Path, mode: AccessMode) -> Result<Pa
     };
 
     if !candidate_abs.starts_with(&root_abs) {
-        return Err(anyhow::Error::new(fs_diag::guard_access_escapes(
+        return Err(fs_diag::guard_access_escapes(
             mode.name(),
             &candidate_abs,
             &root_abs,
-        )));
+        ));
     }
 
     Ok(candidate_abs)
@@ -177,7 +197,7 @@ impl PathResolver {
         root: &GuardedPath,
         candidate: &Path,
         mode: AccessMode,
-    ) -> Result<GuardedPath> {
+    ) -> DiagnosticResult<GuardedPath> {
         match guard_path(root.as_path(), candidate, mode) {
             Ok(guarded) => {
                 #[cfg(miri)]
@@ -214,16 +234,18 @@ impl PathResolver {
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    pub(crate) fn check_access(&self, candidate: &Path, mode: AccessMode) -> Result<GuardedPath> {
+    pub(crate) fn check_access(
+        &self,
+        candidate: &Path,
+        mode: AccessMode,
+    ) -> DiagnosticResult<GuardedPath> {
         // Fail closed (issue #131): the never-created virtual anchor must not
         // reach `guard_path` (which would create it). Snapshot-targeted
         // callers materialize through the resolve choke points first, so an
         // anchor-rooted candidate arriving here while still pending bypassed
         // them. Bail instead of creating.
         if self.is_snapshot_pending() && candidate.starts_with(self.anchor_path()) {
-            return Err(anyhow::Error::new(
-                fs_diag::guard_snapshot_not_materialized(candidate),
-            ));
+            return Err(fs_diag::guard_snapshot_not_materialized(candidate));
         }
         // SYSTEM bypass: anchor each result at its own filesystem anchor
         // (drive root, UNC share, or `/`) instead of the single

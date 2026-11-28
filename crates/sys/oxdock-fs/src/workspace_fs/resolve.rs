@@ -280,11 +280,11 @@ impl PathResolver {
             }
             let rel = Self::root_relative_path(rel_path);
             let candidate = self.root().as_path().join(rel);
-            return self.check_access(&candidate, mode);
+            return Ok(self.check_access(&candidate, mode)?);
         }
 
         let candidate = cwd.as_path().join(rel_path);
-        self.check_access(&candidate, mode)
+        Ok(self.check_access(&candidate, mode)?)
     }
 
     /// Parse a string that may originate from an environment variable or
