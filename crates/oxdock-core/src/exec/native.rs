@@ -3264,8 +3264,9 @@ type CliSpecs = BTreeMap<String, CliSpec>;
 /// Checked `LIST<STRING>` extraction for the CLI trio. Single owner
 /// so all three functions admit exactly the same argv shape.
 fn string_list_arg(val: &Value, what: &str) -> DiagnosticResult<Vec<String>> {
-    crate::check_value_at(&TypeTag::ListOf(Arc::new(TypeTag::String)), val, what)
-        .map_err(|err| std_diag::std_parse_args_arg_shape(&err))?;
+    crate::check_value_at(&TypeTag::ListOf(Arc::new(TypeTag::String)), val, what).map_err(
+        |err| std_diag::std_parse_args_arg_shape(&super::args::lift_dispatch_error(err)),
+    )?;
     Ok(val
         .as_list()
         .expect("check_value_at enforces LIST")
@@ -3386,7 +3387,7 @@ fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> DiagnosticResu
     let tag = cx
         .state
         .resolve_tag(name)
-        .map_err(|err| std_diag::std_parse_args_schema_type(name, &anyhow::Error::new(err)))?;
+        .map_err(|err| std_diag::std_parse_args_schema_type(name, &err))?;
     let TypeTag::Record(fields) = tag else {
         return Err(std_diag::std_parse_args_schema_shape(name));
     };
@@ -4371,7 +4372,7 @@ fn path_base(
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&path)?;
     let base = oxdock_fs::path_base(&text)
-        .map_err(|e| anyhow::Error::new(std_diag::std_path_base_failed(&anyhow::Error::from(e))))?;
+        .map_err(|e| anyhow::Error::new(std_diag::std_path_base_failed(&e)))?;
     Ok(Value::string(base))
 }
 
@@ -4409,7 +4410,7 @@ fn path_rel(
     let b = super::args::string_or_path_text(&base)?;
     let p = super::args::string_or_path_text(&path)?;
     let rel = oxdock_fs::path_rel(&b, &p)
-        .map_err(|e| anyhow::Error::new(std_diag::std_path_rel_failed(&anyhow::Error::from(e))))?;
+        .map_err(|e| anyhow::Error::new(std_diag::std_path_rel_failed(&e)))?;
     Ok(Value::string(rel))
 }
 

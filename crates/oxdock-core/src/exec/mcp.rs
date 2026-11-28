@@ -255,7 +255,11 @@ impl<P: ProcessManager> McpSession<P> {
                     // this call's bytes, and the tails are the diagnosis.
                     let stdout = capped_drain(&self.stdout_buf);
                     let stderr = capped_drain(&self.stderr_buf);
-                    return Err(mcp_diag::mcp_call_failed(&err, &stdout, &stderr));
+                    return Err(mcp_diag::mcp_call_failed(
+                        &super::args::lift_dispatch_error(err),
+                        &stdout,
+                        &stderr,
+                    ));
                 }
             }
         };

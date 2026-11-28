@@ -263,7 +263,7 @@ fn resolve_top_level_with(
         return Ok(candidate);
     }
     dir.join(path)
-        .map_err(|e| import_diag::import_cannot_resolve(path, &anyhow::Error::from(e)))
+        .map_err(|e| import_diag::import_cannot_resolve(path, &e))
 }
 
 /// Preview-phase entry point: no entry handle here, so the workspace
@@ -374,8 +374,8 @@ fn read_and_parse_import(
     path: &str,
     table: &ModuleTable,
 ) -> DiagnosticResult<Vec<Step>> {
-    let bytes =
-        read_import_bytes(fs, resolved).map_err(|e| import_diag::import_cannot_read(path, &e))?;
+    let bytes = read_import_bytes(fs, resolved)
+        .map_err(|e| import_diag::import_cannot_read(path, &super::args::lift_dispatch_error(e)))?;
     let text = std::str::from_utf8(&bytes).map_err(|e| import_diag::import_bad_utf8(path, &e))?;
     let table = table.clone();
     let mut reserved = super::native::builtin_function_names();
@@ -1623,7 +1623,7 @@ fn load_file<P: ProcessManager>(
         });
     }
     let bytes = read_import_bytes(state.fs.as_ref(), &resolved)
-        .map_err(|e| import_diag::import_cannot_read(path, &e))?;
+        .map_err(|e| import_diag::import_cannot_read(path, &super::args::lift_dispatch_error(e)))?;
     let text = std::str::from_utf8(&bytes).map_err(|e| import_diag::import_bad_utf8(path, &e))?;
     let table = state.module_table.clone();
     let mut reserved = super::native::builtin_function_names();

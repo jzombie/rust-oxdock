@@ -2014,9 +2014,9 @@ impl ProcessManager for FailingRunner {
             .expect("poisoned")
             .push(script.to_string());
         if script == self.fail_script {
-            return Err(diagnostics::eval_dispatch_failed(&anyhow::anyhow!(
-                "simulated failure"
-            )));
+            return Err(diagnostics::eval_dispatch_failed(
+                &diagnostics::reason_sample("simulated failure"),
+            ));
         }
         if options.mode == CommandMode::Background {
             // Delegate spawns so we get kill-logging mock handles.
@@ -11758,7 +11758,7 @@ fn snapshot_outer_keeps_bare_request_shape() {
 
 #[test]
 fn snapshot_outer_without_exit_has_no_source() {
-    let diag = diagnostics::eval_dispatch_failed(&anyhow::anyhow!("boom"));
+    let diag = diagnostics::eval_dispatch_failed(&diagnostics::reason_sample("boom"));
     let out = error_with_snapshot(diag, "filesystem snapshot: pending".to_string());
     assert_eq!(exit::exit_code_of_diag(&out), None);
     assert_eq!(out.to_string(), "boom\nfilesystem snapshot: pending");

@@ -131,7 +131,7 @@ pub(super) fn workdir<P: ProcessManager>(
         .state
         .fs
         .resolve_workdir(&cx.state.cwd, path)
-        .map_err(|e| diag::eval_workdir_failed(path, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_workdir_failed(path, &e))?;
     Ok(())
 }
 
@@ -264,7 +264,7 @@ pub(super) fn run<P: ProcessManager>(
     let mut handle = match cx
         .process
         .spawn_command(&ctx, cmd, options)
-        .map_err(|e| diag::eval_run_spawn_failed(cmd, &anyhow::Error::from(e)))?
+        .map_err(|e| diag::eval_run_spawn_failed(cmd, &e))?
     {
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),
@@ -393,7 +393,7 @@ pub(super) fn run_argv<P: ProcessManager>(
     let mut handle = match cx
         .process
         .spawn_argv(&ctx, argv, options)
-        .map_err(|e| diag::eval_run_argv_spawn_failed(argv, &anyhow::Error::from(e)))?
+        .map_err(|e| diag::eval_run_argv_spawn_failed(argv, &e))?
     {
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),
@@ -553,7 +553,7 @@ fn run_pty<P: ProcessManager>(
         on_output_drained: None,
         func: KEYWORD_RUN,
     })
-    .map_err(|e| diag::eval_run_spawn_failed(what, &anyhow::Error::new(e)))?;
+    .map_err(|e| diag::eval_run_spawn_failed(what, &e))?;
     // Pipe EOF rides the writer drops like any `RUN`: the supervisor
     // returns only after the output worker finished, so every byte is
     // already in the sink before the code below runs.
@@ -756,22 +756,22 @@ pub(super) fn copy<P: ProcessManager>(
         cx.state
             .fs
             .resolve_copy_source_from_target(copy_source_root(target), from)
-            .map_err(|e| diag::eval_copy_failed(from, to, &anyhow::Error::from(e)))?
+            .map_err(|e| diag::eval_copy_failed(from, to, &e))?
     } else {
         cx.state
             .fs
             .resolve_copy_source(from)
-            .map_err(|e| diag::eval_copy_failed(from, to, &anyhow::Error::from(e)))?
+            .map_err(|e| diag::eval_copy_failed(from, to, &e))?
     };
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .map_err(|e| diag::eval_copy_failed(from, to, &anyhow::Error::from(e)))?;
-    let to_abs = place_file_in_dir(cx.state.fs.as_ref(), &from_abs, to, &to_abs)
-        .map_err(|e| diag::eval_copy_failed(from, to, &anyhow::Error::new(e)))?;
-    copy_entry(cx.state.fs.as_ref(), &from_abs, &to_abs)
         .map_err(|e| diag::eval_copy_failed(from, to, &e))?;
+    let to_abs = place_file_in_dir(cx.state.fs.as_ref(), &from_abs, to, &to_abs)
+        .map_err(|e| diag::eval_copy_failed(from, to, &e))?;
+    copy_entry(cx.state.fs.as_ref(), &from_abs, &to_abs)
+        .map_err(|e| diag::eval_copy_failed(from, to, &super::args::lift_dispatch_error(e)))?;
     Ok(())
 }
 
@@ -804,7 +804,7 @@ fn place_file_in_dir(
     let to_display = to_abs.display().to_string();
     to_abs
         .join(&base)
-        .map_err(|e| diag::eval_copy_destination_escapes(&to_display, &anyhow::Error::from(e)))
+        .map_err(|e| diag::eval_copy_destination_escapes(&to_display, &e))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -819,11 +819,11 @@ pub(super) fn copy_git<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .map_err(|e| diag::eval_copy_git_failed(rev, from, to, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_copy_git_failed(rev, from, to, &e))?;
     cx.state
         .fs
         .copy_from_git(rev, from, &to_abs, include_dirty)
-        .map_err(|e| diag::eval_copy_git_failed(rev, from, to, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_copy_git_failed(rev, from, to, &e))?;
     Ok(())
 }
 
@@ -855,7 +855,7 @@ fn resolve_archive_src<P: ProcessManager>(
             .state
             .fs
             .resolve_read(&cx.state.cwd, src)
-            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)));
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e));
     }
     let parent_abs = if parent.is_empty() {
         cx.state.cwd.clone()
@@ -863,14 +863,14 @@ fn resolve_archive_src<P: ProcessManager>(
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, &parent)
-            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)))?
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e))?
     };
     let mut matched = false;
     for entry in cx
         .state
         .fs
         .read_dir_entries(&parent_abs)
-        .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)))?
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?
     {
         if entry
             .file_name()
@@ -893,11 +893,11 @@ fn resolve_archive_src<P: ProcessManager>(
             .state
             .fs
             .resolve_read(&cx.state.cwd, src)
-            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)));
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e));
     }
     parent_abs
         .join(&name)
-        .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)))
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))
 }
 
 /// Collected packable tree: `(rel, guard)` files plus `(rel, guard)`
@@ -917,7 +917,7 @@ fn collect_archive_tree(
 ) -> oxdock_diagnostics::DiagnosticResult<ArchiveTree> {
     match fs
         .entry_kind(src_abs)
-        .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)))?
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?
     {
         EntryKind::File => {
             let base = src_abs
@@ -928,7 +928,7 @@ fn collect_archive_tree(
                     diag::eval_archive_no_file_name(src, dst, &src_abs.display().to_string())
                 })?;
             let rel = sanitize_rel(&to_forward_slashes(&base))
-                .map_err(|err| diag::eval_archive_failed(src, dst, &anyhow::Error::new(err)))?;
+                .map_err(|err| diag::eval_archive_failed(src, dst, &err))?;
             Ok((vec![(rel, src_abs.clone())], Vec::new()))
         }
         EntryKind::Dir => {
@@ -940,10 +940,10 @@ fn collect_archive_tree(
                 // subtree walk: the rel prefixes must be real
                 // directories before listing.
                 PathResolver::refuse_link_ancestors(src_abs, &dir_rel)
-                    .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?;
+                    .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
                 let mut entries = fs
                     .read_dir_entries(&dir_abs)
-                    .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)))?;
+                    .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
                 entries.sort_by_key(|entry| entry.file_name());
                 for entry in entries {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -960,12 +960,12 @@ fn collect_archive_tree(
                     if is_link {
                         return Err(diag::eval_archive_refuses_symlink(src, dst, &child_rel));
                     }
-                    let child = dir_abs.join(&name).map_err(|e| {
-                        diag::eval_archive_failed(src, dst, &anyhow::Error::from(e))
-                    })?;
+                    let child = dir_abs
+                        .join(&name)
+                        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
                     match fs
                         .entry_kind(&child)
-                        .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)))?
+                        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?
                     {
                         EntryKind::Dir => {
                             dirs.push((child_rel.clone(), child.clone()));
@@ -999,12 +999,11 @@ fn append_archive_tree<W: std::io::Write>(
     dst: &str,
 ) -> oxdock_diagnostics::DiagnosticResult<()> {
     for (rel, guard) in dirs {
-        let rel = sanitize_rel(rel)
-            .map_err(|err| diag::eval_archive_failed(src, dst, &anyhow::Error::new(err)))?;
+        let rel = sanitize_rel(rel).map_err(|err| diag::eval_archive_failed(src, dst, &err))?;
         let mode = fs
             .archive_member_stat(guard)
             .map(|(_, mode)| mode.unwrap_or(0o755))
-            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)))?;
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
         let mut header = tar::Header::new_gnu();
         header.set_mode(mode);
         header.set_entry_type(tar::EntryType::Directory);
@@ -1012,27 +1011,30 @@ fn append_archive_tree<W: std::io::Write>(
         header.set_cksum();
         builder
             .append_data(&mut header, &rel, std::io::empty())
-            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?;
+            .map_err(|e| {
+                diag::eval_archive_failed(src, dst, &super::args::lift_dispatch_error(e.into()))
+            })?;
     }
     for (rel, guard) in files {
-        let rel = sanitize_rel(rel)
-            .map_err(|err| diag::eval_archive_failed(src, dst, &anyhow::Error::new(err)))?;
+        let rel = sanitize_rel(rel).map_err(|err| diag::eval_archive_failed(src, dst, &err))?;
         let (len, mode) = fs
             .archive_member_stat(guard)
-            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)))?;
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
         // Link-refusing open: a symlink planted after the listing
         // probe fails here instead of packing its target's bytes, and
         // the descriptor must stay under the packed tree.
         let mut reader = fs
             .open_read_nofollow(guard, src_abs)
-            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)))?;
+            .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
         let mut header = tar::Header::new_gnu();
         header.set_mode(mode.unwrap_or(0o644));
         header.set_size(len);
         header.set_cksum();
         builder
             .append_data(&mut header, &rel, &mut reader)
-            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?;
+            .map_err(|e| {
+                diag::eval_archive_failed(src, dst, &super::args::lift_dispatch_error(e.into()))
+            })?;
     }
     Ok(())
 }
@@ -1048,7 +1050,7 @@ pub(super) fn archive<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, dst)
-        .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
     // Opening the destination truncates it: an archive landing on its
     // own source would destroy inputs before their bytes stream, so
     // equal paths fail closed. A pre-existing destination inside the
@@ -1066,12 +1068,12 @@ pub(super) fn archive<P: ProcessManager>(
     cx.state
         .fs
         .ensure_parent_dir(&dst_abs)
-        .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
     let out = cx
         .state
         .fs
         .open_write(&dst_abs)
-        .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_archive_failed(src, dst, &e))?;
     if raw {
         let mut builder = tar::Builder::new(out);
         append_archive_tree(
@@ -1083,11 +1085,12 @@ pub(super) fn archive<P: ProcessManager>(
             src,
             dst,
         )?;
-        let mut out = builder
-            .into_inner()
-            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?;
-        std::io::Write::flush(&mut out)
-            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?;
+        let mut out = builder.into_inner().map_err(|e| {
+            diag::eval_archive_failed(src, dst, &super::args::lift_dispatch_error(e.into()))
+        })?;
+        std::io::Write::flush(&mut out).map_err(|e| {
+            diag::eval_archive_failed(src, dst, &super::args::lift_dispatch_error(e.into()))
+        })?;
     } else {
         let encoder = GzEncoder::new(out, Compression::default());
         let mut builder = tar::Builder::new(encoder);
@@ -1102,9 +1105,13 @@ pub(super) fn archive<P: ProcessManager>(
         )?;
         builder
             .into_inner()
-            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?
+            .map_err(|e| {
+                diag::eval_archive_failed(src, dst, &super::args::lift_dispatch_error(e.into()))
+            })?
             .try_finish()
-            .map_err(|e| diag::eval_archive_failed(src, dst, &anyhow::Error::new(e)))?;
+            .map_err(|e| {
+                diag::eval_archive_failed(src, dst, &super::args::lift_dispatch_error(e.into()))
+            })?;
     }
     Ok(())
 }
@@ -1124,21 +1131,21 @@ pub(super) fn unarchive<P: ProcessManager>(
         .state
         .fs
         .resolve_read(&cx.state.cwd, src)
-        .map_err(|e| diag::eval_unarchive_failed(src, dst, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     let dst_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, dst)
-        .map_err(|e| diag::eval_unarchive_failed(src, dst, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     cx.state
         .fs
         .create_dir_all(&dst_abs)
-        .map_err(|e| diag::eval_unarchive_failed(src, dst, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     let reader = cx
         .state
         .fs
         .open_read(&src_abs)
-        .map_err(|e| diag::eval_unarchive_failed(src, dst, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     let fs = cx.state.fs.as_ref();
     // Directory modes apply after every member lands: a read-only
     // header (e.g. 0555) would otherwise lock its own children out
@@ -1158,73 +1165,37 @@ pub(super) fn unarchive<P: ProcessManager>(
                 // planted links stay the filesystem layers' job, and
                 // those run next, on every member, in every mode.
                 let rel = sanitize_rel(&path).map_err(|err| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(
-                        src,
-                        dst,
-                        &anyhow::Error::new(err),
-                    ))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &err))
                 })?;
                 PathResolver::refuse_link_ancestors(&dst_abs, &rel).map_err(|e| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(
-                        src,
-                        dst,
-                        &anyhow::Error::new(e),
-                    ))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
                 })?;
                 let dir = dst_abs.join(&rel).map_err(|e| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(
-                        src,
-                        dst,
-                        &anyhow::Error::from(e),
-                    ))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
                 })?;
                 fs.create_dir_all(&dir).map_err(|e| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(
-                        src,
-                        dst,
-                        &anyhow::Error::from(e),
-                    ))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
                 })?;
                 deferred_dir_modes.push((dir, mode));
             }
             StreamedEntry::File { path, mode, reader } => {
                 let rel = sanitize_rel(&path).map_err(|err| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(
-                        src,
-                        dst,
-                        &anyhow::Error::new(err),
-                    ))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &err))
                 })?;
                 PathResolver::refuse_link_ancestors(&dst_abs, &rel).map_err(|e| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(
-                        src,
-                        dst,
-                        &anyhow::Error::new(e),
-                    ))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
                 })?;
                 let file = dst_abs.join(&rel).map_err(|e| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(
-                        src,
-                        dst,
-                        &anyhow::Error::from(e),
-                    ))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
                 })?;
                 fs.ensure_parent_dir(&file).map_err(|e| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(
-                        src,
-                        dst,
-                        &anyhow::Error::from(e),
-                    ))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
                 })?;
                 // Link-refusing open: a symlink planted at the member
                 // path fails here instead of truncating its target,
                 // and the descriptor must stay under the destination.
                 let mut out = fs.open_write_nofollow(&file, &dst_abs).map_err(|e| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(
-                        src,
-                        dst,
-                        &anyhow::Error::from(e),
-                    ))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
                 })?;
                 // Metered copy: bombs read small and write huge, so the
                 // cap counts member bytes out, not archive bytes in. The
@@ -1240,7 +1211,7 @@ pub(super) fn unarchive<P: ProcessManager>(
                         anyhow::Error::new(diag::eval_unarchive_member_failed(
                             src,
                             dst,
-                            &anyhow::Error::new(e),
+                            &super::args::lift_dispatch_error(e.into()),
                         ))
                     }
                 })?;
@@ -1249,11 +1220,15 @@ pub(super) fn unarchive<P: ProcessManager>(
                     anyhow::Error::new(diag::eval_unarchive_member_failed(
                         src,
                         dst,
-                        &anyhow::Error::new(e),
+                        &super::args::lift_dispatch_error(e.into()),
                     ))
                 })?;
                 restore_archive_mode(fs, &file, mode).map_err(|e| {
-                    anyhow::Error::new(diag::eval_unarchive_member_failed(src, dst, &e))
+                    anyhow::Error::new(diag::eval_unarchive_member_failed(
+                        src,
+                        dst,
+                        &super::args::lift_dispatch_error(e),
+                    ))
                 })?;
             }
             StreamedEntry::Symlink { path, target } => {
@@ -1264,10 +1239,11 @@ pub(super) fn unarchive<P: ProcessManager>(
         }
         Ok(())
     })
-    .map_err(|e| diag::eval_unarchive_failed(src, dst, &anyhow::Error::from(e)))?;
+    .map_err(|e| diag::eval_unarchive_failed(src, dst, &e))?;
     for (dir, mode) in deferred_dir_modes.into_iter().rev() {
-        restore_archive_mode(fs, &dir, mode)
-            .map_err(|e| diag::eval_unarchive_restore_mode_failed(src, dst, &e))?;
+        restore_archive_mode(fs, &dir, mode).map_err(|e| {
+            diag::eval_unarchive_restore_mode_failed(src, dst, &super::args::lift_dispatch_error(e))
+        })?;
     }
     Ok(())
 }
@@ -1335,17 +1311,17 @@ pub(super) fn symlink<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .map_err(|e| diag::eval_symlink_failed(from, to, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_symlink_failed(from, to, &e))?;
     let from_abs = if let Some(target) = from_workspace {
         cx.state
             .fs
             .resolve_copy_source_from_target(copy_source_root(target), from)
-            .map_err(|e| diag::eval_symlink_failed(from, to, &anyhow::Error::from(e)))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
     } else {
         cx.state
             .fs
             .resolve_copy_source(from)
-            .map_err(|e| diag::eval_symlink_failed(from, to, &anyhow::Error::from(e)))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
     };
     // `ln -s` destination semantics: a directory destination (existing,
     // or named with a trailing slash) receives the link under the
@@ -1354,19 +1330,19 @@ pub(super) fn symlink<P: ProcessManager>(
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .map_err(|e| diag::eval_symlink_failed(from, to, &anyhow::Error::from(e)))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
     } else if matches!(cx.state.fs.entry_kind(&to_abs), Ok(EntryKind::Dir)) {
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .map_err(|e| diag::eval_symlink_failed(from, to, &anyhow::Error::from(e)))?
+            .map_err(|e| diag::eval_symlink_failed(from, to, &e))?
     } else {
         to_abs
     };
     cx.state
         .fs
         .symlink(&from_abs, &to_abs)
-        .map_err(|e| diag::eval_symlink_failed(from, to, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_symlink_failed(from, to, &e))?;
     Ok(())
 }
 
@@ -1391,10 +1367,11 @@ pub(super) fn mkdir<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| diag::eval_mkdir_resolve_failed(path, &anyhow::Error::from(e)))?;
-    cx.state.fs.create_dir_all(&target).map_err(|e| {
-        diag::eval_mkdir_create_failed(&target.display().to_string(), &anyhow::Error::from(e))
-    })?;
+        .map_err(|e| diag::eval_mkdir_resolve_failed(path, &e))?;
+    cx.state
+        .fs
+        .create_dir_all(&target)
+        .map_err(|e| diag::eval_mkdir_create_failed(&target.display().to_string(), &e))?;
     Ok(())
 }
 
@@ -1406,11 +1383,11 @@ pub(super) fn set_executable<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| diag::eval_set_executable_failed(path, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_set_executable_failed(path, &e))?;
     cx.state
         .fs
         .set_executable(&target)
-        .map_err(|e| diag::eval_set_executable_failed(path, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_set_executable_failed(path, &e))?;
     Ok(())
 }
 
@@ -1422,7 +1399,7 @@ pub(super) fn ls<P: ProcessManager>(
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, p)
-            .map_err(|e| diag::eval_ls_resolve_failed(Some(p), &anyhow::Error::from(e)))?
+            .map_err(|e| diag::eval_ls_resolve_failed(Some(p), &e))?
     } else {
         // Bare `LS` lists the current directory: ride the choke point so a
         // pending snapshot materializes (a snapshot read), matching the
@@ -1430,11 +1407,13 @@ pub(super) fn ls<P: ProcessManager>(
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, ".")
-            .map_err(|e| diag::eval_ls_resolve_failed(None, &anyhow::Error::from(e)))?
+            .map_err(|e| diag::eval_ls_resolve_failed(None, &e))?
     };
-    let mut entries = cx.state.fs.read_dir_entries(&target_dir).map_err(|e| {
-        diag::eval_ls_read_failed(&target_dir.display().to_string(), &anyhow::Error::from(e))
-    })?;
+    let mut entries = cx
+        .state
+        .fs
+        .read_dir_entries(&target_dir)
+        .map_err(|e| diag::eval_ls_read_failed(&target_dir.display().to_string(), &e))?;
     entries.sort_by_key(|e| e.file_name());
     write_stdout(cx.out.clone(), |writer| {
         writeln!(writer, "{}:", target_dir.display())
@@ -1457,10 +1436,12 @@ pub(super) fn read<P: ProcessManager>(
             .state
             .fs
             .resolve_read(&cx.state.cwd, path)
-            .map_err(|e| diag::eval_read_resolve_failed(path, &anyhow::Error::from(e)))?;
-        let mut reader = cx.state.fs.open_read(&target).map_err(|e| {
-            diag::eval_read_open_failed(&target.display().to_string(), &anyhow::Error::from(e))
-        })?;
+            .map_err(|e| diag::eval_read_resolve_failed(path, &e))?;
+        let mut reader = cx
+            .state
+            .fs
+            .open_read(&target)
+            .map_err(|e| diag::eval_read_open_failed(&target.display().to_string(), &e))?;
         write_stdout(cx.out.clone(), |writer| {
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
@@ -1628,17 +1609,16 @@ pub(super) fn write<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| diag::eval_write_resolve_failed(path, &anyhow::Error::from(e)))?;
-    cx.state.fs.ensure_parent_dir(&target).map_err(|e| {
-        diag::eval_ensure_parent_failed(&target.display().to_string(), &anyhow::Error::from(e))
-    })?;
+        .map_err(|e| diag::eval_write_resolve_failed(path, &e))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .map_err(|e| diag::eval_ensure_parent_failed(&target.display().to_string(), &e))?;
     if let Some(body) = contents {
         cx.state
             .fs
             .write_file(&target, body.as_bytes())
-            .map_err(|e| {
-                diag::eval_write_file_failed(&target.display().to_string(), &anyhow::Error::from(e))
-            })?;
+            .map_err(|e| diag::eval_write_file_failed(&target.display().to_string(), &e))?;
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
             return Err(diag::eval_write_needs_stdin(path));
@@ -1646,9 +1626,11 @@ pub(super) fn write<P: ProcessManager>(
         let mut guard = input_stream
             .lock()
             .map_err(|_| diag::eval_stdin_lock_failed(KEYWORD_WRITE))?;
-        let mut writer = cx.state.fs.open_write(&target).map_err(|e| {
-            diag::eval_write_open_failed(&target.display().to_string(), &anyhow::Error::from(e))
-        })?;
+        let mut writer = cx
+            .state
+            .fs
+            .open_write(&target)
+            .map_err(|e| diag::eval_write_open_failed(&target.display().to_string(), &e))?;
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
             let n = guard
@@ -1660,13 +1642,13 @@ pub(super) fn write<P: ProcessManager>(
             writer.write_all(&buf[..n]).map_err(|e| {
                 diag::eval_write_stream_failed(
                     &target.display().to_string(),
-                    &anyhow::Error::new(e),
+                    &super::args::lift_dispatch_error(e.into()),
                 )
             })?;
             writer.flush().map_err(|e| {
                 diag::eval_write_stream_failed(
                     &target.display().to_string(),
-                    &anyhow::Error::new(e),
+                    &super::args::lift_dispatch_error(e.into()),
                 )
             })?;
         }
@@ -1683,17 +1665,16 @@ pub(super) fn append<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| diag::eval_append_resolve_failed(path, &anyhow::Error::from(e)))?;
-    cx.state.fs.ensure_parent_dir(&target).map_err(|e| {
-        diag::eval_ensure_parent_failed(&target.display().to_string(), &anyhow::Error::from(e))
-    })?;
+        .map_err(|e| diag::eval_append_resolve_failed(path, &e))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .map_err(|e| diag::eval_ensure_parent_failed(&target.display().to_string(), &e))?;
     if let Some(body) = contents {
         cx.state
             .fs
             .append_file(&target, body.as_bytes())
-            .map_err(|e| {
-                diag::eval_append_failed(&target.display().to_string(), &anyhow::Error::from(e))
-            })?;
+            .map_err(|e| diag::eval_append_failed(&target.display().to_string(), &e))?;
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
             return Err(diag::eval_append_needs_stdin(path));
@@ -1701,9 +1682,11 @@ pub(super) fn append<P: ProcessManager>(
         let mut guard = input_stream
             .lock()
             .map_err(|_| diag::eval_stdin_lock_failed(KEYWORD_APPEND))?;
-        let mut writer = cx.state.fs.open_append(&target).map_err(|e| {
-            diag::eval_append_open_failed(&target.display().to_string(), &anyhow::Error::from(e))
-        })?;
+        let mut writer = cx
+            .state
+            .fs
+            .open_append(&target)
+            .map_err(|e| diag::eval_append_open_failed(&target.display().to_string(), &e))?;
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
             let n = guard
@@ -1713,10 +1696,16 @@ pub(super) fn append<P: ProcessManager>(
                 break;
             }
             writer.write_all(&buf[..n]).map_err(|e| {
-                diag::eval_append_failed(&target.display().to_string(), &anyhow::Error::new(e))
+                diag::eval_append_failed(
+                    &target.display().to_string(),
+                    &super::args::lift_dispatch_error(e.into()),
+                )
             })?;
             writer.flush().map_err(|e| {
-                diag::eval_append_failed(&target.display().to_string(), &anyhow::Error::new(e))
+                diag::eval_append_failed(
+                    &target.display().to_string(),
+                    &super::args::lift_dispatch_error(e.into()),
+                )
             })?;
         }
     }
@@ -1761,16 +1750,18 @@ pub(super) fn replace<P: ProcessManager>(
                 .state
                 .fs
                 .resolve_read(&cx.state.cwd, path)
-                .map_err(|e| diag::eval_expand_resolve_failed(path, &anyhow::Error::from(e)))?;
-            let mut reader = cx.state.fs.open_read(&target).map_err(|e| {
-                diag::eval_read_open_failed(&target.display().to_string(), &anyhow::Error::from(e))
-            })?;
+                .map_err(|e| diag::eval_expand_resolve_failed(path, &e))?;
+            let mut reader = cx
+                .state
+                .fs
+                .open_read(&target)
+                .map_err(|e| diag::eval_read_open_failed(&target.display().to_string(), &e))?;
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
                 let n = reader.read(&mut buf).map_err(|e| {
                     diag::eval_expand_read_failed(
                         &target.display().to_string(),
-                        &anyhow::Error::new(e),
+                        &super::args::lift_dispatch_error(e.into()),
                     )
                 })?;
                 if n == 0 {
@@ -3119,7 +3110,7 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             }
         }
     }
-    .map_err(|err| diag::eval_call_failed(name, &err))?;
+    .map_err(|err| diag::eval_call_failed(name, &super::args::lift_dispatch_error(err)))?;
     super::args::check_host_return_value(
         &format!("function `{}` returned", super::base_name(name)),
         &entry.meta.returns,
@@ -4062,17 +4053,17 @@ pub(super) fn install<P: ProcessManager>(
         .state
         .fs
         .resolve_read(&cx.state.cwd, from)
-        .map_err(|e| diag::eval_install_failed(from, to, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_install_failed(from, to, &e))?;
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .map_err(|e| diag::eval_install_failed(from, to, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_install_failed(from, to, &e))?;
     cx.state
         .fs
         .install_file_atomic(&from_abs, &to_abs, EXECUTABLE_MODE)
         .map_err(anyhow::Error::from)
-        .map_err(|e| diag::eval_install_failed(from, to, &e))?;
+        .map_err(|e| diag::eval_install_failed(from, to, &super::args::lift_dispatch_error(e)))?;
     Ok(())
 }
 
@@ -4318,18 +4309,17 @@ pub(super) fn append_line<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .map_err(|e| diag::eval_append_line_resolve_failed(path, &anyhow::Error::from(e)))?;
-    cx.state.fs.ensure_parent_dir(&target).map_err(|e| {
-        diag::eval_ensure_parent_failed(&target.display().to_string(), &anyhow::Error::from(e))
-    })?;
+        .map_err(|e| diag::eval_append_line_resolve_failed(path, &e))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .map_err(|e| diag::eval_ensure_parent_failed(&target.display().to_string(), &e))?;
     let mut line = contents.to_string();
     line.push('\n');
     cx.state
         .fs
         .append_file(&target, line.as_bytes())
-        .map_err(|e| {
-            diag::eval_append_failed(&target.display().to_string(), &anyhow::Error::from(e))
-        })?;
+        .map_err(|e| diag::eval_append_failed(&target.display().to_string(), &e))?;
     Ok(())
 }
 
@@ -4347,7 +4337,7 @@ pub(super) fn remove<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cwd, path)
-        .map_err(|e| diag::eval_remove_failed(path, &anyhow::Error::from(e)))?;
+        .map_err(|e| diag::eval_remove_failed(path, &e))?;
     // Root and working-directory deletion guard: removing the cwd (or any
     // of its ancestors), the workspace root, or the effective root (`/`
     // under `WORKSPACE SYSTEM`) would destroy the execution context or
@@ -4375,7 +4365,7 @@ pub(super) fn remove<P: ProcessManager>(
         .state
         .fs
         .remove_link_if_symlink(&cwd, path)
-        .map_err(|e| diag::eval_remove_failed(path, &anyhow::Error::from(e)))?
+        .map_err(|e| diag::eval_remove_failed(path, &e))?
     {
         return Ok(());
     }
@@ -4385,7 +4375,7 @@ pub(super) fn remove<P: ProcessManager>(
             cx.state
                 .fs
                 .remove_file(&target)
-                .map_err(|e| diag::eval_remove_failed(path, &anyhow::Error::from(e)))?;
+                .map_err(|e| diag::eval_remove_failed(path, &e))?;
             Ok(())
         }
         // A link reaching here appeared between the probe and the
@@ -4396,12 +4386,13 @@ pub(super) fn remove<P: ProcessManager>(
                 cx.state
                     .fs
                     .remove_dir_all(&target)
-                    .map_err(|e| diag::eval_remove_failed(path, &anyhow::Error::from(e)))?;
+                    .map_err(|e| diag::eval_remove_failed(path, &e))?;
                 Ok(())
             } else {
-                cx.state.fs.remove_empty_dir(&target).map_err(|e| {
-                    diag::eval_remove_not_empty_failed(path, &anyhow::Error::from(e))
-                })?;
+                cx.state
+                    .fs
+                    .remove_empty_dir(&target)
+                    .map_err(|e| diag::eval_remove_not_empty_failed(path, &e))?;
                 Ok(())
             }
         }

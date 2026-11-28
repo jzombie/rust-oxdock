@@ -1,4 +1,4 @@
-use oxdock_diagnostics::DiagnosticResult;
+use oxdock_diagnostics::{Diagnostic, DiagnosticResult};
 #[cfg(not(miri))]
 use std::fs;
 
@@ -8,6 +8,22 @@ use crate::diagnostics as fs_diag;
 
 #[allow(clippy::disallowed_types)]
 use crate::UnguardedPath;
+
+/// Transitional lift for bare `std::io` failures (B4l): `anyhow` is
+/// only the transport into the single owner `from_anyhow`, with the
+/// historic context string replayed natively via `with_contexts`.
+/// Mirrors the `access.rs`/`copy.rs` helpers; confined here so the
+/// eventual typed-ctor migration touches one place, not every call
+/// site.
+fn lift_io_err(err: std::io::Error) -> Diagnostic {
+    fs_diag::from_anyhow(anyhow::Error::from(err))
+}
+
+/// Context-carrying form of [`lift_io_err`]: the historic
+/// `.with_context(|| ...)` string lands as one native frame.
+fn lift_io_ctx(err: std::io::Error, ctx: String) -> Diagnostic {
+    lift_io_err(err).with_contexts(vec![ctx])
+}
 
 /// Refuse a final-component symlink at `path` without following it:/// a missing final is fine (fresh files have nothing planted), any
 /// other `lstat` failure denies. Skipped under Miri, whose synthetic
@@ -23,8 +39,10 @@ fn refuse_final_symlink(path: &GuardedPath) -> DiagnosticResult<()> {
     {
         match std::fs::symlink_metadata(path.as_path()) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(fs_diag::from_anyhow(anyhow::Error::from(e))
-                .with_contexts(vec![format!("lstat denied for {}", path.display())])),
+            Err(e) => Err(lift_io_ctx(
+                e,
+                format!("lstat denied for {}", path.display()),
+            )),
             Ok(meta) if meta.file_type().is_symlink() => Err(fs_diag::refuses_symlink_final(path)),
             Ok(_) => Ok(()),
         }
@@ -182,8 +200,9 @@ impl PathResolver {
                 match std::fs::symlink_metadata(&current) {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => {
-                        return Err(fs_diag::from_anyhow(anyhow::Error::from(e)).with_contexts(
-                            vec![format!("lstat denied for {}", current.display())],
+                        return Err(lift_io_ctx(
+                            e,
+                            format!("lstat denied for {}", current.display()),
                         ));
                     }
                     Ok(meta) if meta.file_type().is_symlink() => {
@@ -205,8 +224,7 @@ impl PathResolver {
                 diag.with_contexts(vec![format!("read denied for {}", path.display())])
             })?;
         let s = fs::read_to_string(guarded.as_path())
-            .map_err(anyhow::Error::from)
-            .map_err(fs_diag::from_anyhow)
+            .map_err(lift_io_err)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("failed to read {}", guarded.display())])
             })?;
@@ -217,8 +235,7 @@ impl PathResolver {
     pub fn read_to_string(&self, path: &GuardedPath) -> DiagnosticResult<String> {
         let bytes = self.read_file(path)?;
         let s = String::from_utf8(bytes)
-            .map_err(anyhow::Error::from)
-            .map_err(fs_diag::from_anyhow)
+            .map_err(|e| fs_diag::from_anyhow(e.into()))
             .map_err(|diag| diag.with_contexts(vec![format!("{path} is not UTF-8")]))?;
         Ok(s)
     }
@@ -321,8 +338,7 @@ impl PathResolver {
         #[cfg(not(miri))]
         {
             let meta = std::fs::metadata(path.as_path())
-                .map_err(anyhow::Error::from)
-                .map_err(fs_diag::from_anyhow)
+                .map_err(lift_io_err)
                 .map_err(|diag| {
                     diag.with_contexts(vec![format!(
                         "failed to stat external {}",
@@ -352,8 +368,7 @@ impl PathResolver {
                     )])
                 })?;
             fs::set_permissions(guarded.as_path(), fs::Permissions::from_mode(mode))
-                .map_err(anyhow::Error::from)
-                .map_err(fs_diag::from_anyhow)
+                .map_err(lift_io_err)
                 .map_err(|diag| {
                     diag.with_contexts(vec![format!(
                         "failed to set permissions on {}",
@@ -376,8 +391,7 @@ impl PathResolver {
                     )])
                 })?;
             std::fs::metadata(guarded.as_path())
-                .map_err(anyhow::Error::from)
-                .map_err(fs_diag::from_anyhow)
+                .map_err(lift_io_err)
                 .map_err(|diag| {
                     diag.with_contexts(vec![format!(
                         "failed to set permissions on {}",
@@ -403,8 +417,7 @@ impl PathResolver {
         #[cfg(not(miri))]
         {
             let f = fs::File::open(path.as_path())
-                .map_err(anyhow::Error::from)
-                .map_err(fs_diag::from_anyhow)
+                .map_err(lift_io_err)
                 .map_err(|diag| {
                     diag.with_contexts(vec![format!("failed to open {}", path.as_path().display())])
                 })?;
@@ -510,8 +523,7 @@ impl PathResolver {
             Ok(meta) => meta,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => {
-                return Err(fs_diag::from_anyhow(anyhow::Error::from(e))
-                    .with_contexts(vec![format!("failed to stat {rel}")]));
+                return Err(lift_io_ctx(e, format!("failed to stat {rel}")));
             }
         };
         if !meta.file_type().is_symlink() {
@@ -524,8 +536,7 @@ impl PathResolver {
                 .unwrap_or(false);
             if is_dir_link {
                 std::fs::remove_dir(&link_path)
-                    .map_err(anyhow::Error::from)
-                    .map_err(fs_diag::from_anyhow)
+                    .map_err(lift_io_err)
                     .map_err(|diag| {
                         diag.with_contexts(vec![format!("failed to remove link {rel}")])
                     })?;
@@ -533,8 +544,7 @@ impl PathResolver {
             }
         }
         std::fs::remove_file(&link_path)
-            .map_err(anyhow::Error::from)
-            .map_err(fs_diag::from_anyhow)
+            .map_err(lift_io_err)
             .map_err(|diag| diag.with_contexts(vec![format!("failed to remove link {rel}")]))?;
         Ok(true)
     }
@@ -552,8 +562,7 @@ impl PathResolver {
             })?;
         if let Some(parent) = guarded.as_path().parent() {
             std::fs::create_dir_all(parent)
-                .map_err(anyhow::Error::from)
-                .map_err(fs_diag::from_anyhow)
+                .map_err(lift_io_err)
                 .map_err(|diag| {
                     diag.with_contexts(vec![format!("creating dir {}", parent.display())])
                 })?;
@@ -563,8 +572,7 @@ impl PathResolver {
             .write(true)
             .create_new(true)
             .open(guarded.as_path())
-            .map_err(anyhow::Error::from)
-            .map_err(fs_diag::from_anyhow)
+            .map_err(lift_io_err)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "failed to create spill {}",
@@ -587,8 +595,7 @@ impl PathResolver {
             .read(true)
             .write(true)
             .open(guarded.as_path())
-            .map_err(anyhow::Error::from)
-            .map_err(fs_diag::from_anyhow)
+            .map_err(lift_io_err)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("failed to open spill {}", guarded.display())])
             })?;
@@ -610,20 +617,16 @@ impl PathResolver {
         let file = std::fs::OpenOptions::new()
             .write(true)
             .open(guarded.as_path())
-            .map_err(anyhow::Error::from)
-            .map_err(fs_diag::from_anyhow)
+            .map_err(lift_io_err)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!("failed to open spill {}", guarded.display())])
             })?;
-        file.set_len(len)
-            .map_err(anyhow::Error::from)
-            .map_err(fs_diag::from_anyhow)
-            .map_err(|diag| {
-                diag.with_contexts(vec![format!(
-                    "failed to truncate spill {}",
-                    guarded.display()
-                )])
-            })?;
+        file.set_len(len).map_err(lift_io_err).map_err(|diag| {
+            diag.with_contexts(vec![format!(
+                "failed to truncate spill {}",
+                guarded.display()
+            )])
+        })?;
         Ok(())
     }
 
@@ -657,8 +660,7 @@ impl PathResolver {
             })?;
         if let Some(parent) = guarded.as_path().parent() {
             std::fs::create_dir_all(parent)
-                .map_err(anyhow::Error::from)
-                .map_err(fs_diag::from_anyhow)
+                .map_err(lift_io_err)
                 .map_err(|diag| {
                     diag.with_contexts(vec![format!("creating dir {}", parent.display())])
                 })?;
@@ -671,8 +673,7 @@ impl PathResolver {
         options.mode(0o600);
         let mut file = options
             .open(guarded.as_path())
-            .map_err(anyhow::Error::from)
-            .map_err(fs_diag::from_anyhow)
+            .map_err(lift_io_err)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "failed to create private {}",
@@ -680,8 +681,7 @@ impl PathResolver {
                 )])
             })?;
         std::io::Write::write_all(&mut file, contents)
-            .map_err(anyhow::Error::from)
-            .map_err(fs_diag::from_anyhow)
+            .map_err(lift_io_err)
             .map_err(|diag| {
                 diag.with_contexts(vec![format!(
                     "failed to write private {}",
@@ -717,8 +717,7 @@ impl SpillFile {
     pub fn set_len(&self, len: u64) -> DiagnosticResult<()> {
         self.file
             .set_len(len)
-            .map_err(anyhow::Error::from)
-            .map_err(fs_diag::from_anyhow)
+            .map_err(lift_io_err)
             .map_err(|diag| {
                 diag.with_contexts(vec!["failed to truncate spill file".to_string()])
             })?;
@@ -785,8 +784,7 @@ impl PathResolver {
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(guarded_src.as_path(), guarded_dst.as_path())
-                .map_err(anyhow::Error::from)
-                .map_err(fs_diag::from_anyhow)
+                .map_err(lift_io_err)
                 .map_err(|diag| {
                     diag.with_contexts(vec![format!(
                         "failed to symlink {} -> {}",
@@ -801,8 +799,7 @@ impl PathResolver {
         {
             use std::os::windows::fs::{symlink_dir, symlink_file};
             let meta = fs::metadata(guarded_src.as_path())
-                .map_err(anyhow::Error::from)
-                .map_err(fs_diag::from_anyhow)
+                .map_err(lift_io_err)
                 .map_err(|diag| {
                     diag.with_contexts(vec![format!(
                         "failed to stat symlink source {}",
@@ -816,16 +813,13 @@ impl PathResolver {
                 symlink_file(guarded_src.as_path(), guarded_dst.as_path())
             };
 
-            try_link
-                .map_err(anyhow::Error::from)
-                .map_err(fs_diag::from_anyhow)
-                .map_err(|diag| {
-                    diag.with_contexts(vec![format!(
-                        "failed to symlink {} -> {}",
-                        guarded_src.display(),
-                        guarded_dst.display()
-                    )])
-                })?;
+            try_link.map_err(lift_io_err).map_err(|diag| {
+                diag.with_contexts(vec![format!(
+                    "failed to symlink {} -> {}",
+                    guarded_src.display(),
+                    guarded_dst.display()
+                )])
+            })?;
             Ok(())
         }
 

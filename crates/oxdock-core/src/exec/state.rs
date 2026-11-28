@@ -816,10 +816,10 @@ impl<P: ProcessManager> ExecState<P> {
         let cwd = self
             .fs
             .resolve_write(&self.cwd, ".")
-            .map_err(|err| state_diag::eval_workdir_resolve_failed(&anyhow::Error::from(err)))?;
-        self.cargo_scratch.ensure_materialized().map_err(|err| {
-            state_diag::eval_scratch_materialize_failed(&anyhow::Error::from(err))
-        })?;
+            .map_err(|err| state_diag::eval_workdir_resolve_failed(&err))?;
+        self.cargo_scratch
+            .ensure_materialized()
+            .map_err(|err| state_diag::eval_scratch_materialize_failed(&err))?;
         Ok(CommandContext::new(
             &cwd.into(),
             Arc::clone(&self.envs),
@@ -1318,7 +1318,9 @@ impl<P: ProcessManager> ExecState<P> {
                         &item,
                         &format!("{}[{}]", sigil_var(key), list.len()),
                     )
-                    .map_err(|err| state_diag::eval_list_element_failed(&err))?;
+                    .map_err(|err| {
+                        state_diag::eval_list_element_failed(&super::args::lift_dispatch_error(err))
+                    })?;
                 }
                 list.push(item);
                 return Ok(());
@@ -1340,7 +1342,9 @@ impl<P: ProcessManager> ExecState<P> {
                     &item,
                     &format!("{}[{}]", sigil_var(key), list.len()),
                 )
-                .map_err(|err| state_diag::eval_list_element_failed(&err))?;
+                .map_err(|err| {
+                    state_diag::eval_list_element_failed(&super::args::lift_dispatch_error(err))
+                })?;
             }
             list.push(item);
             return Ok(());

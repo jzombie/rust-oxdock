@@ -56,6 +56,26 @@ const FIELD_YIELD: &str = "yield";
 /// literals, so a key rename is one edit.
 pub(super) const KEY_EVAL_EXIT_REQUESTED: &str = "dsl.eval.exit_requested";
 
+/// Full-chain text for inlining wrappers. Single owner for the
+/// `{anyhow:#}`-equivalent flattening: joins one-layer node texts
+/// with `": "`, exactly what the alternate renderer prints for the
+/// same chain, so boundary messages that inline the cause (notably
+/// `mcp_call_failed`) keep the pre-flip byte-identical wording after
+/// the `&anyhow::Error` to `&Diagnostic` flip. Wrappers that inline
+/// stay sourceless (the chain text is the message); wrappers that
+/// chain stay bare (the join renders the depth). Mixing both prints
+/// every cause twice.
+pub fn flatten_chain(reason: &Diagnostic) -> String {
+    let mut parts = vec![reason.to_string()];
+    let mut current =
+        std::error::Error::source(reason).map(|node| node as &(dyn std::error::Error + 'static));
+    while let Some(node) = current {
+        parts.push(node.to_string());
+        current = node.source();
+    }
+    parts.join(": ")
+}
+
 /// Duplicate field name inside one MAP spelling.
 pub fn map_duplicate_field(field: &str) -> Diagnostic {
     let message = format!("duplicate field `{field}` in `{MAP_TYPE_NAME}` spelling");
@@ -228,8 +248,8 @@ pub fn check_unknown_option(func: &str, key: &str, known: &[&str]) -> Diagnostic
 /// underlying shape failure verbatim: its path prefix already names
 /// func, key, expected, and actual, so no wrapper is added.
 /// Owned by `check_options` in `typing.rs`.
-pub fn check_option_value(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn check_option_value(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     Diagnostic::new(
         "dsl.check.option_value",
         reason_text.clone(),
@@ -428,8 +448,8 @@ pub fn mcp_unknown_tool(base: &str) -> Diagnostic {
 /// headers and the 4096-char tail bound live here so call sites pass
 /// structured data only. The tails ride the message (human
 /// diagnosis), the structured field carries the reason chain.
-pub fn mcp_call_failed(reason: &anyhow::Error, stdout: &str, stderr: &str) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn mcp_call_failed(reason: &Diagnostic, stdout: &str, stderr: &str) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let mut message = reason_text.clone();
     if !stdout.is_empty() {
         message.push_str("\n--- captured stdout ---\n");
@@ -484,8 +504,8 @@ pub fn import_not_found(path: &str) -> Diagnostic {
 /// IMPORT path that cannot be resolved. Takes the underlying
 /// failure; `{reason:#}` formatting lives here so call sites stay
 /// `format!`-free.
-pub fn import_cannot_resolve(path: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn import_cannot_resolve(path: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("{KEYWORD_IMPORT} `{path}` cannot be resolved: {reason_text}");
     Diagnostic::new(
         "dsl.import.cannot_resolve",
@@ -495,8 +515,8 @@ pub fn import_cannot_resolve(path: &str, reason: &anyhow::Error) -> Diagnostic {
 }
 
 /// IMPORT file that cannot be read.
-pub fn import_cannot_read(path: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn import_cannot_read(path: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("{KEYWORD_IMPORT} `{path}` cannot be read: {reason_text}");
     Diagnostic::new(
         "dsl.import.cannot_read",
@@ -960,14 +980,14 @@ pub fn eval_call_return_tag_failed(name: &str, reason: Diagnostic) -> Diagnostic
 /// plus chained source, matching `eval_symlink_failed` and
 /// `eval_install_failed` so the snapshot renderer keeps every
 /// layer.
-pub fn eval_call_failed(name: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_call_failed(name: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     Diagnostic::new(
         "dsl.eval.call_failed",
         format!("function `{name}` failed"),
         Diagnostic::make_fields(&[("function", name), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// Recursion depth budget exhausted. Takes the caller-rendered base
@@ -1187,8 +1207,8 @@ pub fn std_bool_cannot_coerce(command: &str, got: &str) -> Diagnostic {
 }
 
 /// `PATH_BASE` failure. Takes the underlying failure.
-pub fn std_path_base_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn std_path_base_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("{FUNC_PATH_BASE}: {reason_text}");
     Diagnostic::new(
         "dsl.std.path_base_failed",
@@ -1198,8 +1218,8 @@ pub fn std_path_base_failed(reason: &anyhow::Error) -> Diagnostic {
 }
 
 /// `PATH_REL` failure. Takes the underlying failure.
-pub fn std_path_rel_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn std_path_rel_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("{FUNC_PATH_REL}: {reason_text}");
     Diagnostic::new(
         "dsl.std.path_rel_failed",
@@ -1355,8 +1375,8 @@ pub fn std_parse_args_unknown_flag(flag: &str) -> Diagnostic {
 
 /// `PARSE_ARGS` schema type resolution failure. Takes the schema name
 /// and the underlying failure.
-pub fn std_parse_args_schema_type(name: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn std_parse_args_schema_type(name: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("{FUNC_PARSE_ARGS} schema type {name:?}: {reason_text}");
     Diagnostic::new(
         "dsl.std.parse_args_schema_type",
@@ -1393,8 +1413,8 @@ pub fn std_parse_args_schema_field_type(field: &str, actual: &str) -> Diagnostic
 /// `PARSE_ARGS` trio with a non-`LIST<STRING>` argv value. Takes the
 /// underlying shape failure verbatim: its path prefix already names
 /// the entry point and argument, so no wrapper is added.
-pub fn std_parse_args_arg_shape(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn std_parse_args_arg_shape(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     Diagnostic::new(
         "dsl.std.parse_args_arg_shape",
         reason_text.clone(),
@@ -1667,12 +1687,19 @@ pub fn eval_expected_int(got: &str) -> Diagnostic {
 /// error carrying no keyed diagnostic. Takes the failure verbatim:
 /// keyed diagnostics keep their keys through `lift_dispatch_error`
 /// downcast and never reach here, so this is the rare unkeyed tail.
-pub fn eval_dispatch_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_dispatch_failed(reason: &Diagnostic) -> Diagnostic {
+    eval_dispatch_fallback(&flatten_chain(reason))
+}
+
+/// Unkeyed dispatch fallback. Takes the pre-rendered anyhow chain
+/// text verbatim (like `operation_failed`); rendering lives here.
+/// Single owner for the `lift_dispatch_error` fallback so the
+/// anyhow-to-Diagnostic direction keeps one keyed home.
+pub fn eval_dispatch_fallback(reason_text: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.dispatch_failed",
-        reason_text.clone(),
-        Diagnostic::make_fields(&[(FIELD_REASON, reason_text.as_str())]),
+        reason_text.to_string(),
+        Diagnostic::make_fields(&[(FIELD_REASON, reason_text)]),
     )
 }
 
@@ -1694,8 +1721,8 @@ pub fn eval_stream_write_failed(reason: &std::io::Error) -> Diagnostic {
 /// Pipe content peek behind a pipe assertion. Takes the underlying
 /// failure verbatim: it already names the handle and the cause, so
 /// no wrapper is added.
-pub fn eval_pipe_assertion_read_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_pipe_assertion_read_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("step pipe assertion cannot read pipe: {reason_text}");
     Diagnostic::new(
         "dsl.eval.pipe_assertion_read_failed",
@@ -2632,8 +2659,8 @@ pub fn eval_remote_unknown_env(target: &str, name: &str) -> Diagnostic {
 /// fast-fail arm, `Some` where the entry-kind probe failed (rendered
 /// `{reason:#}` inline with no `with_source`, per the passthrough
 /// contract). One key covers both arms.
-pub fn eval_remote_fetch_missing(rel: &str, reason: Option<&anyhow::Error>) -> Diagnostic {
-    let reason_text = reason.map(|err| format!("{err:#}"));
+pub fn eval_remote_fetch_missing(rel: &str, reason: Option<&Diagnostic>) -> Diagnostic {
+    let reason_text = reason.map(flatten_chain);
     let message = match &reason_text {
         Some(text) => format!("{KEYWORD_REMOTE} fetch source missing: {rel} ({text})"),
         None => format!("{KEYWORD_REMOTE} fetch source missing: {rel}"),
@@ -2710,8 +2737,8 @@ pub fn eval_remote_transport_failed(target: &str) -> Diagnostic {
 /// Push-symlink destination escaping the workspace. Takes the link
 /// path and the join failure; the text is inlined, so no source rides
 /// along. `Debug` rendering of the path lives here.
-pub fn eval_remote_push_destination_escapes(rel: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_remote_push_destination_escapes(rel: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!(
         "{KEYWORD_REMOTE} push symlink destination {rel:?} escapes the workspace: {reason_text}"
     );
@@ -2725,8 +2752,8 @@ pub fn eval_remote_push_destination_escapes(rel: &str, reason: &anyhow::Error) -
 /// Push-symlink target resolving outside the workspace. Takes the link
 /// path and the join failure; one key covers the absolute, nested,
 /// and bare shapings. The text is inlined, so no source rides along.
-pub fn eval_remote_push_target_outside(rel: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_remote_push_target_outside(rel: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!(
         "{KEYWORD_REMOTE} push symlink {rel:?} points outside the workspace: {reason_text}"
     );
@@ -2890,8 +2917,8 @@ pub fn eval_pipe_not_utf8(verb: &str, reason: &std::string::FromUtf8Error) -> Di
 /// `RUN` prefix. Renders `{reason:#}` inline with no `with_source`,
 /// per the passthrough contract. One key covers both, mirroring
 /// `eval_run_cancelled`.
-pub fn eval_run_spawn_failed(command: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_run_spawn_failed(command: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("{KEYWORD_RUN} {command}: {reason_text}");
     Diagnostic::new(
         "dsl.eval.run_spawn_failed",
@@ -2903,8 +2930,8 @@ pub fn eval_run_spawn_failed(command: &str, reason: &anyhow::Error) -> Diagnosti
 /// `RUN` argv spawn failure. Takes the argv slice and the underlying
 /// failure verbatim; `Debug` rendering of the argv lives here and
 /// `{reason:#}` is inlined with no `with_source`.
-pub fn eval_run_argv_spawn_failed(argv: &[String], reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_run_argv_spawn_failed(argv: &[String], reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("{KEYWORD_RUN} {argv:?}: {reason_text}");
     Diagnostic::new(
         "dsl.eval.run_argv_spawn_failed",
@@ -2985,8 +3012,8 @@ pub fn eval_sleep_cancelled() -> Diagnostic {
 /// covers all five call sites, the `from`/`to` pair rides as
 /// structured fields. Renders `{reason:#}` inline with no
 /// `with_source`, per the passthrough contract.
-pub fn eval_copy_failed(from: &str, to: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_copy_failed(from: &str, to: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("{KEYWORD_COPY} {from} {to}: {reason_text}");
     Diagnostic::new(
         "dsl.eval.copy_failed",
@@ -2999,8 +3026,8 @@ pub fn eval_copy_failed(from: &str, to: &str, reason: &anyhow::Error) -> Diagnos
 /// revision, source, destination, and the underlying failure
 /// verbatim; one key covers both call sites. Renders `{reason:#}`
 /// inline with no `with_source`.
-pub fn eval_copy_git_failed(rev: &str, from: &str, to: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_copy_git_failed(rev: &str, from: &str, to: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("{KEYWORD_COPY_GIT} {rev} {from} {to}: {reason_text}");
     Diagnostic::new(
         "dsl.eval.copy_git_failed",
@@ -3029,8 +3056,8 @@ pub fn eval_copy_no_file_name(display: &str) -> Diagnostic {
 /// and the underlying join failure verbatim; one key covers the
 /// single call site. Renders `{reason:#}` inline with no
 /// `with_source`.
-pub fn eval_copy_destination_escapes(display: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_copy_destination_escapes(display: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("{KEYWORD_COPY} destination escapes root: {display}: {reason_text}");
     Diagnostic::new(
         "dsl.eval.copy_destination_escapes",
@@ -3050,7 +3077,7 @@ pub fn eval_copy_destination_escapes(display: &str, reason: &anyhow::Error) -> D
 /// `Other`-kind io error, collapsing deeper layers the same way the
 /// process io ctors collapse to kind plus text. Per the chain contract:
 /// no interpolation, source attached.
-pub fn eval_symlink_failed(from: &str, to: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_symlink_failed(from: &str, to: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_SYMLINK} {from} {to}");
     Diagnostic::new(
@@ -3058,7 +3085,7 @@ pub fn eval_symlink_failed(from: &str, to: &str, reason: &anyhow::Error) -> Diag
         message,
         Diagnostic::make_fields(&[("from", from), ("to", to), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `SYMLINK` source with no file name. Takes the script spelling;
@@ -3079,7 +3106,7 @@ pub fn eval_symlink_no_file_name(from: &str) -> Diagnostic {
 /// for the snapshot renderer. One key covers every fallible op under
 /// the pack path (resolve, listing, join, stat, open, append,
 /// flush); call sites pass decoded spellings, never `format!`.
-pub fn eval_archive_failed(src: &str, dst: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_archive_failed(src: &str, dst: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_ARCHIVE} {src} {dst}");
     Diagnostic::new(
@@ -3087,7 +3114,7 @@ pub fn eval_archive_failed(src: &str, dst: &str, reason: &anyhow::Error) -> Diag
         message,
         Diagnostic::make_fields(&[("src", src), ("dst", dst), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `ARCHIVE` source with no file name. Takes the script spellings
@@ -3158,7 +3185,7 @@ pub fn eval_archive_destination_inside_tree(src: &str, dst: &str) -> Diagnostic 
 /// matching `eval_symlink_failed`. One key covers every fallible op
 /// on the unpack path outside per-member apply (resolve, mkdir,
 /// open, driver, deferred mode restore call).
-pub fn eval_unarchive_failed(src: &str, dst: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_unarchive_failed(src: &str, dst: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_UNARCHIVE} {src} {dst}");
     Diagnostic::new(
@@ -3166,7 +3193,7 @@ pub fn eval_unarchive_failed(src: &str, dst: &str, reason: &anyhow::Error) -> Di
         message,
         Diagnostic::make_fields(&[("src", src), ("dst", dst), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `UNARCHIVE` per-member apply failure. Takes the script spellings
@@ -3174,7 +3201,7 @@ pub fn eval_unarchive_failed(src: &str, dst: &str, reason: &anyhow::Error) -> Di
 /// source; one key covers every fallible op inside the apply
 /// callback (sanitize via round-trip, link-ancestor refusal, join,
 /// mkdir, open, flush, mode restore).
-pub fn eval_unarchive_member_failed(src: &str, dst: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_unarchive_member_failed(src: &str, dst: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_UNARCHIVE} {src} {dst}: member");
     Diagnostic::new(
@@ -3182,7 +3209,7 @@ pub fn eval_unarchive_member_failed(src: &str, dst: &str, reason: &anyhow::Error
         message,
         Diagnostic::make_fields(&[("src", src), ("dst", dst), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `UNARCHIVE` `--max-bytes` parse failure. Takes the script
@@ -3257,11 +3284,7 @@ pub fn eval_unarchive_refuses_symlink(
 /// `UNARCHIVE` deferred directory-mode restore failure. Takes the
 /// script spellings and the underlying failure. Bare outer plus
 /// chained source.
-pub fn eval_unarchive_restore_mode_failed(
-    src: &str,
-    dst: &str,
-    reason: &anyhow::Error,
-) -> Diagnostic {
+pub fn eval_unarchive_restore_mode_failed(src: &str, dst: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_UNARCHIVE} {src} {dst}: restoring mode");
     Diagnostic::new(
@@ -3269,7 +3292,7 @@ pub fn eval_unarchive_restore_mode_failed(
         message,
         Diagnostic::make_fields(&[("src", src), ("dst", dst), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `WORKDIR` resolution failure. Takes the script spelling and the
@@ -3277,7 +3300,7 @@ pub fn eval_unarchive_restore_mode_failed(
 /// the failure rides as the chained source, so `err.chain()` keeps
 /// its layers for the snapshot renderer. Per the chain contract:
 /// no interpolation, source attached.
-pub fn eval_workdir_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_workdir_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_WORKDIR} {path}");
     Diagnostic::new(
@@ -3285,13 +3308,13 @@ pub fn eval_workdir_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
         message,
         Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `MKDIR` destination-resolution failure. Takes the script spelling
 /// and the underlying failure. Bare outer context plus chained
 /// source, mirroring `eval_symlink_failed`.
-pub fn eval_mkdir_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_mkdir_resolve_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_MKDIR} {path}");
     Diagnostic::new(
@@ -3299,13 +3322,13 @@ pub fn eval_mkdir_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnost
         message,
         Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `MKDIR` creation failure. Takes the resolved display and the
 /// underlying failure. The `failed to create dir` wording is kept
 /// byte-identical; only the key plus fields are new.
-pub fn eval_mkdir_create_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_mkdir_create_failed(display: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("failed to create dir {display}");
     Diagnostic::new(
@@ -3313,13 +3336,13 @@ pub fn eval_mkdir_create_failed(display: &str, reason: &anyhow::Error) -> Diagno
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `SET_EXECUTABLE` transport failure (resolve or chmod). Takes the
 /// script spelling and the underlying failure; one key covers both
 /// sites since the outer text is identical.
-pub fn eval_set_executable_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_set_executable_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_SET_EXECUTABLE} {path}");
     Diagnostic::new(
@@ -3327,13 +3350,13 @@ pub fn eval_set_executable_failed(path: &str, reason: &anyhow::Error) -> Diagnos
         message,
         Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `LS` resolution failure. Takes the optional script spelling (`None`
 /// for the bare `LS` form) and the underlying failure. One key covers
 /// both resolve sites; the bare form renders without a path.
-pub fn eval_ls_resolve_failed(path: Option<&str>, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_ls_resolve_failed(path: Option<&str>, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = match path {
         Some(p) => format!("{KEYWORD_LS} {p}"),
@@ -3349,12 +3372,12 @@ pub fn eval_ls_resolve_failed(path: Option<&str>, reason: &anyhow::Error) -> Dia
         message,
         Diagnostic::make_fields(&fields),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `LS` directory-read failure. Takes the resolved display and the
 /// underlying failure. Bare outer context plus chained source.
-pub fn eval_ls_read_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_ls_read_failed(display: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_LS} {display}");
     Diagnostic::new(
@@ -3362,13 +3385,13 @@ pub fn eval_ls_read_failed(display: &str, reason: &anyhow::Error) -> Diagnostic 
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `READ` destination-resolution failure. Takes the script spelling
 /// and the underlying failure. Bare outer context plus chained
 /// source, mirroring `eval_symlink_failed`.
-pub fn eval_read_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_read_resolve_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_READ} {path}");
     Diagnostic::new(
@@ -3376,7 +3399,7 @@ pub fn eval_read_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnosti
         message,
         Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `READ` file-open failure. Takes the resolved display and the
@@ -3384,7 +3407,7 @@ pub fn eval_read_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnosti
 /// byte-identical; the cause rides as the chained source so the
 /// snapshot renderer keeps every layer (the missing-file chain
 /// test pins the leaf under `causes:`).
-pub fn eval_read_open_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_read_open_failed(display: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("failed to open {display}");
     Diagnostic::new(
@@ -3392,7 +3415,7 @@ pub fn eval_read_open_failed(display: &str, reason: &anyhow::Error) -> Diagnosti
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `READ` chunk-read failure. Takes the underlying I/O failure; the
@@ -3405,7 +3428,10 @@ pub fn eval_read_file_failed(reason: &std::io::Error) -> Diagnostic {
         "failed to read from file".to_string(),
         Diagnostic::make_fields(&[("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        reason.kind(),
+        reason.to_string(),
+    )))
 }
 
 /// `READ` stdout-write failure. Takes the underlying I/O failure.
@@ -3418,7 +3444,10 @@ pub fn eval_read_write_failed(reason: &std::io::Error) -> Diagnostic {
         "failed to write to output".to_string(),
         Diagnostic::make_fields(&[("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        reason.kind(),
+        reason.to_string(),
+    )))
 }
 
 /// `READ` without a stdin stream. Parameterless: the remediation
@@ -3457,13 +3486,13 @@ pub fn eval_read_line_not_utf8(reason: &std::string::FromUtf8Error) -> Diagnosti
         message,
         Diagnostic::make_fields(&[("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `WRITE` destination-resolution failure. Takes the script spelling
 /// and the underlying failure. Bare outer context plus chained
 /// source.
-pub fn eval_write_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_write_resolve_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_WRITE} {path}");
     Diagnostic::new(
@@ -3471,14 +3500,14 @@ pub fn eval_write_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnost
         message,
         Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// Parent-directory creation failure. Takes the resolved display and
 /// the underlying failure. One key covers `WRITE`, `APPEND`, and
 /// `APPEND_LINE`: the outer text names no keyword, so the invoker
 /// needs no field.
-pub fn eval_ensure_parent_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_ensure_parent_failed(display: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("failed to create parent for {display}");
     Diagnostic::new(
@@ -3486,12 +3515,12 @@ pub fn eval_ensure_parent_failed(display: &str, reason: &anyhow::Error) -> Diagn
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `WRITE` whole-file failure. Takes the resolved display and the
 /// underlying failure. Bare outer context plus chained source.
-pub fn eval_write_file_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_write_file_failed(display: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("failed to write {display}");
     Diagnostic::new(
@@ -3499,7 +3528,7 @@ pub fn eval_write_file_failed(display: &str, reason: &anyhow::Error) -> Diagnost
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `WRITE` without a stdin stream. Takes the script spelling; the
@@ -3517,7 +3546,7 @@ pub fn eval_write_needs_stdin(path: &str) -> Diagnostic {
 
 /// `WRITE` stream-open failure. Takes the resolved display and the
 /// underlying failure. Bare outer context plus chained source.
-pub fn eval_write_open_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_write_open_failed(display: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("failed to open {display} for writing");
     Diagnostic::new(
@@ -3525,12 +3554,12 @@ pub fn eval_write_open_failed(display: &str, reason: &anyhow::Error) -> Diagnost
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `WRITE` streamed-chunk failure. Takes the resolved display and the
 /// underlying failure. Bare outer context plus chained source.
-pub fn eval_write_stream_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_write_stream_failed(display: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("failed to write to {display}");
     Diagnostic::new(
@@ -3538,13 +3567,13 @@ pub fn eval_write_stream_failed(display: &str, reason: &anyhow::Error) -> Diagno
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `APPEND` destination-resolution failure. Takes the script spelling
 /// and the underlying failure. Bare outer context plus chained
 /// source.
-pub fn eval_append_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_append_resolve_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_APPEND} {path}");
     Diagnostic::new(
@@ -3552,14 +3581,14 @@ pub fn eval_append_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnos
         message,
         Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `APPEND` write failure (whole-file or streamed chunk). Takes the
 /// resolved display and the underlying failure; one key covers both
 /// sites since the outer text is identical, mirroring
 /// `eval_set_executable_failed`.
-pub fn eval_append_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_append_failed(display: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("failed to append to {display}");
     Diagnostic::new(
@@ -3567,7 +3596,7 @@ pub fn eval_append_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `APPEND` without a stdin stream. Takes the script spelling; the
@@ -3585,7 +3614,7 @@ pub fn eval_append_needs_stdin(path: &str) -> Diagnostic {
 
 /// `APPEND` stream-open failure. Takes the resolved display and the
 /// underlying failure. Bare outer context plus chained source.
-pub fn eval_append_open_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_append_open_failed(display: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("failed to open {display} for appending");
     Diagnostic::new(
@@ -3593,14 +3622,14 @@ pub fn eval_append_open_failed(display: &str, reason: &anyhow::Error) -> Diagnos
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `APPEND_LINE` destination-resolution failure. Takes the script
 /// spelling and the underlying failure. The write itself reuses
 /// `eval_append_failed` and the parent step reuses
 /// `eval_ensure_parent_failed`, so this is the only new wording.
-pub fn eval_append_line_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_append_line_resolve_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_APPEND_LINE} {path}");
     Diagnostic::new(
@@ -3608,14 +3637,14 @@ pub fn eval_append_line_resolve_failed(path: &str, reason: &anyhow::Error) -> Di
         message,
         Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `REMOVE` transport failure (resolve, link probe, file removal, or
 /// recursive removal). Takes the script spelling and the underlying
 /// failure; one key covers all four sites since the outer text is
 /// identical.
-pub fn eval_remove_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_remove_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_REMOVE} {path}");
     Diagnostic::new(
@@ -3623,7 +3652,7 @@ pub fn eval_remove_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
         message,
         Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `REMOVE` against the working directory or a root. Takes the
@@ -3664,7 +3693,7 @@ pub fn eval_remove_link_changed(path: &str) -> Diagnostic {
 /// `REMOVE` of a non-empty directory without `--recursive`. Takes the
 /// script spelling and the underlying failure. Bare outer context
 /// plus chained source.
-pub fn eval_remove_not_empty_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_remove_not_empty_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_REMOVE} {path}: directory not empty (use --recursive)");
     Diagnostic::new(
@@ -3672,13 +3701,13 @@ pub fn eval_remove_not_empty_failed(path: &str, reason: &anyhow::Error) -> Diagn
         message,
         Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `EXPAND` destination-resolution failure. Takes the script spelling
 /// and the underlying failure. Bare outer context plus chained
 /// source.
-pub fn eval_expand_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_expand_resolve_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_EXPAND} {path}");
     Diagnostic::new(
@@ -3686,14 +3715,14 @@ pub fn eval_expand_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnos
         message,
         Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `EXPAND` chunk-read failure. Takes the resolved display and the
 /// underlying failure. Bare outer context plus chained source. The
 /// file-open site reuses `eval_read_open_failed`: one owner for the
 /// shared `failed to open` wording.
-pub fn eval_expand_read_failed(display: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_expand_read_failed(display: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("failed to read {display}");
     Diagnostic::new(
@@ -3701,7 +3730,7 @@ pub fn eval_expand_read_failed(display: &str, reason: &anyhow::Error) -> Diagnos
         message,
         Diagnostic::make_fields(&[("path", display), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `EXPAND` template-output write failure. Takes the underlying I/O
@@ -3715,7 +3744,10 @@ pub fn eval_expand_write_failed(reason: &std::io::Error) -> Diagnostic {
         "failed to write output".to_string(),
         Diagnostic::make_fields(&[("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        reason.kind(),
+        reason.to_string(),
+    )))
 }
 
 /// `EXPAND` without a stdin stream and no file path. Parameterless:
@@ -3735,7 +3767,7 @@ pub fn eval_expand_needs_stdin() -> Diagnostic {
 /// atomic install). Takes the source, destination, and the underlying
 /// failure; one key covers all three sites since the outer text is
 /// identical.
-pub fn eval_install_failed(from: &str, to: &str, reason: &anyhow::Error) -> Diagnostic {
+pub fn eval_install_failed(from: &str, to: &str, reason: &Diagnostic) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message = format!("{KEYWORD_INSTALL} {from} {to}");
     Diagnostic::new(
@@ -3743,7 +3775,7 @@ pub fn eval_install_failed(from: &str, to: &str, reason: &anyhow::Error) -> Diag
         message,
         Diagnostic::make_fields(&[("from", from), ("to", to), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new((*reason).clone()))
 }
 
 /// `PROMPT` with no TTY answer and no default. Takes the rendered
@@ -3769,7 +3801,10 @@ pub fn eval_prompt_write_failed(message: &str, reason: &std::io::Error) -> Diagn
         rendered,
         Diagnostic::make_fields(&[("message", message), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        reason.kind(),
+        reason.to_string(),
+    )))
 }
 
 /// `PROMPT` banner-flush failure. Takes the rendered message and the
@@ -3782,7 +3817,10 @@ pub fn eval_prompt_flush_failed(message: &str, reason: &std::io::Error) -> Diagn
         rendered,
         Diagnostic::make_fields(&[("message", message), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        reason.kind(),
+        reason.to_string(),
+    )))
 }
 
 /// `PROMPT` answer-read failure. Takes the rendered message and the
@@ -3795,7 +3833,10 @@ pub fn eval_prompt_read_failed(message: &str, reason: &std::io::Error) -> Diagno
         rendered,
         Diagnostic::make_fields(&[("message", message), ("reason", &reason_text)]),
     )
-    .with_source(std::sync::Arc::new(std::io::Error::other(reason_text)))
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        reason.kind(),
+        reason.to_string(),
+    )))
 }
 
 /// `PROMPT` hitting EOF before any input. Takes the rendered
@@ -3843,8 +3884,8 @@ pub fn eval_list_append_failed(var: &str, reason: Diagnostic) -> Diagnostic {
 /// `int`-typed argument whose resolution failed. Takes the underlying
 /// failure verbatim: its message already names the argument and the
 /// cause, so no wrapper is added.
-pub fn eval_int_arg_resolve(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_int_arg_resolve(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     Diagnostic::new(
         "dsl.eval.int_arg_resolve",
         reason_text.clone(),
@@ -3927,8 +3968,8 @@ pub fn coerce_pipe_to_string() -> Diagnostic {
 /// Shaped-type shape failure inside coercion. Takes the underlying
 /// parser failure verbatim: its indexed path already names the
 /// expected tag and the offending position, so no wrapper is added.
-pub fn coerce_check_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn coerce_check_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     Diagnostic::new(
         "dsl.coerce.check_failed",
         reason_text.clone(),
@@ -3939,8 +3980,8 @@ pub fn coerce_check_failed(reason: &anyhow::Error) -> Diagnostic {
 /// Host return value failing its declared shape. Takes the underlying
 /// shape failure verbatim: the caller-supplied context already names
 /// the function, so no wrapper is added.
-pub fn eval_host_return_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_host_return_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     Diagnostic::new(
         "dsl.eval.host_return_failed",
         reason_text.clone(),
@@ -4063,8 +4104,8 @@ pub fn eval_list_value_not_list(key: &str) -> Diagnostic {
 /// Shaped-list element failing its element tag. Takes the underlying
 /// shape failure verbatim: its indexed path already names the
 /// position, so no wrapper is added.
-pub fn eval_list_element_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_list_element_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     Diagnostic::new(
         "dsl.eval.list_element_failed",
         reason_text.clone(),
@@ -4188,8 +4229,8 @@ pub fn eval_template_placeholder_miss(text: &str) -> Diagnostic {
 
 /// Pipe input read failure. Takes the invoking function and the
 /// underlying failure.
-pub fn std_pipe_read_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn std_pipe_read_failed(func: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("{func} cannot read {PIPE_TYPE_NAME} input: {reason_text}");
     Diagnostic::new(
         "dsl.std.pipe_read_failed",
@@ -4200,8 +4241,8 @@ pub fn std_pipe_read_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
 
 /// Pipe output creation failure. Takes the invoking function and the
 /// underlying failure.
-pub fn std_pipe_create_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn std_pipe_create_failed(func: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("{func} cannot create {PIPE_TYPE_NAME} output: {reason_text}");
     Diagnostic::new(
         "dsl.std.pipe_create_failed",
@@ -4548,8 +4589,8 @@ pub fn eval_path_writable_needs_string() -> Diagnostic {
 /// Path resolution failure behind the path predicates. Takes the
 /// spelling and the underlying failure; shared by `PATH_TYPE` and
 /// `PATH_WRITABLE`, whose texts are identical.
-pub fn eval_path_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_path_resolve_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("failed to resolve path '{path}': {reason_text}");
     Diagnostic::new(
         "dsl.eval.path_resolve_failed",
@@ -4560,8 +4601,8 @@ pub fn eval_path_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnosti
 
 /// Working-directory resolution failure behind `PATH_WRITABLE`'s
 /// upward probe. Takes the underlying failure.
-pub fn eval_workdir_resolve_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_workdir_resolve_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("failed to resolve working directory: {reason_text}");
     Diagnostic::new(
         "dsl.eval.workdir_resolve_failed",
@@ -4573,8 +4614,8 @@ pub fn eval_workdir_resolve_failed(reason: &anyhow::Error) -> Diagnostic {
 /// Session scratch hierarchy failing to materialize (root plus
 /// `tmp` for seeded `HOME`/`TMPDIR`). Takes the underlying failure
 /// verbatim; every spawn choke point shares this one key.
-pub fn eval_scratch_materialize_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn eval_scratch_materialize_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     Diagnostic::new(
         "dsl.eval.scratch_materialize_failed",
         reason_text.clone(),
@@ -4726,8 +4767,8 @@ pub fn std_load_toml_needs_string() -> Diagnostic {
 
 /// `LOAD_TOML` path resolution failure. Takes the spelling and the
 /// underlying failure.
-pub fn std_load_toml_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn std_load_toml_resolve_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("failed to resolve TOML path '{path}': {reason_text}");
     Diagnostic::new(
         "dsl.std.load_toml_resolve_failed",
@@ -4738,8 +4779,8 @@ pub fn std_load_toml_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagn
 
 /// `LOAD_TOML` file read failure. Takes the spelling and the
 /// underlying failure.
-pub fn std_load_toml_read_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn std_load_toml_read_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("failed to read TOML file '{path}': {reason_text}");
     Diagnostic::new(
         "dsl.std.load_toml_read_failed",
@@ -4803,8 +4844,8 @@ pub fn std_load_json_needs_string() -> Diagnostic {
 
 /// `LOAD_JSON` path resolution failure. Takes the spelling and the
 /// underlying failure.
-pub fn std_load_json_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn std_load_json_resolve_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("failed to resolve JSON path '{path}': {reason_text}");
     Diagnostic::new(
         "dsl.std.load_json_resolve_failed",
@@ -4815,8 +4856,8 @@ pub fn std_load_json_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagn
 
 /// `LOAD_JSON` file read failure. Takes the spelling and the
 /// underlying failure.
-pub fn std_load_json_read_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn std_load_json_read_failed(path: &str, reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     let message = format!("failed to read JSON file '{path}': {reason_text}");
     Diagnostic::new(
         "dsl.std.load_json_read_failed",
@@ -4881,8 +4922,8 @@ pub fn std_glob_needs_string() -> Diagnostic {
 /// `GLOB` root-resolution failure. Takes the underlying failure
 /// verbatim: it already names the root and the cause, so no wrapper
 /// is added.
-pub fn std_glob_resolve_failed(reason: &anyhow::Error) -> Diagnostic {
-    let reason_text = format!("{reason:#}");
+pub fn std_glob_resolve_failed(reason: &Diagnostic) -> Diagnostic {
+    let reason_text = flatten_chain(reason);
     Diagnostic::new(
         "dsl.std.glob_resolve_failed",
         reason_text.clone(),
@@ -6379,6 +6420,17 @@ pub fn check_void_no_value() -> Diagnostic {
     )
 }
 
+/// Test-only reason sample for `reason: &Diagnostic` ctors (see
+/// the `tests` module below for the byte-identical contract).
+#[cfg(test)]
+pub(crate) fn reason_sample(msg: &str) -> Diagnostic {
+    Diagnostic::new(
+        "test.reason.sample",
+        msg.to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6483,7 +6535,7 @@ mod tests {
             typing_unregistered("LET $x", "NOPE", &types).key(),
             typing_void_position("LET $x").key(),
             check_unknown_option("F", "k", &["a", "b"]).key(),
-            check_option_value(&anyhow::anyhow!("x")).key(),
+            check_option_value(&reason_sample("x")).key(),
             typing_no_args("STRING").key(),
             typing_handle_arity().key(),
             typing_list_arity().key(),
@@ -6500,12 +6552,12 @@ mod tests {
             mcp_continue_outside_loop(1).key(),
             mcp_return_outside_function(1).key(),
             mcp_unknown_tool("FOO").key(),
-            mcp_call_failed(&anyhow::anyhow!("boom"), "", "").key(),
+            mcp_call_failed(&reason_sample("boom"), "", "").key(),
             import_cycle(&["a".to_string(), "b".to_string()]).key(),
             import_depth_limit(8, "f").key(),
             import_not_found("f").key(),
-            import_cannot_resolve("f", &anyhow::anyhow!("x")).key(),
-            import_cannot_read("f", &anyhow::anyhow!("x")).key(),
+            import_cannot_resolve("f", &reason_sample("x")).key(),
+            import_cannot_read("f", &reason_sample("x")).key(),
             import_bad_utf8("f", &utf8_err_sample()).key(),
             import_parse_failed("f", &parse_err_sample()).key(),
             import_missing_export("f", "FUNC", "g").key(),
@@ -6639,7 +6691,7 @@ mod tests {
             eval_call_unknown("F", "").key(),
             eval_call_unknown_rpn("F", "").key(),
             eval_call_return_tag_failed("F", eval_remove_missing("x")).key(),
-            eval_call_failed("F", &anyhow::anyhow!("x")).key(),
+            eval_call_failed("F", &reason_sample("x")).key(),
             eval_call_recursion_limit("F").key(),
             eval_call_arity_exact("F", 1, 0).key(),
             eval_call_arity_range("F", 1, 2, 0).key(),
@@ -6658,8 +6710,8 @@ mod tests {
             std_bool_needs_bool_or_string(&crate::Value::string("x".to_string())).key(),
             std_bool_cannot_coerce("BOOL", "x").key(),
             std_shell_split_failed(&shell_words::ParseError).key(),
-            std_path_base_failed(&anyhow::anyhow!("x")).key(),
-            std_path_rel_failed(&anyhow::anyhow!("x")).key(),
+            std_path_base_failed(&reason_sample("x")).key(),
+            std_path_rel_failed(&reason_sample("x")).key(),
             std_parse_args_arity(2).key(),
             std_parse_args_bool_flag("f", "x").key(),
             std_parse_args_bool_type("f", "INT").key(),
@@ -6672,10 +6724,10 @@ mod tests {
             std_parse_args_duplicate_flag("f", None).key(),
             std_parse_args_missing_flag("f", None).key(),
             std_parse_args_unknown_flag("f").key(),
-            std_parse_args_schema_type("S", &anyhow::anyhow!("x")).key(),
+            std_parse_args_schema_type("S", &reason_sample("x")).key(),
             std_parse_args_schema_shape("S").key(),
             std_parse_args_schema_field_type("f", "INT").key(),
-            std_parse_args_arg_shape(&anyhow::anyhow!("x")).key(),
+            std_parse_args_arg_shape(&reason_sample("x")).key(),
             std_parse_flags_arity(2).key(),
             std_parse_flags_positional(&["a".to_string()]).key(),
             std_parse_positionals_arity(2).key(),
@@ -6704,9 +6756,9 @@ mod tests {
             eval_neg_needs_numeric(&crate::Value::string("x".to_string())).key(),
             eval_condition_needs_bool(&crate::Value::string("x".to_string())).key(),
             eval_expected_int("x").key(),
-            eval_int_arg_resolve(&anyhow::anyhow!("x")).key(),
-            eval_dispatch_failed(&anyhow::anyhow!("x")).key(),
-            eval_pipe_assertion_read_failed(&anyhow::anyhow!("x")).key(),
+            eval_int_arg_resolve(&reason_sample("x")).key(),
+            eval_dispatch_failed(&reason_sample("x")).key(),
+            eval_pipe_assertion_read_failed(&reason_sample("x")).key(),
             eval_with_io_unexpanded().key(),
             eval_with_io_geometry_needs_tty().key(),
             eval_with_io_tty_no_stderr().key(),
@@ -6793,8 +6845,8 @@ mod tests {
             eval_remote_no_session("t").key(),
             eval_remote_exit_status("t", 3).key(),
             eval_remote_transport_failed("t").key(),
-            eval_remote_push_destination_escapes("a", &anyhow::anyhow!("x")).key(),
-            eval_remote_push_target_outside("a", &anyhow::anyhow!("x")).key(),
+            eval_remote_push_destination_escapes("a", &reason_sample("x")).key(),
+            eval_remote_push_target_outside("a", &reason_sample("x")).key(),
             eval_remote_push_symlink_over_dir("a").key(),
             eval_with_io_tty_live_pipe("stdin").key(),
             eval_write_live_pipe("stdout").key(),
@@ -6808,27 +6860,27 @@ mod tests {
             eval_run_pty_exit_status("echo hi", 1).key(),
             eval_run_exec_requires_arg().key(),
             eval_pipe_not_utf8("ASSERT", &String::from_utf8(vec![0xff]).unwrap_err()).key(),
-            eval_run_spawn_failed("echo hi", &anyhow::anyhow!("x")).key(),
-            eval_run_argv_spawn_failed(&["echo".to_string()], &anyhow::anyhow!("x")).key(),
+            eval_run_spawn_failed("echo hi", &reason_sample("x")).key(),
+            eval_run_argv_spawn_failed(&["echo".to_string()], &reason_sample("x")).key(),
             eval_run_exec_pipe_arg().key(),
             eval_run_exec_semaphore_arg().key(),
             eval_run_exec_permit_arg().key(),
             eval_run_exec_element_needs_string("map").key(),
             eval_sleep_cancelled().key(),
-            eval_copy_failed("a", "b", &anyhow::anyhow!("x")).key(),
-            eval_copy_git_failed("r", "a", "b", &anyhow::anyhow!("x")).key(),
+            eval_copy_failed("a", "b", &reason_sample("x")).key(),
+            eval_copy_git_failed("r", "a", "b", &reason_sample("x")).key(),
             eval_copy_no_file_name("p").key(),
-            eval_copy_destination_escapes("p", &anyhow::anyhow!("x")).key(),
-            eval_symlink_failed("a", "b", &anyhow::anyhow!("x")).key(),
+            eval_copy_destination_escapes("p", &reason_sample("x")).key(),
+            eval_symlink_failed("a", "b", &reason_sample("x")).key(),
             eval_symlink_no_file_name("a").key(),
-            eval_archive_failed("a", "b", &anyhow::anyhow!("x")).key(),
+            eval_archive_failed("a", "b", &reason_sample("x")).key(),
             eval_archive_no_file_name("a", "b", "d").key(),
             eval_archive_refuses_symlink_source("a", "b").key(),
             eval_archive_refuses_symlink("a", "b", "c").key(),
             eval_archive_destination_is_source("a", "a").key(),
             eval_archive_destination_inside_tree("a", "b").key(),
-            eval_unarchive_failed("a", "b", &anyhow::anyhow!("x")).key(),
-            eval_unarchive_member_failed("a", "b", &anyhow::anyhow!("x")).key(),
+            eval_unarchive_failed("a", "b", &reason_sample("x")).key(),
+            eval_unarchive_member_failed("a", "b", &reason_sample("x")).key(),
             eval_unarchive_bad_max_bytes(
                 "a",
                 "b",
@@ -6838,42 +6890,42 @@ mod tests {
             .key(),
             eval_unarchive_expansion_cap("a", "b", 8, "p").key(),
             eval_unarchive_refuses_symlink("a", "b", "p", "t").key(),
-            eval_unarchive_restore_mode_failed("a", "b", &anyhow::anyhow!("x")).key(),
-            eval_workdir_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_mkdir_resolve_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_mkdir_create_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_set_executable_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_ls_resolve_failed(Some("p"), &anyhow::anyhow!("x")).key(),
-            eval_ls_read_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_read_resolve_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_read_open_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_unarchive_restore_mode_failed("a", "b", &reason_sample("x")).key(),
+            eval_workdir_failed("p", &reason_sample("x")).key(),
+            eval_mkdir_resolve_failed("p", &reason_sample("x")).key(),
+            eval_mkdir_create_failed("p", &reason_sample("x")).key(),
+            eval_set_executable_failed("p", &reason_sample("x")).key(),
+            eval_ls_resolve_failed(Some("p"), &reason_sample("x")).key(),
+            eval_ls_read_failed("p", &reason_sample("x")).key(),
+            eval_read_resolve_failed("p", &reason_sample("x")).key(),
+            eval_read_open_failed("p", &reason_sample("x")).key(),
             eval_read_file_failed(&std::io::Error::other("x")).key(),
             eval_read_write_failed(&std::io::Error::other("x")).key(),
             eval_read_needs_stdin().key(),
             eval_read_line_needs_stdin().key(),
             eval_read_line_not_utf8(&String::from_utf8(vec![0xff]).unwrap_err()).key(),
-            eval_write_resolve_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_ensure_parent_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_write_file_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_write_resolve_failed("p", &reason_sample("x")).key(),
+            eval_ensure_parent_failed("p", &reason_sample("x")).key(),
+            eval_write_file_failed("p", &reason_sample("x")).key(),
             eval_write_needs_stdin("p").key(),
-            eval_write_open_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_write_stream_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_append_resolve_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_append_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_write_open_failed("p", &reason_sample("x")).key(),
+            eval_write_stream_failed("p", &reason_sample("x")).key(),
+            eval_append_resolve_failed("p", &reason_sample("x")).key(),
+            eval_append_failed("p", &reason_sample("x")).key(),
             eval_append_needs_stdin("p").key(),
-            eval_append_open_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_append_line_resolve_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_remove_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_append_open_failed("p", &reason_sample("x")).key(),
+            eval_append_line_resolve_failed("p", &reason_sample("x")).key(),
+            eval_remove_failed("p", &reason_sample("x")).key(),
             eval_remove_protected("p").key(),
             eval_remove_missing("p").key(),
             eval_remove_link_changed("p").key(),
-            eval_remove_not_empty_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_expand_resolve_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_expand_read_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_remove_not_empty_failed("p", &reason_sample("x")).key(),
+            eval_expand_resolve_failed("p", &reason_sample("x")).key(),
+            eval_expand_read_failed("p", &reason_sample("x")).key(),
             eval_expand_write_failed(&std::io::Error::other("x")).key(),
             eval_stream_write_failed(&std::io::Error::other("x")).key(),
             eval_expand_needs_stdin().key(),
-            eval_install_failed("a", "b", &anyhow::anyhow!("x")).key(),
+            eval_install_failed("a", "b", &reason_sample("x")).key(),
             eval_prompt_no_answer("m").key(),
             eval_prompt_write_failed("m", &std::io::Error::other("x")).key(),
             eval_prompt_flush_failed("m", &std::io::Error::other("x")).key(),
@@ -6892,8 +6944,8 @@ mod tests {
             .key(),
             coerce_string_to_pipe("x").key(),
             coerce_pipe_to_string().key(),
-            coerce_check_failed(&anyhow::anyhow!("x")).key(),
-            eval_host_return_failed(&anyhow::anyhow!("x")).key(),
+            coerce_check_failed(&reason_sample("x")).key(),
+            eval_host_return_failed(&reason_sample("x")).key(),
             eval_scope_underflow().key(),
             eval_redeclare_var("x").key(),
             eval_redeclare_const("x").key(),
@@ -6903,8 +6955,8 @@ mod tests {
             eval_undeclared("x").key(),
             eval_list_not_list("x", "STRING").key(),
             eval_list_value_not_list("x").key(),
-            eval_list_element_failed(&anyhow::anyhow!("x")).key(),
-            eval_scratch_materialize_failed(&anyhow::anyhow!("x")).key(),
+            eval_list_element_failed(&reason_sample("x")).key(),
+            eval_scratch_materialize_failed(&reason_sample("x")).key(),
             eval_task_cap_exceeded(64).key(),
             eval_const_arg_keypath().key(),
             eval_const_arg_bare_sigil("foo").key(),
@@ -6915,8 +6967,8 @@ mod tests {
             eval_template_keypath().key(),
             eval_template_bare_sigil("foo").key(),
             eval_template_placeholder_miss("unknown placeholder").key(),
-            std_pipe_read_failed("TEXT_REPLACE", &anyhow::anyhow!("x")).key(),
-            std_pipe_create_failed("TEXT_REPLACE", &anyhow::anyhow!("x")).key(),
+            std_pipe_read_failed("TEXT_REPLACE", &reason_sample("x")).key(),
+            std_pipe_create_failed("TEXT_REPLACE", &reason_sample("x")).key(),
             std_pipe_spawn_failed("TEXT_REPLACE", &std::io::Error::other("x")).key(),
             std_pipe_reader_lock_poisoned("TEXT_REPLACE").key(),
             std_pipe_writer_lock_poisoned("TEXT_REPLACE").key(),
@@ -6951,8 +7003,8 @@ mod tests {
             eval_is_exec_needs_string().key(),
             eval_path_writable_needs_arg().key(),
             eval_path_writable_needs_string().key(),
-            eval_path_resolve_failed("p", &anyhow::anyhow!("x")).key(),
-            eval_workdir_resolve_failed(&anyhow::anyhow!("x")).key(),
+            eval_path_resolve_failed("p", &reason_sample("x")).key(),
+            eval_workdir_resolve_failed(&reason_sample("x")).key(),
             std_text_invalid_pattern("TEXT_MATCH", "[", &regex_err_sample()).key(),
             std_text_needs_search("TEXT_REPLACE").key(),
             std_text_needs_needle("TEXT_COUNT").key(),
@@ -6970,22 +7022,22 @@ mod tests {
             .key(),
             std_load_toml_needs_arg().key(),
             std_load_toml_needs_string().key(),
-            std_load_toml_resolve_failed("p", &anyhow::anyhow!("x")).key(),
-            std_load_toml_read_failed("p", &anyhow::anyhow!("x")).key(),
+            std_load_toml_resolve_failed("p", &reason_sample("x")).key(),
+            std_load_toml_read_failed("p", &reason_sample("x")).key(),
             std_load_toml_not_utf8("p", &utf8_err_sample()).key(),
             std_toml_parse_failed(&toml::from_str::<serde_json::Value>("a = ").unwrap_err()).key(),
             std_parse_toml_needs_string("INT").key(),
             std_load_json_needs_arg().key(),
             std_load_json_needs_string().key(),
-            std_load_json_resolve_failed("p", &anyhow::anyhow!("x")).key(),
-            std_load_json_read_failed("p", &anyhow::anyhow!("x")).key(),
+            std_load_json_resolve_failed("p", &reason_sample("x")).key(),
+            std_load_json_read_failed("p", &reason_sample("x")).key(),
             std_load_json_not_utf8("p", &utf8_err_sample()).key(),
             std_json_parse_failed(&serde_json::from_str::<serde_json::Value>("{bad").unwrap_err())
                 .key(),
             std_parse_json_needs_string("INT").key(),
             std_glob_needs_arg().key(),
             std_glob_needs_string().key(),
-            std_glob_resolve_failed(&anyhow::anyhow!("x")).key(),
+            std_glob_resolve_failed(&reason_sample("x")).key(),
             std_glob_list_failed(&std::io::Error::other("x")).key(),
             std_has_key_needs_map("INT").key(),
             std_map_set_needs_map("INT").key(),
@@ -7051,7 +7103,7 @@ mod tests {
             "F() unknown option 'k' (expected: a, b)"
         );
         assert_eq!(
-            check_option_value(&anyhow::anyhow!("F() option 'k': expected INT, got STRING"))
+            check_option_value(&reason_sample("F() option 'k': expected INT, got STRING"))
                 .message(),
             "F() option 'k': expected INT, got STRING"
         );
@@ -7087,7 +7139,7 @@ mod tests {
             "function `F`: REMOVE x: no such file or directory"
         );
         assert_eq!(
-            eval_call_failed("F", &anyhow::anyhow!("boom")).message(),
+            eval_call_failed("F", &reason_sample("boom")).message(),
             "function `F` failed"
         );
         assert_eq!(
@@ -7171,7 +7223,7 @@ mod tests {
             "PARSE_ARGS missing required flag --f"
         );
         assert_eq!(
-            std_parse_args_arg_shape(&anyhow::anyhow!(
+            std_parse_args_arg_shape(&reason_sample(
                 "PARSE_FLAGS() argument `$args`: expected LIST<STRING>, got INT"
             ))
             .message(),
@@ -7250,15 +7302,15 @@ mod tests {
             "expected int, got \"12x\""
         );
         assert_eq!(
-            eval_int_arg_resolve(&anyhow::anyhow!("undefined variable `$x`")).message(),
+            eval_int_arg_resolve(&reason_sample("undefined variable `$x`")).message(),
             "undefined variable `$x`"
         );
         assert_eq!(
-            eval_dispatch_failed(&anyhow::anyhow!("boom")).message(),
+            eval_dispatch_failed(&reason_sample("boom")).message(),
             "boom"
         );
         assert_eq!(
-            eval_pipe_assertion_read_failed(&anyhow::anyhow!("boom")).message(),
+            eval_pipe_assertion_read_failed(&reason_sample("boom")).message(),
             "step pipe assertion cannot read pipe: boom"
         );
         assert_eq!(
@@ -7494,7 +7546,7 @@ mod tests {
             "REMOTE fetch source missing: a/b"
         );
         assert_eq!(
-            eval_remote_fetch_missing("a/b", Some(&anyhow::anyhow!("gone"))).message(),
+            eval_remote_fetch_missing("a/b", Some(&reason_sample("gone"))).message(),
             "REMOTE fetch source missing: a/b (gone)"
         );
         assert_eq!(
@@ -7518,11 +7570,11 @@ mod tests {
             "REMOTE 't' transport failed"
         );
         assert_eq!(
-            eval_remote_push_destination_escapes("a", &anyhow::anyhow!("gone")).message(),
+            eval_remote_push_destination_escapes("a", &reason_sample("gone")).message(),
             "REMOTE push symlink destination \"a\" escapes the workspace: gone"
         );
         assert_eq!(
-            eval_remote_push_target_outside("a", &anyhow::anyhow!("gone")).message(),
+            eval_remote_push_target_outside("a", &reason_sample("gone")).message(),
             "REMOTE push symlink \"a\" points outside the workspace: gone"
         );
         assert_eq!(
@@ -7559,12 +7611,12 @@ mod tests {
                 .starts_with("ASSERT pipe content is not UTF-8: ")
         );
         assert!(
-            eval_run_spawn_failed("echo hi", &anyhow::anyhow!("boom"))
+            eval_run_spawn_failed("echo hi", &reason_sample("boom"))
                 .message()
                 .starts_with("RUN echo hi: ")
         );
         assert!(
-            eval_run_argv_spawn_failed(&["echo".to_string()], &anyhow::anyhow!("boom"))
+            eval_run_argv_spawn_failed(&["echo".to_string()], &reason_sample("boom"))
                 .message()
                 .starts_with("RUN [\"echo\"]: ")
         );
@@ -7593,12 +7645,12 @@ mod tests {
             "SLEEP interrupted by cancellation"
         );
         assert!(
-            eval_copy_failed("a", "b", &anyhow::anyhow!("boom"))
+            eval_copy_failed("a", "b", &reason_sample("boom"))
                 .message()
                 .starts_with("COPY a b: ")
         );
         assert!(
-            eval_copy_git_failed("r", "a", "b", &anyhow::anyhow!("boom"))
+            eval_copy_git_failed("r", "a", "b", &reason_sample("boom"))
                 .message()
                 .starts_with("COPY_GIT r a b: ")
         );
@@ -7607,12 +7659,12 @@ mod tests {
             "COPY source has no file name: /x"
         );
         assert!(
-            eval_copy_destination_escapes("/x", &anyhow::anyhow!("boom"))
+            eval_copy_destination_escapes("/x", &reason_sample("boom"))
                 .message()
                 .starts_with("COPY destination escapes root: /x: ")
         );
         assert_eq!(
-            eval_symlink_failed("a", "b", &anyhow::anyhow!("boom")).message(),
+            eval_symlink_failed("a", "b", &reason_sample("boom")).message(),
             "SYMLINK a b"
         );
         assert_eq!(
@@ -7620,7 +7672,7 @@ mod tests {
             "SYMLINK source has no file name: a"
         );
         assert_eq!(
-            eval_archive_failed("a", "b", &anyhow::anyhow!("boom")).message(),
+            eval_archive_failed("a", "b", &reason_sample("boom")).message(),
             "ARCHIVE a b"
         );
         assert_eq!(
@@ -7644,11 +7696,11 @@ mod tests {
             "ARCHIVE a a/b: destination \"a/b\" cannot overwrite inside the packed tree"
         );
         assert_eq!(
-            eval_unarchive_failed("a", "b", &anyhow::anyhow!("boom")).message(),
+            eval_unarchive_failed("a", "b", &reason_sample("boom")).message(),
             "UNARCHIVE a b"
         );
         assert_eq!(
-            eval_unarchive_member_failed("a", "b", &anyhow::anyhow!("boom")).message(),
+            eval_unarchive_member_failed("a", "b", &reason_sample("boom")).message(),
             "UNARCHIVE a b: member"
         );
         assert_eq!(
@@ -7682,43 +7734,43 @@ mod tests {
             "UNARCHIVE a b: member: refuses symlink member \"p\" -> \"t\""
         );
         assert_eq!(
-            eval_unarchive_restore_mode_failed("a", "b", &anyhow::anyhow!("boom")).message(),
+            eval_unarchive_restore_mode_failed("a", "b", &reason_sample("boom")).message(),
             "UNARCHIVE a b: restoring mode"
         );
         assert_eq!(
-            eval_workdir_failed("sub", &anyhow::anyhow!("boom")).message(),
+            eval_workdir_failed("sub", &reason_sample("boom")).message(),
             "WORKDIR sub"
         );
         assert_eq!(
-            eval_mkdir_resolve_failed("d", &anyhow::anyhow!("boom")).message(),
+            eval_mkdir_resolve_failed("d", &reason_sample("boom")).message(),
             "MKDIR d"
         );
         assert_eq!(
-            eval_mkdir_create_failed("/x", &anyhow::anyhow!("boom")).message(),
+            eval_mkdir_create_failed("/x", &reason_sample("boom")).message(),
             "failed to create dir /x"
         );
         assert_eq!(
-            eval_set_executable_failed("bin", &anyhow::anyhow!("boom")).message(),
+            eval_set_executable_failed("bin", &reason_sample("boom")).message(),
             "SET_EXECUTABLE bin"
         );
         assert_eq!(
-            eval_ls_resolve_failed(Some("dir"), &anyhow::anyhow!("boom")).message(),
+            eval_ls_resolve_failed(Some("dir"), &reason_sample("boom")).message(),
             "LS dir"
         );
         assert_eq!(
-            eval_ls_resolve_failed(None, &anyhow::anyhow!("boom")).message(),
+            eval_ls_resolve_failed(None, &reason_sample("boom")).message(),
             "LS"
         );
         assert_eq!(
-            eval_ls_read_failed("/x", &anyhow::anyhow!("boom")).message(),
+            eval_ls_read_failed("/x", &reason_sample("boom")).message(),
             "LS /x"
         );
         assert_eq!(
-            eval_read_resolve_failed("f", &anyhow::anyhow!("boom")).message(),
+            eval_read_resolve_failed("f", &reason_sample("boom")).message(),
             "READ f"
         );
         assert_eq!(
-            eval_read_open_failed("/x", &anyhow::anyhow!("boom")).message(),
+            eval_read_open_failed("/x", &reason_sample("boom")).message(),
             "failed to open /x"
         );
         assert_eq!(
@@ -7742,15 +7794,15 @@ mod tests {
             "READ_LINE received non-UTF8 bytes"
         );
         assert_eq!(
-            eval_write_resolve_failed("f", &anyhow::anyhow!("boom")).message(),
+            eval_write_resolve_failed("f", &reason_sample("boom")).message(),
             "WRITE f"
         );
         assert_eq!(
-            eval_ensure_parent_failed("/x", &anyhow::anyhow!("boom")).message(),
+            eval_ensure_parent_failed("/x", &reason_sample("boom")).message(),
             "failed to create parent for /x"
         );
         assert_eq!(
-            eval_write_file_failed("/x", &anyhow::anyhow!("boom")).message(),
+            eval_write_file_failed("/x", &reason_sample("boom")).message(),
             "failed to write /x"
         );
         assert_eq!(
@@ -7758,19 +7810,19 @@ mod tests {
             "WRITE f requires stdin (use WITH_IO [stdin=...] WRITE)"
         );
         assert_eq!(
-            eval_write_open_failed("/x", &anyhow::anyhow!("boom")).message(),
+            eval_write_open_failed("/x", &reason_sample("boom")).message(),
             "failed to open /x for writing"
         );
         assert_eq!(
-            eval_write_stream_failed("/x", &anyhow::anyhow!("boom")).message(),
+            eval_write_stream_failed("/x", &reason_sample("boom")).message(),
             "failed to write to /x"
         );
         assert_eq!(
-            eval_append_resolve_failed("f", &anyhow::anyhow!("boom")).message(),
+            eval_append_resolve_failed("f", &reason_sample("boom")).message(),
             "APPEND f"
         );
         assert_eq!(
-            eval_append_failed("/x", &anyhow::anyhow!("boom")).message(),
+            eval_append_failed("/x", &reason_sample("boom")).message(),
             "failed to append to /x"
         );
         assert_eq!(
@@ -7778,15 +7830,15 @@ mod tests {
             "APPEND f requires stdin (use WITH_IO [stdin=...] APPEND)"
         );
         assert_eq!(
-            eval_append_open_failed("/x", &anyhow::anyhow!("boom")).message(),
+            eval_append_open_failed("/x", &reason_sample("boom")).message(),
             "failed to open /x for appending"
         );
         assert_eq!(
-            eval_append_line_resolve_failed("f", &anyhow::anyhow!("boom")).message(),
+            eval_append_line_resolve_failed("f", &reason_sample("boom")).message(),
             "APPEND_LINE f"
         );
         assert_eq!(
-            eval_remove_failed("f", &anyhow::anyhow!("boom")).message(),
+            eval_remove_failed("f", &reason_sample("boom")).message(),
             "REMOVE f"
         );
         assert_eq!(
@@ -7802,15 +7854,15 @@ mod tests {
             "REMOVE f: link changed during removal"
         );
         assert_eq!(
-            eval_remove_not_empty_failed("f", &anyhow::anyhow!("boom")).message(),
+            eval_remove_not_empty_failed("f", &reason_sample("boom")).message(),
             "REMOVE f: directory not empty (use --recursive)"
         );
         assert_eq!(
-            eval_expand_resolve_failed("f", &anyhow::anyhow!("boom")).message(),
+            eval_expand_resolve_failed("f", &reason_sample("boom")).message(),
             "EXPAND f"
         );
         assert_eq!(
-            eval_expand_read_failed("/x", &anyhow::anyhow!("boom")).message(),
+            eval_expand_read_failed("/x", &reason_sample("boom")).message(),
             "failed to read /x"
         );
         assert_eq!(
@@ -7826,7 +7878,7 @@ mod tests {
             "EXPAND requires stdin when no file path is given (use WITH_IO [stdin=...] EXPAND)"
         );
         assert_eq!(
-            eval_install_failed("a", "b", &anyhow::anyhow!("boom")).message(),
+            eval_install_failed("a", "b", &reason_sample("boom")).message(),
             "INSTALL a b"
         );
         assert_eq!(
@@ -7903,11 +7955,8 @@ mod tests {
             coerce_pipe_to_string().message(),
             "coercion: TypeMismatch: expected STRING, got PIPE: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: STRING = ... instead."
         );
-        assert_eq!(coerce_check_failed(&anyhow::anyhow!("x")).message(), "x");
-        assert_eq!(
-            eval_host_return_failed(&anyhow::anyhow!("x")).message(),
-            "x"
-        );
+        assert_eq!(coerce_check_failed(&reason_sample("x")).message(), "x");
+        assert_eq!(eval_host_return_failed(&reason_sample("x")).message(), "x");
         assert_eq!(
             eval_scope_underflow().message(),
             "scope stack underflow during pop"
@@ -7941,12 +7990,9 @@ mod tests {
             eval_list_value_not_list("x").message(),
             "LIST_APPEND $x: variable is not a LIST value"
         );
+        assert_eq!(eval_list_element_failed(&reason_sample("x")).message(), "x");
         assert_eq!(
-            eval_list_element_failed(&anyhow::anyhow!("x")).message(),
-            "x"
-        );
-        assert_eq!(
-            eval_scratch_materialize_failed(&anyhow::anyhow!("x")).message(),
+            eval_scratch_materialize_failed(&reason_sample("x")).message(),
             "x"
         );
         assert_eq!(
@@ -7994,11 +8040,11 @@ mod tests {
             "unknown placeholder function `M::F`"
         );
         assert_eq!(
-            std_pipe_read_failed("TEXT_REPLACE", &anyhow::anyhow!("denied")).message(),
+            std_pipe_read_failed("TEXT_REPLACE", &reason_sample("denied")).message(),
             "TEXT_REPLACE cannot read PIPE input: denied"
         );
         assert_eq!(
-            std_pipe_create_failed("TEXT_REPLACE", &anyhow::anyhow!("denied")).message(),
+            std_pipe_create_failed("TEXT_REPLACE", &reason_sample("denied")).message(),
             "TEXT_REPLACE cannot create PIPE output: denied"
         );
         assert_eq!(
@@ -8126,11 +8172,11 @@ mod tests {
             "PATH_WRITABLE path argument must evaluate to a string"
         );
         assert_eq!(
-            eval_path_resolve_failed("p", &anyhow::anyhow!("denied")).message(),
+            eval_path_resolve_failed("p", &reason_sample("denied")).message(),
             "failed to resolve path 'p': denied"
         );
         assert_eq!(
-            eval_workdir_resolve_failed(&anyhow::anyhow!("denied")).message(),
+            eval_workdir_resolve_failed(&reason_sample("denied")).message(),
             "failed to resolve working directory: denied"
         );
         assert!(
@@ -8192,11 +8238,11 @@ mod tests {
             "LOAD_TOML path argument must evaluate to a string"
         );
         assert_eq!(
-            std_load_toml_resolve_failed("p", &anyhow::anyhow!("denied")).message(),
+            std_load_toml_resolve_failed("p", &reason_sample("denied")).message(),
             "failed to resolve TOML path 'p': denied"
         );
         assert_eq!(
-            std_load_toml_read_failed("p", &anyhow::anyhow!("denied")).message(),
+            std_load_toml_read_failed("p", &reason_sample("denied")).message(),
             "failed to read TOML file 'p': denied"
         );
         assert_eq!(
@@ -8216,11 +8262,11 @@ mod tests {
             "LOAD_JSON path argument must evaluate to a string"
         );
         assert_eq!(
-            std_load_json_resolve_failed("p", &anyhow::anyhow!("denied")).message(),
+            std_load_json_resolve_failed("p", &reason_sample("denied")).message(),
             "failed to resolve JSON path 'p': denied"
         );
         assert_eq!(
-            std_load_json_read_failed("p", &anyhow::anyhow!("denied")).message(),
+            std_load_json_read_failed("p", &reason_sample("denied")).message(),
             "failed to read JSON file 'p': denied"
         );
         assert_eq!(
@@ -8240,7 +8286,7 @@ mod tests {
             "GLOB pattern argument must evaluate to a string"
         );
         assert_eq!(
-            std_glob_resolve_failed(&anyhow::anyhow!("denied")).message(),
+            std_glob_resolve_failed(&reason_sample("denied")).message(),
             "denied"
         );
         assert_eq!(
@@ -8495,7 +8541,7 @@ mod tests {
             "step 3: RETURN outside function, ASYNC task, or LET block"
         );
         assert_eq!(mcp_unknown_tool("FOO").message(), "unknown MCP tool `FOO`");
-        let err = anyhow::anyhow!("boom");
+        let err = reason_sample("boom");
         assert_eq!(mcp_call_failed(&err, "", "").message(), "boom");
         assert_eq!(
             mcp_call_failed(&err, "out", "oops").message(),
@@ -8524,12 +8570,12 @@ mod tests {
         );
         assert!(import_not_found("f").message().contains("not found"));
         assert!(
-            import_cannot_resolve("f", &anyhow::anyhow!("root"))
+            import_cannot_resolve("f", &reason_sample("root"))
                 .message()
                 .contains("cannot be resolved")
         );
         assert!(
-            import_cannot_read("f", &anyhow::anyhow!("root"))
+            import_cannot_read("f", &reason_sample("root"))
                 .message()
                 .contains("cannot be read")
         );

@@ -178,7 +178,9 @@ impl ThreadJoinHandle {
                         self.thread_context = outer;
                     }
                     None => {
-                        self.thread_error = Some(step_diag::eval_dispatch_failed(&e));
+                        self.thread_error = Some(step_diag::eval_dispatch_failed(
+                            &super::args::lift_dispatch_error(e),
+                        ));
                     }
                 }
             }
@@ -338,9 +340,11 @@ pub(super) fn resolve_assert_target<P: ProcessManager>(
         AssertTarget::Value(arg) => {
             let value = super::args::evaluate_assert_operand(arg, cx)?;
             if let Some(handle) = value.as_pipe_handle() {
-                let bytes = cx.state.io.peek_pipe_content(&handle).map_err(|e| {
-                    step_diag::eval_pipe_assertion_read_failed(&anyhow::Error::from(e))
-                })?;
+                let bytes = cx
+                    .state
+                    .io
+                    .peek_pipe_content(&handle)
+                    .map_err(|e| step_diag::eval_pipe_assertion_read_failed(&e))?;
                 return Ok(ResolvedAssertTarget::Pipe(bytes));
             }
             Ok(ResolvedAssertTarget::Value(value))
@@ -555,9 +559,7 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
         self.state
             .cargo_scratch
             .ensure_materialized()
-            .map_err(|err| {
-                super::diagnostics::eval_scratch_materialize_failed(&anyhow::Error::from(err))
-            })
+            .map_err(|err| super::diagnostics::eval_scratch_materialize_failed(&err))
     }
 
     /// Current working directory (guarded; stays inside the workspace).

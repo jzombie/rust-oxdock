@@ -181,7 +181,7 @@ All sites already use keyed ctors; flip signatures to
       and A5/B6) so every site builds a keyed `Diagnostic`.
       Decision: REOPENED. No permanent stay; redesign then
       convert, with reclaim + frame-preservation pins.
-- [ ] B4 `oxdock-fs` conversion (~200 sites: `io.rs` 68,
+- [x] B4 `oxdock-fs` conversion (~200 sites: `io.rs` 68,
       `backend.rs` 37, `copy.rs` 27, `git/` 27, `install.rs`
       12, `path.rs` 10, ...). Permanent exclusion is REVOKED
       under the compliance rule (affirms-#345 close is
@@ -191,6 +191,8 @@ All sites already use keyed ctors; flip signatures to
       `DiagnosticResult`, file-sized bulks with the A1 pattern.
       No literals ship; no `anyhow` construction remains.
       Decision: REOPENED. Convert; exclusion is not an option.
+      Outcome (2026-11-28): COMPLETE via B4a-B4l; every fs
+      production file returns `DiagnosticResult`.
 - [x] B5 `ForwardError` redesign (small, self-contained, no
       input needed): `chase_const_forward` ->
       `DiagnosticResult`; unblocks `import_const_forward_failed`
@@ -1744,3 +1746,61 @@ prior "permanent / accept-as-is / won't-fix" closes are revoked.
   diagnostics tests), `cargo clippy --workspace
   --all-targets` clean (zero warnings), `rustfmt
   --edition 2024 --check` clean on all 16 touched files.
+
+- B4l (2026-11-28): fs io cluster (eleventh and final B4
+  bulk). `io.rs` carried the last fs-surface bridges: 19
+  bare-std `.map_err(anyhow::Error::from)
+  .map_err(from_anyhow)` pairs now route through new confined
+  `lift_io_err`/`lift_io_ctx` helpers (mirroring
+  `access.rs`/`copy.rs`); the one non-io pair
+  (`String::from_utf8` in the miri `read_to_string`)
+  collapses to a single-map transport; 3 inline
+  `from_anyhow(...).with_contexts(...)` transports route
+  through `lift_io_ctx` (single ownership). Zero banned
+  constructs remain in `io.rs`. `policy.rs` verified
+  clean (0 anyhow mentions, no conversion needed). B4
+  COMPLETE: every fs production file returns
+  `DiagnosticResult`; remaining fs `anyhow` mentions are
+  the `from_anyhow` owner, lift-helper transports, doc
+  comments, and test-only `anyhow::Result` scaffolding.
+  Gates: `cargo test -p oxdock-fs` green
+  (72 + 8 + 4 + 1), full `cargo test --workspace` green
+  (93 targets, 2717 passed, 0 failed), `cargo clippy
+  --workspace --all-targets` clean (zero warnings),
+  `rustfmt --edition 2024 --check` clean.
+
+- C2 (2026-11-28): exec core ctor flip (first ctor-flip bulk).
+  All 60 `exec/diagnostics.rs` ctors `reason: &anyhow::Error`
+  to `&Diagnostic` (incl. the `Option` variant); new verbatim
+  `eval_dispatch_fallback(&str)` owner for the lift fallback;
+  `reason_sample` test helper; 90 B4k cascade adapters unwrapped;
+  51 genuine lifts via `lift_dispatch_error` (`.into()` for io
+  sources, direct passthrough for native). Rendering regression
+  surfaced by `task_poll_unknown_id_fails`: the old
+  `{anyhow:#}` flattened the whole chain into each layer's
+  text, the new `{Diagnostic}` rendered one layer, so the
+  `not found` cause dropped out of `to_string()`. Drawing-board
+  fix (no test-only shape pins): single-owner chain joining.
+  Production renders via `anyhow` `{:#}` (`oxdock/src/main.rs`);
+  that join owns the chain, so `Diagnostic` `Display` stays
+  one layer (a walk here prints every cause twice, proven by
+  4 pin failures plus the production render path). Bare-message
+  wrappers keep the child object as source (chain join renders
+  the depth; 6 `&std::io::Error` sites rebuild via
+  `Error::new(kind, to_string())` since this toolchain's
+  `io::Error` has no `Clone`). Inlining wrappers (message
+  embeds the cause, sourceless since HEAD) regain full-chain
+  text through the new `flatten_chain` owner (`": "`-join over
+  one-layer node texts, byte-identical to the old
+  `{anyhow:#}` flattening); `eval_dispatch_failed` and
+  `eval_remote_fetch_missing` revert to sourceless (the
+  `snapshot_outer_without_exit_has_no_source` pin demands
+  sourceless fallback). A `Display`-walk attempt was
+  implemented, verified duplicating, and reverted. Gates:
+  full `cargo test --workspace` green (93 targets, 2717
+  passed, 0 failed), `cargo clippy --workspace
+  --all-targets` clean (zero warnings), `rustfmt --edition
+  2024 --check` clean on all 15 touched files. Tally update:
+  B4 checked above leaves B: 1 open (B3); the §E AMEND-entry
+  count (B: 2) is that entry's point-in-time record and stays
+  untouched.

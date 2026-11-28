@@ -63,7 +63,7 @@ pub(crate) fn check_host_return_value(
     };
     let filled = fill_record_defaults(slot, value);
     oxdock_parser::check_value_at(slot, &filled, ctx)
-        .map_err(|err| args_diag::eval_host_return_failed(&err))
+        .map_err(|err| args_diag::eval_host_return_failed(&lift_dispatch_error(err)))
 }
 
 /// Narrow a `STRING|PATH` word to display text: strings verbatim,
@@ -178,7 +178,7 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> DiagnosticResult
     // through `check_value_at`; declarations match them now).
     if let Err(err) = oxdock_parser::check_value(expected, &value) {
         if matches!(expected, TypeTag::ListOf(_) | TypeTag::Record(_)) {
-            return Err(args_diag::coerce_check_failed(&err));
+            return Err(args_diag::coerce_check_failed(&lift_dispatch_error(err)));
         }
     } else {
         return Ok(value);
@@ -380,7 +380,12 @@ pub(crate) fn lift_dispatch_error(err: anyhow::Error) -> Diagnostic {
             if cause.downcast_ref::<Diagnostic>().is_some() {
                 break;
             }
-            if cause.downcast_ref::<super::exit::ExitRequest>().is_none() {
+            if cause.downcast_ref::<super::exit::ExitRequest>().is_none()
+                // Transport echoes (`anyhow::Error::from(diag)`)
+                // restate the reclaimed message verbatim; keeping
+                // them would print every cause twice.
+                && cause.to_string() != found.message()
+            {
                 outer_frames.push(cause.to_string());
             }
         }
@@ -405,7 +410,7 @@ pub(crate) fn lift_dispatch_error(err: anyhow::Error) -> Diagnostic {
         }
         return args_diag::eval_exit_requested(code).with_contexts(outer_frames);
     }
-    args_diag::eval_dispatch_failed(&err)
+    args_diag::eval_dispatch_fallback(&format!("{err:#}"))
 }
 
 /// Resolve an [`Arg`] : handles all variants.
@@ -480,8 +485,7 @@ pub(crate) fn resolve_arg_as_int<P: ProcessManager>(
     arg: &Arg,
     cx: &mut StepCtx<'_, P>,
 ) -> DiagnosticResult<i64> {
-    let resolved = resolve_arg(arg, cx)
-        .map_err(|err| args_diag::eval_int_arg_resolve(&anyhow::Error::from(err)))?;
+    let resolved = resolve_arg(arg, cx).map_err(|err| args_diag::eval_int_arg_resolve(&err))?;
     oxdock_parser::command::strip_digit_separators(&resolved)
         .parse::<i64>()
         .map_err(|_| args_diag::eval_expected_int(&resolved))
@@ -647,7 +651,7 @@ pub(crate) fn path_type_from_value<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, &path_str)
-        .map_err(|err| args_diag::eval_path_resolve_failed(&path_str, &anyhow::Error::from(err)))?;
+        .map_err(|err| args_diag::eval_path_resolve_failed(&path_str, &err))?;
     let kind = match cx.state.fs.entry_kind_no_follow(&target) {
         Ok(EntryKind::Symlink) => "symlink",
         Ok(EntryKind::File) => "file",
@@ -868,7 +872,7 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, &path_str)
-        .map_err(|err| args_diag::eval_path_resolve_failed(&path_str, &anyhow::Error::from(err)))?;
+        .map_err(|err| args_diag::eval_path_resolve_failed(&path_str, &err))?;
     let mut current = target;
     loop {
         match cx.state.fs.entry_kind_no_follow(&current) {
@@ -884,9 +888,11 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
                 };
                 if parent.as_path().as_os_str().is_empty() {
                     let cwd = cx.state.cwd.clone();
-                    let anchor = cx.state.fs.resolve_write(&cwd, ".").map_err(|err| {
-                        args_diag::eval_workdir_resolve_failed(&anyhow::Error::from(err))
-                    })?;
+                    let anchor = cx
+                        .state
+                        .fs
+                        .resolve_write(&cwd, ".")
+                        .map_err(|err| args_diag::eval_workdir_resolve_failed(&err))?;
                     return Ok(Value::bool(probe_dir_writable(cx, &anchor)));
                 }
                 current = parent;
@@ -1482,7 +1488,7 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
         .state
         .fs
         .resolve_read(&cx.state.cwd, ".")
-        .map_err(|err| args_diag::std_glob_resolve_failed(&anyhow::Error::from(err)))?;
+        .map_err(|err| args_diag::std_glob_resolve_failed(&err))?;
     let root = cx.state.fs.root().clone();
     let root_path = root.as_path().to_path_buf();
     let mut entries: Vec<Value> = root
@@ -1516,12 +1522,12 @@ pub(crate) fn load_toml_from_value<P: ProcessManager>(
         .state
         .fs
         .resolve_read(&cx.state.cwd, &path_str)
-        .map_err(|err| {
-            args_diag::std_load_toml_resolve_failed(&path_str, &anyhow::Error::from(err))
-        })?;
-    let content = cx.state.fs.read_file(&target).map_err(|err| {
-        args_diag::std_load_toml_read_failed(&path_str, &anyhow::Error::from(err))
-    })?;
+        .map_err(|err| args_diag::std_load_toml_resolve_failed(&path_str, &err))?;
+    let content = cx
+        .state
+        .fs
+        .read_file(&target)
+        .map_err(|err| args_diag::std_load_toml_read_failed(&path_str, &err))?;
     let content_str = std::str::from_utf8(&content)
         .map_err(|err| args_diag::std_load_toml_not_utf8(&path_str, &err))?;
     load_toml_value(content_str)
@@ -1543,12 +1549,12 @@ pub(crate) fn load_json_from_value<P: ProcessManager>(
         .state
         .fs
         .resolve_read(&cx.state.cwd, &path_str)
-        .map_err(|err| {
-            args_diag::std_load_json_resolve_failed(&path_str, &anyhow::Error::from(err))
-        })?;
-    let content = cx.state.fs.read_file(&target).map_err(|err| {
-        args_diag::std_load_json_read_failed(&path_str, &anyhow::Error::from(err))
-    })?;
+        .map_err(|err| args_diag::std_load_json_resolve_failed(&path_str, &err))?;
+    let content = cx
+        .state
+        .fs
+        .read_file(&target)
+        .map_err(|err| args_diag::std_load_json_read_failed(&path_str, &err))?;
     let content_str = std::str::from_utf8(&content)
         .map_err(|err| args_diag::std_load_json_not_utf8(&path_str, &err))?;
     load_json_value(content_str)
@@ -2301,11 +2307,11 @@ pub(crate) fn mirror_stream<P: ProcessManager>(
     }
     let reader = cx
         .pipe_reader(value)
-        .map_err(|err| args_diag::std_pipe_read_failed(func, &anyhow::Error::new(err)))?;
+        .map_err(|err| args_diag::std_pipe_read_failed(func, &err))?;
     let output = cx.new_pipe();
     let writer = cx
         .pipe_writer(&output)
-        .map_err(|err| args_diag::std_pipe_create_failed(func, &anyhow::Error::new(err)))?;
+        .map_err(|err| args_diag::std_pipe_create_failed(func, &err))?;
     let cancelled = cx.cancel_token();
     let thread_name = format!("oxdock-text-{func}-pump");
     std::thread::Builder::new()
@@ -2741,7 +2747,7 @@ pub(crate) fn read_pipe_eager<P: ProcessManager>(
     }
     let reader = cx
         .pipe_reader(value)
-        .map_err(|err| args_diag::std_pipe_read_failed(func, &anyhow::Error::new(err)))?;
+        .map_err(|err| args_diag::std_pipe_read_failed(func, &err))?;
     let spill = SpillBuffer::new();
     let mut carry = Vec::new();
     let mut chunk = [0u8; super::io::CHUNK_SIZE];
@@ -2783,7 +2789,7 @@ pub(crate) fn write_completed_pipe<P: ProcessManager>(
     let pipe = cx.new_pipe();
     let writer = cx
         .pipe_writer(&pipe)
-        .map_err(|err| args_diag::std_pipe_create_failed(func, &anyhow::Error::new(err)))?;
+        .map_err(|err| args_diag::std_pipe_create_failed(func, &err))?;
     {
         let mut guard = writer
             .lock()

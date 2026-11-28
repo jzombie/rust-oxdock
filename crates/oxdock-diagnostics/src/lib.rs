@@ -363,6 +363,13 @@ impl fmt::Display for Diagnostic {
                 }
             }
         }
+        // Rendered causes: the common path renders one layer only.
+        // Chain joining belongs to a single owner (`anyhow` `{:#}`
+        // over the source chain, matching the production CLI render
+        // in `oxdock/src/main.rs`): every wrapper keeps its child as
+        // a chained source with a bare message, so `{:#}` prints each
+        // layer exactly once. Walking sources here as well would
+        // print every cause twice (once inline, once joined).
         Ok(())
     }
 }
